@@ -1,0 +1,29 @@
+dirs:
+  inputs: inputs/
+  expected: expected/
+
+# This solution answers via stdout — the judge reads run.stdout.
+declared_outputs:
+  - stdout
+
+cases:
+  - id: contains_basic
+    description: stdout contains the substring (case-insensitive)
+    tags: [smoke]
+
+  - id: exact_match
+    description: stdout matches exactly (after strip)
+
+  - id: exit_code_failure
+    description: exit code is 1 when the message field is missing
+
+  - id: skipped_example
+    description: example of a skipped case
+    skip: true
+    tags: [wip]
+
+judge:
+  cmd: uv run python judge.py
+
+grader:
+  cmd: uv run python grader.py

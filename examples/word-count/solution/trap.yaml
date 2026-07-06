@@ -1,0 +1,14 @@
+cmd: uv run python word_count.py
+stdin: text.txt
+# Self-reported engine identity — strict (model/framework only), surfaced on the
+# run detail page so the leaderboard isn't a black box. Edit to describe your run.
+profile:
+  framework: stdlib-python
+# Free-form author notes: tolerated but never written to the report.
+extra:
+  notes: reference solution, pure stdlib
+
+tasks:
+  # Local task alias = trapstreet task_id, so `tp submit` Just Works.
+  word-count:
+    source: ../task

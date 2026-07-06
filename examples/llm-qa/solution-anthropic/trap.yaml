@@ -1,0 +1,7 @@
+cmd: sh -c 'set -a && . .env && set +a && uv run solution.py'
+profile:
+  model: claude-sonnet-4-20250514
+
+tasks:
+  test:
+    source: ../task

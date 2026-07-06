@@ -1,0 +1,274 @@
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Annotated
+
+import typer
+from rich.console import Console
+
+from trap.auth import DEFAULT_SERVER, ApiClient, ApiError, AuthStore
+from trap.cli._auth import auth_app
+from trap.display import CaseProgress, render_submit_result
+from trap.environment import EnvironmentDetector
+from trap.git_ops import GitOpsError, LocalRepo, ParsedGitUrl
+from trap.loader import ConfigError, TrapLoader, TraptaskLoader
+from trap.models import Provenance
+from trap.report import OutputFormat, ReportHandle, renderer_factory
+from trap.runner import TaskRunner
+
+app = typer.Typer(help="AI prompt / agent / workflow / testing framework.")
+app.add_typer(auth_app, name="auth")
+console = Console()
+
+
+def _die(msg: object) -> typer.Exit:
+    """Print an error and return an Exit(2) to raise."""
+    console.print(f"[red]error[/red]: {msg}")
+    return typer.Exit(code=2)
+
+
+def _env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _confirm_remote(url: str, *, trust: bool) -> None:
+    """Gate trap's auto-download-and-run of a remote (git+ URL) source — the one place
+    trap fetches and executes code the user may not have seen. Returns to proceed;
+    raises to abort. Bypassed by --trust-remote / TRAP_TRUST_REMOTE (for CI / repeated
+    runs); refuses (rather than running silently) when there's no TTY to confirm at."""
+    if trust:
+        return
+    console.print(
+        "[yellow]⚠  about to download and RUN code from a remote source:[/yellow]\n"
+        f"     [bold]{url}[/bold]\n"
+        "   trap will execute its setup command, the solution, and any judge/grader\n"
+        "   scripts — arbitrary code from this repo runs on your machine."
+    )
+    if not sys.stdin.isatty():
+        raise _die(
+            "remote source needs confirmation; pass --trust-remote "
+            "(or set TRAP_TRUST_REMOTE=1) to run it non-interactively"
+        )
+    if not typer.confirm("Continue?", default=False):
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def run(
+    task: Annotated[str | None, typer.Argument()] = None,
+    solution: Annotated[
+        str | None,
+        typer.Option("--solution", help="Solution to run: a local path or a git+ URL (default: cwd)."),
+    ] = None,
+    clone_to: Annotated[
+        Path | None,
+        typer.Option("--clone-to", help="Where to clone a git+ URL --solution (default: ./<repo>)."),
+    ] = None,
+    trust_remote: Annotated[
+        bool,
+        typer.Option(
+            "--trust-remote",
+            help="Skip the confirmation before downloading and running a remote "
+            "(git+ URL) solution/task. Also settable via TRAP_TRUST_REMOTE=1.",
+        ),
+    ] = False,
+    tags: Annotated[list[str] | None, typer.Option("--tag", "-t")] = None,
+    output: Annotated[OutputFormat, typer.Option("--output", "-o")] = OutputFormat.rich,
+    fail_fast: Annotated[bool, typer.Option("--fail-fast")] = False,
+    setup_solution: Annotated[
+        bool,
+        typer.Option(
+            "--setup-solution",
+            help="Force-run the solution's setup_cmd even when no remote pull brought new code.",
+        ),
+    ] = False,
+    setup_task: Annotated[
+        bool,
+        typer.Option(
+            "--setup-task",
+            help="Force-run the task's setup_cmd even when no remote pull brought new code.",
+        ),
+    ] = False,
+    workspace: Annotated[Path, typer.Option("--workspace", "-w")] = Path(".trap"),
+    environment: Annotated[
+        bool,
+        typer.Option(
+            "--environment/--no-environment",
+            help="Collect host machine environment info (CPU/RAM/OS/Python) into the report.",
+        ),
+    ] = True,
+    cost: Annotated[
+        bool,
+        typer.Option(
+            "--cost/--no-cost",
+            help="Track LLM token usage and spend via the proxy (auto-detects providers from env).",
+        ),
+    ] = True,
+) -> None:
+    """Run a task against a solution.
+
+    --solution is the solution to run: a local path, or a git+ URL to clone
+    into ./<repo> (or --clone-to). Omit it to use the trap.yaml in the cwd.
+    """
+    # Gate trap's auto-download-and-run of any remote source before it happens — once
+    # for a remote --solution, once for a remote task source (resolved from trap.yaml).
+    trust = trust_remote or _env_truthy("TRAP_TRUST_REMOTE")
+    if solution is not None and ParsedGitUrl.looks_remote(solution):
+        _confirm_remote(solution, trust=trust)
+    try:
+        trap_yaml_loader = TrapLoader.from_solution(
+            solution,
+            clone_to,
+            allow_remote=True,
+            setup=setup_solution,
+            progress_func=(
+                (lambda m: console.print(f"[dim]{m}[/dim]")) if output == OutputFormat.rich else None
+            ),
+        )
+        task_binding = trap_yaml_loader.resolve_task(task)
+        if ParsedGitUrl.looks_remote(task_binding.source):
+            _confirm_remote(task_binding.source, trust=trust)
+        traptask_yaml_loader = TraptaskLoader.from_task(
+            task_binding, trap_yaml_loader.trap_dir, setup=setup_task
+        )
+    except (GitOpsError, ConfigError, subprocess.CalledProcessError) as e:
+        raise _die(e) from None
+
+    active_cases = traptask_yaml_loader.cases_with_tags(tags or [])
+
+    started_at_local = datetime.now()
+    ts = started_at_local.isoformat(timespec="seconds")
+    report_handle = ReportHandle(workspace.resolve(), task_binding.alias, ts)
+
+    runner = TaskRunner(
+        trap_config=trap_yaml_loader.config,
+        trap_dir=trap_yaml_loader.trap_dir,
+        traptask_config=traptask_yaml_loader.traptask,
+        traptask_dir=traptask_yaml_loader.traptask_dir,
+        run_dir=report_handle.run_dir,
+        cost_enabled=cost,
+    )
+    prog_console = console if output == OutputFormat.rich else None
+    with CaseProgress(active_cases, console=prog_console) as prog:
+        case_results, grader_metrics = runner.run(
+            active_cases,
+            fail_fast=fail_fast,
+            on_case_start=prog.on_case_start,
+            on_case_done=prog.on_case_done,
+        )
+    finished_at_utc = datetime.now(UTC)
+
+    # Record git provenance (repo + commit) of both checkouts — solution and task —
+    # so the run is reproducible. Each side is empty for a dirty/remote-less/local tree.
+    provenance = Provenance(
+        solution=LocalRepo.provenance_of(trap_yaml_loader.trap_dir),
+        task=LocalRepo.provenance_of(traptask_yaml_loader.traptask_dir),
+    )
+
+    # Capture the host machine environment (CPU/RAM/OS/Python) unless disabled.
+    # Detection is best-effort and must never abort a completed run.
+    environment_info = None
+    if environment:
+        try:
+            environment_info = EnvironmentDetector().detect()
+        except Exception:
+            environment_info = None
+
+    report_data = report_handle.save(
+        case_results=case_results,
+        trap_config=trap_yaml_loader.config,
+        started_at_utc=started_at_local.astimezone(UTC),
+        finished_at_utc=finished_at_utc,
+        grader_metrics=grader_metrics,
+        provenance=provenance,
+        environment=environment_info,
+    )
+    renderer_factory(output).render(report_data)
+    # trap reports facts, not a verdict: a completed run exits 0 regardless of per-case
+    # exit codes or scores (read the grader / report.json to gate CI). trap-level
+    # failures (bad config, git errors) still exit non-zero via _die.
+
+
+@app.command()
+def report(
+    task: Annotated[str | None, typer.Argument()] = None,
+    run: Annotated[str, typer.Argument()] = "latest",
+    solution: Annotated[
+        str | None,
+        typer.Option("--solution", help="Local solution path holding trap.yaml (default: cwd)."),
+    ] = None,
+    output: Annotated[OutputFormat, typer.Option("--output", "-o")] = OutputFormat.rich,
+    workspace: Annotated[Path, typer.Option("--workspace", "-w")] = Path(".trap"),
+) -> None:
+    """Display a report for a task (defaults to latest run)."""
+    try:
+        task_alias = TrapLoader.from_solution(solution).resolve_task(task).alias
+    except (GitOpsError, ConfigError) as e:
+        raise _die(e) from None
+    handle = ReportHandle(workspace.resolve(), task_alias, run)
+    try:
+        report_data = handle.load()
+    except FileNotFoundError:
+        raise _die(f"no report at {handle.report_json_path}; run `tp run` first") from None
+    renderer_factory(output).render(report_data)
+
+
+@app.command()
+def submit(
+    task: Annotated[
+        str | None,
+        typer.Argument(
+            help="Task name (defaults to first task in trap.yaml). "
+            "Used as both the local run dir and the trapstreet task_id.",
+        ),
+    ] = None,
+    solution: Annotated[
+        str | None,
+        typer.Option("--solution", help="Local solution path holding trap.yaml (default: cwd)."),
+    ] = None,
+    workspace: Annotated[Path, typer.Option("--workspace", "-w")] = Path(".trap"),
+    run: Annotated[str, typer.Option("--run", "-r", help="Which run to upload.")] = "latest",
+) -> None:
+    """Upload a report.json to trapstreet.
+
+    Reads from the .trap/<task>/<run>/report.json workspace that `tp run`
+    populated.
+    """
+    stored = AuthStore().load()
+    # priority: TRAPSTREET_URL env > stored > default
+    resolved_server = (
+        os.environ.get("TRAPSTREET_URL") or (stored.server if stored else None) or DEFAULT_SERVER
+    )
+    # priority: TRAPSTREET_API_KEY env > stored
+    resolved_key = os.environ.get("TRAPSTREET_API_KEY") or (stored.api_key if stored else None)
+    if not resolved_key:
+        raise _die("not logged in. Run [bold]tp auth login[/bold] or set [bold]TRAPSTREET_API_KEY[/bold].")
+
+    try:
+        task_alias = TrapLoader.from_solution(solution).resolve_task(task).alias
+    except (GitOpsError, ConfigError) as e:
+        raise _die(e) from None
+    report_handle = ReportHandle(workspace.resolve(), task_alias, run)
+    try:
+        report_handle.assert_exists()
+    except FileNotFoundError:
+        raise _die(f"no report at {report_handle.report_json_path}. Run [bold]tp run[/bold] first.") from None
+    report_path = report_handle.report_json_path
+
+    client = ApiClient(resolved_server, resolved_key)
+    try:
+        resp_data = client.submit(report_path)
+    except ApiError as e:
+        raise _die(e) from None
+    render_submit_result(resp_data)
+
+
+# Hidden until the scaffold is implemented — registered but not advertised in `--help`.
+@app.command(hidden=True)
+def init() -> None:
+    """Generate annotated trap.yaml + traptask.yaml scaffold."""
+    console.print("not yet")

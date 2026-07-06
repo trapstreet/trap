@@ -1,0 +1,80 @@
+# traptask.yaml — the TASK author's config (defines what the solution must do
+# and how its output is judged).
+#
+# This is an EXHAUSTIVE reference: every field is shown, tagged "[optional]"
+# with its default. The WHOLE FILE is optional: if it is absent, trap scans
+# inputs/ and treats each subdirectory as a case in output-only mode (no judge,
+# no grader, no expected/).
+
+name: Reference task              # [optional] default: null. Human-readable task title,
+                                  #   task-author owned. Consumers read it from this repo
+                                  #   (via the run's provenance.task), so it's the same for
+                                  #   every solution that runs this task version.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Setup — prepares the task checkout (the first thing that happens to it).
+# Task-author owned, so it travels with the task version and every solution
+# gets an identical environment.
+# ─────────────────────────────────────────────────────────────────────────────
+setup_cmd: uv sync                # [optional] default: null. Shell command run in this
+                                  #   dir. Auto-runs after a fresh clone / branch update of
+                                  #   a REMOTE task; otherwise force it with `tp run --setup-task`.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Where the fixtures live (paths relative to this traptask.yaml).
+# ─────────────────────────────────────────────────────────────────────────────
+dirs:                             # [optional] the whole block defaults as below.
+  inputs: inputs/                 # [optional] default: inputs/.  Holds inputs/<case>/...
+  expected: expected/             # [optional] default: expected/. Holds expected/<case>/...
+                                  #            (expected_dir is null for cases without one)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Advisory output contract — DOCUMENTATION ONLY; trap never enforces it. The
+# judge is the sole arbiter. Lists the filenames the solution is expected to
+# write, and/or the tokens `stdout` / `stderr`.
+# ─────────────────────────────────────────────────────────────────────────────
+declared_outputs:                 # [optional] default: (). Omit for dynamic outputs.
+  - result.json
+  - stdout
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cases — one per inputs/<id>/ directory.
+# ─────────────────────────────────────────────────────────────────────────────
+cases:                            # [required] at least one case.
+  - id: basic                     # [required] must match an inputs/<id>/ directory.
+    description: happy path       # [optional] default: "". Author note; not shown by trap.
+    tags: [smoke]                 # [optional] default: []. Filter with `tp run -t smoke`.
+    skip: false                   # [optional] default: false. true → case not executed.
+  - id: edge-empty                # a second case — only `id` is required.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Judge — scores ONE case. Omit the whole block to skip per-case scoring.
+# Receives a manifest (inputs_dir, expected_dir, outputs_dir, and the solution
+# run's captured stdout/stderr/meta); writes its metrics JSON to stdout.
+# ─────────────────────────────────────────────────────────────────────────────
+judge:                            # [optional] default: null → cases run but unscored.
+  cmd: uv run python judge.py     # [required-in-block] run via shlex.split, cwd = this dir.
+  manifest_envvar: TRAPTASK_MANIFEST  # [optional] default: TRAPTASK_MANIFEST.
+  timeout: 300                    # [optional] default: 300. Per-case hang ceiling (seconds);
+                                  #   a safety net, not a budget. On timeout the judge is
+                                  #   recorded as an error on the case — it never crashes the run.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Grader — aggregates all case results into the run-level summary. Omit to skip.
+# Receives the list of per-case results on its manifest env var; writes the
+# summary JSON to stdout.
+# ─────────────────────────────────────────────────────────────────────────────
+grader:                           # [optional] default: null → no aggregation step.
+  cmd: uv run python grader.py    # [required-in-block] run via shlex.split, cwd = this dir.
+  manifest_envvar: TRAPTASK_MANIFEST  # [optional] default: TRAPTASK_MANIFEST.
+  timeout: 120                    # [optional] default: 120. Hang ceiling (seconds); same
+                                  #   semantics as the judge's, just a tighter default.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Minimal equivalent (everything optional removed): just the cases, output-only.
+#
+#   cases:
+#     - id: basic
+#
+# …or delete the file entirely and let trap auto-discover cases from inputs/.
+# ─────────────────────────────────────────────────────────────────────────────

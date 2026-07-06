@@ -1,0 +1,9 @@
+cmd: sh -c 'set -a && . .env && set +a && uv run solution.py'
+# A run may use several models/frameworks — both fields accept a list.
+profile:
+  model: [gpt-4o-mini, claude-code]
+  framework: [openai-sdk, claude-code]
+
+tasks:
+  test:
+    source: ../task

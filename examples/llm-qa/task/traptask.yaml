@@ -1,0 +1,21 @@
+dirs:
+  inputs: inputs/
+  expected: expected/
+
+# This solution answers via stdout — the judge reads run.stdout.
+declared_outputs:
+  - stdout
+
+cases:
+  - id: capital_of_france
+    description: LLM identifies the capital of France
+  - id: simple_math
+    description: LLM solves a basic arithmetic problem
+  - id: largest_planet
+    description: LLM identifies the largest planet in our solar system
+
+judge:
+  cmd: uv run python judge.py
+
+grader:
+  cmd: uv run python grader.py

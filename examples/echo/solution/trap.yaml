@@ -1,0 +1,19 @@
+cmd: uv run python echo.py
+stdin: input.json
+# Self-reported engine identity — strict (model/framework only), surfaced on the
+# run detail page so the leaderboard isn't a black box. Each field takes a scalar
+# or a list.
+profile:
+  framework: stdlib-python
+# Free-form author notes: tolerated but never written to the report.
+extra:
+  notes: reference solution
+
+tasks:
+  # Local task alias = trapstreet task_id so `tp submit` Just Works
+  # without --as flag.
+  echo:
+    source: ../task
+
+  run:
+    source: ../task

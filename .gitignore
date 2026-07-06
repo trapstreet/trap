@@ -1,0 +1,45 @@
+LOCAL*
+.env
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# uv / virtual envs
+.venv/
+uv.lock~
+
+# hatch-vcs generated
+src/trap/_version.py
+
+# trap runtime workspace
+.trap/
+
+# MkDocs generated site
+site/
+
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.deepeval
+
+# Ruff
+.ruff_cache/
+
+# macOS
+.DS_Store
+
+# Editors
+.idea/
+.vscode/
+*.swp
