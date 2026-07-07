@@ -1,5 +1,10 @@
 # trap
 
+[![CI](https://github.com/trapstreet/trap/actions/workflows/ci.yml/badge.svg)](https://github.com/trapstreet/trap/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/trap-cli)](https://pypi.org/project/trap-cli/)
+[![Python](https://img.shields.io/pypi/pyversions/trap-cli)](https://pypi.org/project/trap-cli/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+
 **Non-invasive CLI testing framework for AI prompts, agents, and workflows.**
 
 trap treats any solution as a black box — it invokes it as a subprocess, captures outputs, then optionally scores them through a language-agnostic judge and grader. The solution doesn't need to import trap or know it exists.
