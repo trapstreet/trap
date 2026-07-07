@@ -157,6 +157,8 @@ def test_named_ref_diverged_branch_errors(tmp_path):
     clone = tmp_path / "clone"
     rr = RemoteRepo(ParsedGitUrl.from_full_url(f"file://{src}@main"), clone)
     rr.ensure()
+    _run(clone, "config", "user.email", "t@t")
+    _run(clone, "config", "user.name", "t")
     (clone / "local.txt").write_text("x")  # diverge the clone
     _run(clone, "add", "-A")
     _run(clone, "commit", "-qm", "local")
