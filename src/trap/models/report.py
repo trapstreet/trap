@@ -28,6 +28,9 @@ class ReportData(BaseModel):
     started_at_utc: str
     finished_at_utc: str
 
+    # Leaderboard identity the solution author chose in trap.yaml (`name`); None →
+    # the server auto-assigns one.
+    solution_name: str | None = None
     # Engine identity (model/framework). Self-reported from trap.yaml today, but the
     # website consumes it from the report — never from trap.yaml directly — precisely
     # because the source may change: a future version is expected to derive this by
@@ -56,6 +59,7 @@ class ReportData(BaseModel):
             grader_metrics=grader_metrics,
             started_at_utc=started_at_utc.isoformat(timespec="seconds"),
             finished_at_utc=finished_at_utc.isoformat(timespec="seconds"),
+            solution_name=trap_config.name,
             profile=trap_config.profile,
             environment=environment,
         )

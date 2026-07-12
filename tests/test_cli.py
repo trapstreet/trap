@@ -47,6 +47,13 @@ def test_run_json_output(make_project, runner):
     assert data["grader_metrics"]["passed"] is True
 
 
+def test_report_carries_solution_name(make_project, runner):
+    _passing(make_project, extra_solution={"name": "my-sol"})
+    res = runner.invoke(app, ["run", "-o", "json", "--no-environment"])
+    assert res.exit_code == 0, res.output
+    assert json.loads(res.stdout)["solution_name"] == "my-sol"
+
+
 def test_run_wrong_answer_scores_zero_but_exits_0(make_project, runner):
     make_project(
         cmd="sh -c 'echo nope'",
