@@ -16,6 +16,7 @@ tp run [TASK] [OPTIONS]
 | `--solution` | cwd | solution to run: a local path or a git+ URL (cloned) |
 | `--clone-to` | `./<repo>` | where to clone a git+ URL `--solution` |
 | `--trust-remote` | `false` | skip the confirmation before running a remote source (see below) |
+| `--allow-unanchored` | `false` | skip the confirmation for a run with no git provenance (see below) |
 | `--tag / -t` | (none) | filter cases by tag; repeatable |
 | `--output / -o` | `rich` | renderer: `rich` or `json` |
 | `--fail-fast` | `false` | stop after the first case whose solution exits non-zero |
@@ -29,6 +30,14 @@ URL) makes trap **download and run code you may not have seen** — its `setup_c
 solution, and any judge/grader. trap asks for confirmation `[y/N]` first; pre-authorise
 with `--trust-remote` or `TRAP_TRUST_REMOTE=1`. With no TTY and no authorisation it
 refuses rather than running silently. Local sources are never gated.
+
+**Unanchored runs.** trap records the git provenance (`{repo, commit}`) of the solution and
+task checkouts. When either side can't be anchored — not a git repo, no origin remote, no
+commit yet, or uncommitted changes — trapstreet still accepts the upload, but the
+leaderboard **hides** the run. `tp run` and `tp submit` therefore warn and ask for
+confirmation `[y/N]` first; pre-authorise with `--allow-unanchored` or
+`TRAP_ALLOW_UNANCHORED=1` (the warning still prints). With no TTY and no authorisation they
+refuse.
 
 **Exit codes.** trap reports facts, not a verdict — a completed run exits `0` regardless
 of per-case exit codes or scores (gate CI on the grader output / `report.json`). `2`
@@ -65,6 +74,7 @@ tp submit [TASK] [OPTIONS]
 | `--solution` | cwd | local solution path holding `trap.yaml` |
 | `--run / -r` | `latest` | which run to upload |
 | `--workspace / -w` | `.trap` | directory containing run artifacts |
+| `--allow-unanchored` | `false` | skip the confirmation for a run with no git provenance (see `tp run`) |
 
 ## tp auth
 

@@ -194,3 +194,22 @@ def test_provenance_no_origin_is_empty(tmp_path):
 def test_provenance_non_git_is_empty(tmp_path):
     assert not LocalRepo.provenance_of(tmp_path).repo
     assert LocalRepo.open(tmp_path) is None
+
+
+def test_provenance_issue_reasons(tmp_path):
+    assert LocalRepo.provenance_of(tmp_path / "nowhere").issue == "not a git repo"
+
+    src = _repo(tmp_path / "src")
+    assert LocalRepo.provenance_of(src).issue == "no origin remote"
+
+    _run(src, "remote", "add", "origin", "https://github.com/o/r.git")
+    assert LocalRepo.provenance_of(src).issue is None
+
+    (src / "trap.yaml").write_text("changed")  # tracked file modified → dirty
+    assert LocalRepo.provenance_of(src).issue == "uncommitted changes"
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    _run(empty, "init", "-q")
+    _run(empty, "remote", "add", "origin", "https://github.com/o/r.git")
+    assert LocalRepo.provenance_of(empty).issue == "no commit to anchor to"

@@ -17,14 +17,17 @@ class LocalRepo:
     here, so the "open repo + read origin/commit/dirty" logic lives in one place.
     """
 
-    def __init__(self, repo: git.Repo) -> None:
+    def __init__(self, repo: git.Repo, path: Path) -> None:
         self.repo = repo
+        # The path this checkout was opened at (may sit below the repo root when
+        # opened with search_parent).
+        self.path = path
 
     @classmethod
     def open(cls, path: Path, *, search_parent: bool = False) -> LocalRepo | None:
         """Open the git checkout at `path`, or None if it isn't a git repo."""
         try:
-            return cls(git.Repo(path, search_parent_directories=search_parent))
+            return cls(git.Repo(path, search_parent_directories=search_parent), path)
         except (git.InvalidGitRepositoryError, git.NoSuchPathError):
             return None
 
@@ -36,25 +39,35 @@ class LocalRepo:
         except AttributeError:
             return None
 
-    def provenance(self) -> GitProvenance:
-        """{repo, commit} for a clean checkout with an origin, else empty.
+    def provenance_issue(self) -> str | None:
+        """Why this checkout cannot be anchored to {repo, commit}, or None if it can.
 
-        Empty for a dirty tree (tracked-file changes), a remote-less repo, or any
-        git error — the run isn't reproducible from remote+commit alone, so we
-        claim nothing. Best-effort: a probe failure degrades to empty rather than
-        aborting an otherwise-complete run. Untracked files (run outputs under
-        .trap/, .venv, …) don't count as dirty.
+        The run isn't reproducible from remote+commit alone when the repo has no
+        origin, no commit, or uncommitted tracked-file changes. Best-effort: a probe
+        failure degrades to a reason rather than raising. Untracked files (run
+        outputs under .trap/, .venv, …) don't count as dirty.
         """
         try:
-            url = self.origin_normalised_url
-            if url is None or not self.repo.head.is_valid() or self.repo.is_dirty():
-                return GitProvenance()
-            return GitProvenance(repo=url, commit=self.repo.head.commit.hexsha)
+            if self.origin_normalised_url is None:
+                return "no origin remote"
+            if not self.repo.head.is_valid():
+                return "no commit to anchor to"
+            if self.repo.is_dirty():
+                return "uncommitted changes"
+            return None
         except Exception:
-            return GitProvenance()
+            return "git probe failed"
+
+    def provenance(self) -> GitProvenance:
+        """{repo, commit} for a clean checkout with an origin, else empty with `issue`
+        naming why — we claim nothing about a run that isn't reproducible."""
+        issue = self.provenance_issue()
+        if issue is not None:
+            return GitProvenance(issue=issue)
+        return GitProvenance(repo=self.origin_normalised_url, commit=self.repo.head.commit.hexsha)
 
     @classmethod
     def provenance_of(cls, path: Path) -> GitProvenance:
-        """Provenance ({repo, commit}) of the checkout at `path`, empty if not a git repo."""
+        """Provenance ({repo, commit}) of the checkout at `path`."""
         local_repo = cls.open(path, search_parent=True)
-        return local_repo.provenance() if local_repo else GitProvenance()
+        return local_repo.provenance() if local_repo else GitProvenance(issue="not a git repo")

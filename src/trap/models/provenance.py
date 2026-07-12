@@ -5,10 +5,12 @@ from pydantic import BaseModel, Field
 
 class GitProvenance(BaseModel):
     """Git origin of one checkout: {repo, commit}. Both None when the tree isn't a
-    clean, remote-backed git repo (see LocalRepo.provenance)."""
+    clean, remote-backed git repo — `issue` then names why (see
+    LocalRepo.provenance_issue). Anchored checkouts carry no issue."""
 
     repo: str | None = None
     commit: str | None = None
+    issue: str | None = None
 
 
 class Provenance(BaseModel):
