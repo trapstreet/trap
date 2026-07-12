@@ -45,7 +45,8 @@ class ApiClient:
 
     def submit(self, report_path: Path) -> dict[str, Any]:
         # Content-addressed ingest: the task identity travels inside the report
-        # (provenance.task.{repo,commit}), not the URL — so no task_id path segment.
+        # (provenance.task.{repo,commit,subdirectory}), not the URL — so no task_id
+        # path segment.
         try:
             resp = self._client.post("/api/submit", content=report_path.read_bytes())
             resp.raise_for_status()

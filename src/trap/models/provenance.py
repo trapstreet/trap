@@ -4,12 +4,16 @@ from pydantic import BaseModel, Field
 
 
 class GitProvenance(BaseModel):
-    """Git origin of one checkout: {repo, commit}. Both None when the tree isn't a
-    clean, remote-backed git repo — `issue` then names why (see
-    LocalRepo.provenance_issue). Anchored checkouts carry no issue."""
+    """Git origin of one checkout: {repo, commit, subdirectory}. repo and commit are
+    None when the tree isn't a clean, remote-backed git repo — `issue` then names why
+    (see LocalRepo.provenance_issue). Anchored checkouts carry no issue.
+
+    `subdirectory` locates the checkout within the repo (None at the root), so two
+    solutions or tasks living in different subdirectories of one repo stay distinct."""
 
     repo: str | None = None
     commit: str | None = None
+    subdirectory: str | None = None
     issue: str | None = None
 
 
