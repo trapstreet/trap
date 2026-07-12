@@ -41,7 +41,10 @@ def runner() -> CliRunner:
 @pytest.fixture
 def make_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Scaffold a solution + task under tmp_path, chdir into the solution dir, and
-    return it. Everything is local and hermetic."""
+    return it. Everything is local and hermetic. The scaffold is not a git repo, so
+    the unanchored-provenance gate is pre-authorised; gate tests unset the env var."""
+
+    monkeypatch.setenv("TRAP_ALLOW_UNANCHORED", "1")
 
     def _make(
         *,

@@ -232,5 +232,103 @@ def test_init_stub(runner):
     assert res.exit_code == 0
 
 
+# --- unanchored-provenance gate (leaderboard hides such runs) ------------------
+
+
+def test_run_warns_unanchored_with_reason(make_project, runner):
+    _passing(make_project)  # tmp_path scaffold → neither side is a git repo
+    res = runner.invoke(app, ["run", "--no-environment"])  # fixture pre-authorises the gate
+    assert res.exit_code == 0, res.output
+    assert "solution has no git provenance (not a git repo)" in res.stderr
+    assert "task has no git provenance (not a git repo)" in res.stderr
+    assert "leaderboard hides" in res.stderr
+
+
+def test_run_json_stdout_stays_clean_despite_warning(make_project, runner):
+    _passing(make_project)
+    res = runner.invoke(app, ["run", "-o", "json", "--no-environment"])
+    json.loads(res.stdout)  # warning went to stderr, not into the JSON
+    assert "leaderboard hides" in res.stderr
+
+
+def test_run_unanchored_refused_without_tty(make_project, runner, monkeypatch):
+    _passing(make_project)
+    monkeypatch.delenv("TRAP_ALLOW_UNANCHORED", raising=False)
+    res = runner.invoke(app, ["run", "--no-environment"])
+    assert res.exit_code == 2
+    assert "needs confirmation" in res.output
+    assert "leaderboard hides" in res.stderr  # warning shown before refusing
+
+
+def test_run_unanchored_allowed_via_flag(make_project, runner, monkeypatch):
+    _passing(make_project)
+    monkeypatch.delenv("TRAP_ALLOW_UNANCHORED", raising=False)
+    res = runner.invoke(app, ["run", "--allow-unanchored", "--no-environment"])
+    assert res.exit_code == 0, res.output
+
+
+def test_submit_repeats_gate_with_stored_reason(make_project, runner, monkeypatch):
+    _passing(make_project)
+    assert runner.invoke(app, ["run", "--no-environment"]).exit_code == 0
+    monkeypatch.setenv("TRAPSTREET_API_KEY", "k")
+    monkeypatch.setattr("trap.auth.client.ApiClient.submit", lambda self, path: {"run": {"passed": True}})
+    res = runner.invoke(app, ["submit", "t"])  # fixture pre-authorises the gate
+    assert res.exit_code == 0, res.output
+    # the reason was saved in the report's `issue` field, so submit names it too
+    assert "solution has no git provenance (not a git repo)" in res.stderr
+    assert "leaderboard hides" in res.stderr
+
+
+def test_submit_unanchored_refused_without_tty(make_project, runner, monkeypatch):
+    _passing(make_project)
+    assert runner.invoke(app, ["run", "--no-environment"]).exit_code == 0
+    monkeypatch.setenv("TRAPSTREET_API_KEY", "k")
+    monkeypatch.delenv("TRAP_ALLOW_UNANCHORED", raising=False)
+    res = runner.invoke(app, ["submit", "t"])
+    assert res.exit_code == 2
+    assert "needs confirmation" in res.output
+
+
+def test_confirm_unanchored_silent_when_anchored(capsys):
+    import trap.cli as climod
+    from trap.models import GitProvenance, Provenance
+
+    anchored = GitProvenance(repo="https://x/r", commit="a" * 40)
+    climod._confirm_unanchored(Provenance(solution=anchored, task=anchored), allow=False)
+    assert capsys.readouterr().err == ""
+
+
+def test_confirm_unanchored_generic_without_issue(capsys):
+    import trap.cli as climod
+    from trap.models import Provenance
+
+    climod._confirm_unanchored(Provenance(), allow=True)  # report predating the `issue` field
+    err = capsys.readouterr().err
+    assert "solution has no git provenance" in err
+    assert "solution has no git provenance (" not in err  # no reason suffix
+
+
+def test_confirm_unanchored_declined_raises(monkeypatch):
+    import pytest
+
+    import trap.cli as climod
+    from trap.models import Provenance
+
+    monkeypatch.setattr(climod.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(climod.typer, "confirm", lambda *a, **k: False)
+    with pytest.raises(climod.typer.Exit) as e:
+        climod._confirm_unanchored(Provenance(), allow=False)
+    assert e.value.exit_code == 1
+
+
+def test_confirm_unanchored_accepted_returns(monkeypatch):
+    import trap.cli as climod
+    from trap.models import Provenance
+
+    monkeypatch.setattr(climod.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(climod.typer, "confirm", lambda *a, **k: True)
+    climod._confirm_unanchored(Provenance(), allow=False)  # returns, no raise
+
+
 def test_python_interpreter_available():
     assert Path(PY).exists()

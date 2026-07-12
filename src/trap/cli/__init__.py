@@ -23,6 +23,8 @@ from trap.runner import TaskRunner
 app = typer.Typer(help="AI prompt / agent / workflow / testing framework.")
 app.add_typer(auth_app, name="auth")
 console = Console()
+# Warnings go to stderr so `-o json` stdout stays machine-parseable.
+err_console = Console(stderr=True)
 
 
 def _die(msg: object) -> typer.Exit:
@@ -42,7 +44,7 @@ def _confirm_remote(url: str, *, trust: bool) -> None:
     runs); refuses (rather than running silently) when there's no TTY to confirm at."""
     if trust:
         return
-    console.print(
+    err_console.print(
         "[yellow]⚠  about to download and RUN code from a remote source:[/yellow]\n"
         f"     [bold]{url}[/bold]\n"
         "   trap will execute its setup command, the solution, and any judge/grader\n"
@@ -54,6 +56,39 @@ def _confirm_remote(url: str, *, trust: bool) -> None:
             "(or set TRAP_TRUST_REMOTE=1) to run it non-interactively"
         )
     if not typer.confirm("Continue?", default=False):
+        raise typer.Exit(code=1)
+
+
+def _confirm_unanchored(provenance: Provenance, *, allow: bool) -> None:
+    """Gate run/submit when a side has no anchored git provenance.
+
+    trapstreet accepts such uploads but its leaderboard hides runs it cannot pin to
+    a commit — make the user acknowledge that up front instead of discovering it on
+    the site. The reason travels in the provenance's `issue` field, so `tp submit`
+    (which reads the saved report rather than re-probing the checkouts) names it
+    too. `allow` (--allow-unanchored / TRAP_ALLOW_UNANCHORED, for CI) keeps the
+    warning but skips the prompt; with no TTY and no `allow` it refuses.
+    """
+    sides = {"solution": provenance.solution, "task": provenance.task}
+    missing = {name: side.issue for name, side in sides.items() if not side.repo}
+    if not missing:
+        return
+    for name, reason in missing.items():
+        suffix = f" ({reason})" if reason else ""
+        err_console.print(f"[yellow]⚠  {name} has no git provenance{suffix}[/yellow]")
+    err_console.print(
+        "[yellow]   trapstreet accepts the submission, but the leaderboard hides runs that "
+        "aren't anchored to a commit on a remote — run from a clean, committed checkout "
+        "with an origin remote to make it rankable.[/yellow]"
+    )
+    if allow:
+        return
+    if not sys.stdin.isatty():
+        raise _die(
+            "unanchored provenance needs confirmation; pass --allow-unanchored "
+            "(or set TRAP_ALLOW_UNANCHORED=1) to proceed non-interactively"
+        )
+    if not typer.confirm("Continue anyway?", default=False):
         raise typer.Exit(code=1)
 
 
@@ -74,6 +109,14 @@ def run(
             "--trust-remote",
             help="Skip the confirmation before downloading and running a remote "
             "(git+ URL) solution/task. Also settable via TRAP_TRUST_REMOTE=1.",
+        ),
+    ] = False,
+    allow_unanchored: Annotated[
+        bool,
+        typer.Option(
+            "--allow-unanchored",
+            help="Skip the confirmation when the run has no git provenance (the "
+            "leaderboard hides such runs). Also settable via TRAP_ALLOW_UNANCHORED=1.",
         ),
     ] = False,
     tags: Annotated[list[str] | None, typer.Option("--tag", "-t")] = None,
@@ -138,6 +181,16 @@ def run(
     except (GitOpsError, ConfigError, subprocess.CalledProcessError) as e:
         raise _die(e) from None
 
+    # Record git provenance (repo + commit) of both checkouts — solution and task —
+    # so the run is reproducible; an unanchored side carries an `issue` naming why.
+    # Probed once, before any case runs: an unanchored checkout produces a report the
+    # leaderboard will hide, so the user must acknowledge (or pre-authorise) that.
+    provenance = Provenance(
+        solution=LocalRepo.provenance_of(trap_yaml_loader.trap_dir),
+        task=LocalRepo.provenance_of(traptask_yaml_loader.traptask_dir),
+    )
+    _confirm_unanchored(provenance, allow=allow_unanchored or _env_truthy("TRAP_ALLOW_UNANCHORED"))
+
     active_cases = traptask_yaml_loader.cases_with_tags(tags or [])
 
     started_at_local = datetime.now()
@@ -161,13 +214,6 @@ def run(
             on_case_done=prog.on_case_done,
         )
     finished_at_utc = datetime.now(UTC)
-
-    # Record git provenance (repo + commit) of both checkouts — solution and task —
-    # so the run is reproducible. Each side is empty for a dirty/remote-less/local tree.
-    provenance = Provenance(
-        solution=LocalRepo.provenance_of(trap_yaml_loader.trap_dir),
-        task=LocalRepo.provenance_of(traptask_yaml_loader.traptask_dir),
-    )
 
     # Capture the host machine environment (CPU/RAM/OS/Python) unless disabled.
     # Detection is best-effort and must never abort a completed run.
@@ -232,6 +278,14 @@ def submit(
     ] = None,
     workspace: Annotated[Path, typer.Option("--workspace", "-w")] = Path(".trap"),
     run: Annotated[str, typer.Option("--run", "-r", help="Which run to upload.")] = "latest",
+    allow_unanchored: Annotated[
+        bool,
+        typer.Option(
+            "--allow-unanchored",
+            help="Skip the confirmation when the run has no git provenance (the "
+            "leaderboard hides such runs). Also settable via TRAP_ALLOW_UNANCHORED=1.",
+        ),
+    ] = False,
 ) -> None:
     """Upload a report.json to trapstreet.
 
@@ -254,9 +308,14 @@ def submit(
         raise _die(e) from None
     report_handle = ReportHandle(workspace.resolve(), task_alias, run)
     try:
-        report_handle.assert_exists()
+        report_data = report_handle.load()
     except FileNotFoundError:
         raise _die(f"no report at {report_handle.report_json_path}. Run [bold]tp run[/bold] first.") from None
+    # Repeat the unanchored-provenance gate at upload time — the report records
+    # what `tp run` saw, so the checkouts aren't re-probed here.
+    _confirm_unanchored(
+        report_data.provenance, allow=allow_unanchored or _env_truthy("TRAP_ALLOW_UNANCHORED")
+    )
     report_path = report_handle.report_json_path
 
     client = ApiClient(resolved_server, resolved_key)
