@@ -58,13 +58,26 @@ class LocalRepo:
         except Exception:
             return "git probe failed"
 
+    @property
+    def subdirectory(self) -> str | None:
+        """Opened path relative to the repo root, None at the root (or in a bare repo)."""
+        root = self.repo.working_tree_dir
+        if root is None:
+            return None
+        rel = self.path.resolve().relative_to(Path(root).resolve())
+        return rel.as_posix() if rel != Path(".") else None
+
     def provenance(self) -> GitProvenance:
-        """{repo, commit} for a clean checkout with an origin, else empty with `issue`
-        naming why — we claim nothing about a run that isn't reproducible."""
+        """{repo, commit, subdirectory} for a clean checkout with an origin, else empty
+        with `issue` naming why — we claim nothing about a run that isn't reproducible."""
         issue = self.provenance_issue()
         if issue is not None:
             return GitProvenance(issue=issue)
-        return GitProvenance(repo=self.origin_normalised_url, commit=self.repo.head.commit.hexsha)
+        return GitProvenance(
+            repo=self.origin_normalised_url,
+            commit=self.repo.head.commit.hexsha,
+            subdirectory=self.subdirectory,
+        )
 
     @classmethod
     def provenance_of(cls, path: Path) -> GitProvenance:

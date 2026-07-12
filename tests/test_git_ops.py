@@ -196,6 +196,24 @@ def test_provenance_non_git_is_empty(tmp_path):
     assert LocalRepo.open(tmp_path) is None
 
 
+def test_provenance_subdirectory(tmp_path):
+    src = _repo(tmp_path / "src")
+    _run(src, "remote", "add", "origin", "https://github.com/o/r.git")
+    (src / "solutions" / "a").mkdir(parents=True)
+    assert LocalRepo.provenance_of(src).subdirectory is None  # at the repo root
+    assert LocalRepo.provenance_of(src / "solutions" / "a").subdirectory == "solutions/a"
+
+
+def test_provenance_bare_repo_has_no_subdirectory(tmp_path):
+    src = _repo(tmp_path / "src")
+    bare = tmp_path / "bare.git"
+    _run(tmp_path, "clone", "--bare", "-q", str(src), str(bare))
+    _run(bare, "remote", "set-url", "origin", "https://github.com/o/r.git")
+    prov = LocalRepo(git.Repo(bare), bare).provenance()
+    assert prov.repo == "https://github.com/o/r"
+    assert prov.subdirectory is None  # no working tree to be relative to
+
+
 def test_provenance_issue_reasons(tmp_path):
     assert LocalRepo.provenance_of(tmp_path / "nowhere").issue == "not a git repo"
 
