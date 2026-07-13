@@ -24,6 +24,12 @@ def _passing(make_project, **kw):
     )
 
 
+def test_version(runner):
+    res = runner.invoke(app, ["--version"])
+    assert res.exit_code == 0
+    assert res.output.startswith("tp ")
+
+
 def test_run_full_pipeline(make_project, runner):
     _passing(make_project)
     res = runner.invoke(app, ["run", "t", "--no-environment"])
