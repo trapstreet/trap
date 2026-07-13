@@ -8,11 +8,11 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
-from rich.console import Console
 
 from trap import __version__
 from trap.auth import DEFAULT_SERVER, ApiClient, ApiError, AuthStore
 from trap.cli._auth import auth_app
+from trap.cli._console import _die, _env_truthy, console, err_console
 from trap.display import CaseProgress, render_submit_result
 from trap.environment import EnvironmentDetector
 from trap.git_ops import GitOpsError, LocalRepo, ParsedGitUrl
@@ -23,9 +23,6 @@ from trap.runner import TaskRunner
 
 app = typer.Typer(help="AI prompt / agent / workflow / testing framework.")
 app.add_typer(auth_app, name="auth")
-console = Console()
-# Warnings go to stderr so `-o json` stdout stays machine-parseable.
-err_console = Console(stderr=True)
 
 
 def _version_callback(value: bool) -> None:
@@ -47,16 +44,6 @@ def _main(
     ] = False,
 ) -> None:
     """AI prompt / agent / workflow / testing framework."""
-
-
-def _die(msg: object) -> typer.Exit:
-    """Print an error and return an Exit(2) to raise."""
-    console.print(f"[red]error[/red]: {msg}")
-    return typer.Exit(code=2)
-
-
-def _env_truthy(name: str) -> bool:
-    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _confirm_remote(url: str, *, trust: bool) -> None:

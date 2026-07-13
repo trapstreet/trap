@@ -4,12 +4,11 @@ import sys
 from typing import Annotated
 
 import typer
-from rich.console import Console
 
 from trap.auth import DEFAULT_SERVER, ApiClient, ApiError, AuthStore, BrowserProvider, TokenProvider
+from trap.cli._console import _die, console
 
 auth_app = typer.Typer(help="Manage authentication.")
-console = Console()
 
 
 @auth_app.command("login")
@@ -50,8 +49,7 @@ def auth_login(
         console.print(provider.pre_message)
         auth_data = provider.acquire()
     except (ValueError, TimeoutError) as e:
-        console.print(f"[red]error[/red]: {e}")
-        raise typer.Exit(code=2) from None
+        raise _die(e) from None
 
     path = AuthStore().save(auth_data)
     console.print(
