@@ -10,6 +10,7 @@ from typing import Annotated
 import typer
 from rich.console import Console
 
+from trap import __version__
 from trap.auth import DEFAULT_SERVER, ApiClient, ApiError, AuthStore
 from trap.cli._auth import auth_app
 from trap.display import CaseProgress, render_submit_result
@@ -25,6 +26,27 @@ app.add_typer(auth_app, name="auth")
 console = Console()
 # Warnings go to stderr so `-o json` stdout stays machine-parseable.
 err_console = Console(stderr=True)
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        console.print(f"tp {__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def _main(
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            help="Show the trap version and exit.",
+            callback=_version_callback,
+            is_eager=True,
+        ),
+    ] = False,
+) -> None:
+    """AI prompt / agent / workflow / testing framework."""
 
 
 def _die(msg: object) -> typer.Exit:
