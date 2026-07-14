@@ -23,7 +23,12 @@ class _ProtocolStyle(enum.StrEnum):
             case (_ProtocolStyle.OPENAI_COMPATIBLE, True):
                 return self._parse_openai_style_sse(body.decode("utf-8", errors="replace"))
             case (_ProtocolStyle.OPENAI_COMPATIBLE, False):
-                return self._parse_json(body, "prompt_tokens", "completion_tokens")
+                parsed = self._parse_json(body, "prompt_tokens", "completion_tokens")
+                if parsed[0] or parsed[1]:
+                    return parsed
+                # The OpenAI Responses API names its usage fields input_/output_tokens
+                # (like Anthropic), not the Chat Completions prompt_/completion_tokens.
+                return self._parse_json(body, "input_tokens", "output_tokens")
             case _:  # pragma: no cover - exhaustive over the two styles above
                 raise ValueError(f"Unsupported protocol style: {self!r}")
 

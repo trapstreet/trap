@@ -47,6 +47,12 @@ def test_style_parse_json():
     assert OAI.parse("application/json", body2) == (3, 2, "g")
 
 
+def test_style_parse_openai_responses_json():
+    # the Responses API names usage fields input_/output_tokens, not prompt_/completion_
+    body = json.dumps({"model": "g", "usage": {"input_tokens": 9, "output_tokens": 4}}).encode()
+    assert OAI.parse("application/json", body) == (9, 4, "g")
+
+
 def test_style_parse_bad_json():
     assert OAI.parse("application/json", b"notjson") == (0, 0, None)
 
