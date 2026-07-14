@@ -76,8 +76,26 @@ def test_submit_ok(tmp_path):
 def test_submit_http_error(tmp_path):
     rp = tmp_path / "r.json"
     rp.write_text("{}")
-    with pytest.raises(ApiError, match="http 400"):
+    with pytest.raises(ApiError, match="http 400: bad"):
         _client(lambda r: httpx.Response(400, text="bad")).submit(rp)
+
+
+def test_submit_http_error_json_message(tmp_path):
+    # the server's {error, code} body renders as its message, not raw JSON
+    rp = tmp_path / "r.json"
+    rp.write_text("{}")
+    with pytest.raises(ApiError, match="http 404: task not registered"):
+        _client(
+            lambda r: httpx.Response(404, json={"error": "task not registered", "code": "not_found"})
+        ).submit(rp)
+
+
+def test_submit_http_error_json_without_message(tmp_path):
+    # JSON body with no usable error field falls back to the raw text
+    rp = tmp_path / "r.json"
+    rp.write_text("{}")
+    with pytest.raises(ApiError, match=r'http 500: \{"detail":"x"\}'):
+        _client(lambda r: httpx.Response(500, json={"detail": "x"})).submit(rp)
 
 
 def test_submit_conn_error(tmp_path):

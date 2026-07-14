@@ -82,8 +82,8 @@ def test_submit_success(make_project, runner, tmp_path, monkeypatch):
     monkeypatch.setenv("TRAPSTREET_API_KEY", "k")
     monkeypatch.setattr(
         "trap.auth.client.ApiClient.submit",
-        lambda self, path: {"run": {"passed": True, "id": "r1", "total_score": 1.0}},
+        lambda self, path: {"run": {"id": "r1"}, "view_url": "http://x/runs/r1"},
     )
     res = runner.invoke(app, ["submit", "t"])
     assert res.exit_code == 0, res.output
-    assert "passed" in res.output
+    assert "submitted" in res.output and "r1" in res.output
