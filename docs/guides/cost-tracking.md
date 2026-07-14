@@ -41,9 +41,10 @@ The terminal table shows per-case aggregates; per-model detail lives in `report.
 
 ## Pricing
 
-USD is computed via [`tokencost`](https://github.com/AgentOps-AI/tokencost). Models absent
-from its table (or local servers like Ollama/vLLM) still get token counts, but `cost_usd`
-is `0.0`.
+USD is computed from an explicit per-model price table maintained in
+`src/trap/cost/calculator.py` (prefix-matched against the model id the API reports).
+Models absent from the table (or local servers like Ollama/vLLM) still get token
+counts, but `cost_usd` is `null` — an unknown cost, deliberately distinct from `0.0`.
 
 ## Proxy internals
 

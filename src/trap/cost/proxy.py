@@ -65,7 +65,7 @@ class CostProxy:
     ) -> None:
         if not (prompt_tokens or completion_tokens):
             return
-        call_cost = _calc_cost(prompt_tokens, completion_tokens, model) if model else 0.0
+        call_cost = _calc_cost(prompt_tokens, completion_tokens, model)
         with self._lock:
             key = (provider, model)
             entry = self._cost_buckets.get(key)

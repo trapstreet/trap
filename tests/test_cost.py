@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import math
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import httpx
+import pytest
 
 from trap.cost.calculator import calculate_call_cost
 from trap.cost.providers import _ProtocolStyle, active_provider_configs
@@ -14,14 +16,28 @@ ANTH = _ProtocolStyle.ANTHROPIC_COMPATIBLE
 OAI = _ProtocolStyle.OPENAI_COMPATIBLE
 
 
-def test_calculator_known_and_unknown():
-    assert calculate_call_cost(100, 50, "gpt-4o-mini") >= 0.0
-    assert calculate_call_cost(100, 50, "totally-unknown-model-xyz") == 0.0
+def test_calculator_unknown_is_nan():
+    # unknown cost is not zero cost — unpriced models report NaN (JSON null)
+    assert math.isnan(calculate_call_cost(100, 50, "totally-unknown-model-xyz"))
+    assert math.isnan(calculate_call_cost(100, 50, None))
 
 
-def test_calculator_anthropic_version_pattern():
-    # registered wildcard resolves version-style names to a priced entry
-    assert calculate_call_cost(1000, 1000, "claude-sonnet-4-6") > 0.0
+def test_calculator_prices():
+    # prefixes resolve both version aliases and dated full ids to the exact
+    # published prices (USD for 1M input + 1M output tokens)
+    for model, expected in [
+        ("claude-fable-5", 60.0),
+        ("claude-sonnet-5", 12.0),  # introductory pricing through 2026-08-31
+        ("claude-opus-4-8", 30.0),
+        ("claude-opus-4-6", 30.0),
+        ("claude-opus-4-1-20250805", 90.0),
+        ("claude-sonnet-4-6", 18.0),
+        ("claude-haiku-4-5-20251001", 6.0),
+        ("gpt-5.5", 35.0),
+        ("gpt-5.5-pro", 210.0),  # longer prefix wins over its parent "gpt-5.5"
+        ("gpt-5.4-mini", 5.25),
+    ]:
+        assert calculate_call_cost(1_000_000, 1_000_000, model) == pytest.approx(expected), model
 
 
 def test_style_parse_json():
