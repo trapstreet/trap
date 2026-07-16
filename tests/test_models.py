@@ -79,3 +79,27 @@ def test_traptask_minimal():
     t = TraptaskConfig(cases=({"id": "a"},))
     assert t.cases[0].id == "a"
     assert t.judge is None and t.grader is None
+
+
+def test_modelcost_unknown_cost_roundtrips():
+    # Regression (#null-cost-submit): an unpriced model produces NaN cost;
+    # pydantic serialises NaN as JSON null, so a report written by `tp run`
+    # must load back for `tp submit` — unknown cost is None, not a crash.
+    mc = ModelCost(provider="openai", model="gpt-3.5-turbo", cost_usd=float("nan"))
+    assert mc.cost_usd is None
+    reloaded = ModelCost.model_validate_json(mc.model_dump_json())
+    assert reloaded.cost_usd is None
+
+
+def test_casecost_unknown_propagates_not_zero():
+    # one unknown model cost makes the case total unknown — never silently 0
+    c = CaseCost(
+        by_model=[
+            ModelCost(provider="openai", model="priced", cost_usd=0.1, calls=1),
+            ModelCost(provider="openai", model="unpriced", cost_usd=None, calls=1),
+        ]
+    )
+    assert c.cost_usd is None
+    # all known still sums
+    k = CaseCost(by_model=[ModelCost(provider="openai", cost_usd=0.1), ModelCost(provider="openai", cost_usd=0.2)])
+    assert k.cost_usd is not None and round(k.cost_usd, 2) == 0.3
