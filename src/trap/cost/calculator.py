@@ -3,21 +3,26 @@
 Isolated so this logic can be moved server-side without touching the proxy infrastructure.
 The only public symbol is :func:`calculate_call_cost`.
 
-Prices are maintained here rather than pulled from a third-party table: the previous
-dependency (tokencost) lagged behind provider releases, silently pricing current models
-at 0 or at a stale predecessor's rate. An explicit table with a NaN fallback keeps the
-failure mode honest — an unknown cost is reported as unknown, never as a wrong number.
+Price data is served by the trapstreet site (GET /api/pricing) and cached locally — see
+:mod:`trap.cost.pricing` for the source chain. The bundled table below is only the
+last-resort fallback (fresh install, offline, no cache); it exists because the previous
+third-party dependency (tokencost) lagged behind provider releases, silently pricing
+current models at 0 or at a stale predecessor's rate. A NaN fallback keeps the failure
+mode honest — an unknown cost is reported as unknown, never as a wrong number.
 """
 
 from __future__ import annotations
 
 import math
+from functools import lru_cache
+
+from trap.cost.pricing import PriceRow, get_price_rows
 
 # USD per million tokens (input, output), keyed by model-id prefix so one entry covers
 # both a version alias ("claude-haiku-4-5") and the dated full id the API reports
 # ("claude-haiku-4-5-20251001"). First match wins: keep more-specific prefixes
 # ("gpt-5.5-pro") ahead of the prefixes they extend ("gpt-5.5").
-_PRICES_PER_MTOK: list[tuple[str, float, float]] = [
+_PRICES_PER_MTOK: list[PriceRow] = [
     # Anthropic
     ("claude-fable-5", 10.0, 50.0),
     ("claude-mythos-5", 10.0, 50.0),
@@ -44,6 +49,12 @@ _PRICES_PER_MTOK: list[tuple[str, float, float]] = [
 ]
 
 
+@lru_cache(maxsize=1)
+def _price_rows() -> tuple[PriceRow, ...]:
+    # resolved once per process (a run makes many calls; the table doesn't move under it)
+    return tuple(get_price_rows(_PRICES_PER_MTOK))
+
+
 def calculate_call_cost(prompt_tokens: int, completion_tokens: int, model: str | None) -> float:
     """Return the USD cost for one API call.
 
@@ -52,7 +63,7 @@ def calculate_call_cost(prompt_tokens: int, completion_tokens: int, model: str |
     if model is None:
         return math.nan
     name = model.lower()
-    for prefix, input_per_mtok, output_per_mtok in _PRICES_PER_MTOK:
+    for prefix, input_per_mtok, output_per_mtok in _price_rows():
         if name.startswith(prefix):
             return (prompt_tokens * input_per_mtok + completion_tokens * output_per_mtok) / 1_000_000
     return math.nan
