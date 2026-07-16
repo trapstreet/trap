@@ -141,6 +141,49 @@ def test_auth_status_env_key_only(runner, tmp_path, monkeypatch):
     assert seen == {"server": "https://trapstreet.run", "key": "env-key"}
 
 
+def test_auth_status_invalid_token_exits_1(runner, tmp_path, monkeypatch):
+    from trap.auth import ApiError
+
+    _store_at(monkeypatch, tmp_path)
+    AuthStore().save(AuthData(server=DEFAULT_SERVER, api_key="stale"))
+
+    def failing_get_me(self):
+        raise ApiError("http 401: unauthorized")
+
+    monkeypatch.setattr("trap.auth.client.ApiClient.get_me", failing_get_me)
+    res = runner.invoke(app, ["auth", "status"])
+    assert res.exit_code == 1
+    assert "401" in res.output
+
+
+def _mismatched_pairing(monkeypatch):
+    """Target the default server while AuthStore.load hands back a profile issued
+    for UAT. The keyed store pins issued_for to the lookup key, so today's
+    commands can't produce this — the guard exists for future call sites and
+    corrupt states."""
+    monkeypatch.setenv("TRAPSTREET_URL", DEFAULT_SERVER)
+    monkeypatch.setattr(
+        "trap.auth.store.AuthStore.load",
+        lambda self, server=None: AuthData(server=UAT, api_key="uat-key"),
+    )
+
+
+def test_auth_status_mismatched_profile_refuses(runner, tmp_path, monkeypatch):
+    _store_at(monkeypatch, tmp_path)
+    _mismatched_pairing(monkeypatch)
+    res = runner.invoke(app, ["auth", "status", "--no-verify"])
+    assert res.exit_code == 1
+    assert "issued for" in res.output and "uat.trapstreet.run" in res.output
+
+
+def test_submit_mismatched_profile_refuses(runner, tmp_path, monkeypatch):
+    _store_at(monkeypatch, tmp_path)
+    _mismatched_pairing(monkeypatch)
+    res = runner.invoke(app, ["submit", "t"])
+    assert res.exit_code == 2, res.output
+    assert "issued for" in res.output
+
+
 # -- submit -------------------------------------------------------------------
 
 

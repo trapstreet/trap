@@ -81,6 +81,41 @@ def test_store_corrupt_returns_none(store, tmp_path):
     assert store.delete() is False
 
 
+def test_store_non_dict_json_returns_none(store, tmp_path):
+    (tmp_path / "auth.json").write_text("[1, 2]")  # valid JSON, wrong shape
+    assert store.load() is None
+    assert store.servers() == []
+
+
+def test_store_unrecognized_object_returns_none(store, tmp_path):
+    # a dict that is neither the keyed shape nor a legacy AuthData
+    (tmp_path / "auth.json").write_text(json.dumps({"foo": 1}))
+    assert store.load() is None
+    assert store.servers() == []
+
+
+def test_store_invalid_profile_returns_none(store, tmp_path):
+    # keyed shape, but the profile itself is missing api_key
+    (tmp_path / "auth.json").write_text(
+        json.dumps({"version": 2, "profiles": {DEFAULT_SERVER: {"solution": "sol"}}})
+    )
+    assert store.load() is None
+    assert store.servers() == [DEFAULT_SERVER]  # listed, just not loadable
+
+
+def test_store_legacy_migration_survives_readonly_file(store, tmp_path, monkeypatch):
+    # the in-place upgrade is best-effort: if the rewrite fails, the parsed
+    # profile is still served for this run
+    (tmp_path / "auth.json").write_text(json.dumps({"server": UAT, "api_key": "legacy"}))
+
+    def failing_write(self, profiles):
+        raise OSError("read-only")
+
+    monkeypatch.setattr(AuthStore, "_write", failing_write)
+    loaded = store.load(UAT)
+    assert loaded is not None and loaded.api_key == "legacy"
+
+
 # -- resolve (env overrides + server↔token pairing) ---------------------------
 
 STORED = AuthData(server="https://trapstreet.run", api_key="prod-key")
