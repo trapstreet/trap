@@ -101,5 +101,10 @@ def test_casecost_unknown_propagates_not_zero():
     )
     assert c.cost_usd is None
     # all known still sums
-    k = CaseCost(by_model=[ModelCost(provider="openai", cost_usd=0.1), ModelCost(provider="openai", cost_usd=0.2)])
+    k = CaseCost(
+        by_model=[
+            ModelCost(provider="openai", cost_usd=0.1),
+            ModelCost(provider="openai", cost_usd=0.2),
+        ]
+    )
     assert k.cost_usd is not None and round(k.cost_usd, 2) == 0.3
