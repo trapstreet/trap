@@ -41,9 +41,21 @@ The terminal table shows per-case aggregates; per-model detail lives in `report.
 
 ## Pricing
 
-USD is computed from an explicit per-model price table maintained in
-`src/trap/cost/calculator.py` (prefix-matched against the model id the API reports).
-Models absent from the table (or local servers like Ollama/vLLM) still get token
+The price table is served data, not CLI code — trapstreet.run is the source of
+truth (`GET /api/pricing`, kept fresh server-side). The CLI resolves prices
+through a chain that never blocks or breaks a run (`src/trap/cost/pricing.py`):
+
+1. local cache fresher than 24h (`~/.config/trapstreet/pricing.json`);
+2. a best-effort server fetch (3s timeout, failure is silent);
+3. the stale cache (still newer than the wheel);
+4. the bundled table in `src/trap/cost/calculator.py` — last-resort fallback only.
+
+Rows are prefix-matched against the model id the API reports (the server sends
+longest-prefix-first, so the most specific row wins). A price update is a data
+change on the server — no CLI release. `TRAPSTREET_URL` redirects the fetch
+(e.g. at UAT), `TRAP_PRICING_CACHE` relocates the cache file.
+
+Models absent everywhere (or local servers like Ollama/vLLM) still get token
 counts, but `cost_usd` is `null` — an unknown cost, deliberately distinct from `0.0`.
 
 ## Proxy internals
