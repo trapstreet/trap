@@ -59,5 +59,11 @@ A JSON list of per-case results:
 ```
 
 `metrics` is whatever the judge printed (`null` if no judge ran). The grader prints
-free-form JSON; trap stores and displays it but never interprets it or lets it affect
-the exit code.
+free-form JSON; trap stores and displays it but never interprets it. A grader *verdict*
+never affects the exit code; a grader that itself crashes does (see the CLI reference,
+exit code `3`).
+
+> **Legacy generation.** Task versions pinned before this contract (trapstreet-cli
+> ≤ 0.4.x) read a `TRAPTASK_PAYLOAD` env var instead and do not run under this CLI —
+> their judges crash with a `KeyError` (trap names the cause in the error). Fix is on
+> the task side: publish a new task version whose judge/grader read `TRAPTASK_MANIFEST`.

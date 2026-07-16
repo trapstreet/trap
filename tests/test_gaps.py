@@ -167,16 +167,19 @@ def test_submit_uses_stored_credentials(make_project, runner, monkeypatch, tmp_p
     monkeypatch.delenv("TRAPSTREET_API_KEY", raising=False)
     monkeypatch.delenv("TRAPSTREET_URL", raising=False)
     monkeypatch.setattr("trap.auth.store.AuthStore.PATH", tmp_path / "auth.json")
-    (tmp_path / "auth.json").write_text(json.dumps({"server": "https://stored", "api_key": "stored-key"}))
+    # legacy single-object file: migrated on read, then read as the default-server profile
+    (tmp_path / "auth.json").write_text(
+        json.dumps({"server": "https://trapstreet.run", "api_key": "stored-key"})
+    )
     captured = {}
 
     def fake_submit(self, path):
-        captured["server"] = self._server
+        captured["server"], captured["key"] = self._server, self._api_key
         return {"run": {"passed": True}}
 
     monkeypatch.setattr("trap.auth.client.ApiClient.submit", fake_submit)
     assert runner.invoke(app, ["submit", "t"]).exit_code == 0
-    assert captured["server"] == "https://stored"
+    assert captured == {"server": "https://trapstreet.run", "key": "stored-key"}
 
 
 # -- TaskRunner: no callbacks, latest symlink healing -------------------------

@@ -60,7 +60,7 @@ graph TD
 | `report` | Write `report.json`; render rich/json | `ReportHandle`, `RichRenderer` |
 | `environment` | Best-effort host machine detection | `EnvironmentDetector` |
 | `display` | Live progress bar; submit-result rendering | `CaseProgress` |
-| `auth` | Login (OAuth), token store, upload client | `ApiClient`, `AuthStore` |
+| `auth` | Login (OAuth), per-server token store, env/stored resolution, upload client | `ApiClient`, `AuthStore`, `resolve_auth` |
 
 ## 2. `tp run` runtime flow
 

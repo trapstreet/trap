@@ -103,7 +103,10 @@ def test_run_solution_timeout_is_isolated(make_project, runner):
     assert "124" in res.output  # exit column shows the timeout sentinel
 
 
-def test_run_broken_judge_and_grader_isolated(make_project, runner):
+def test_run_broken_judge_and_grader_isolated_but_exit_3(make_project, runner):
+    # A broken judge/grader never crashes the run — the report still saves and
+    # renders — but a wholesale apparatus failure must not exit 0: the scores
+    # are missing, not zero, and scripts must be able to tell.
     make_project(
         cmd="sh -c 'echo hi'",
         cases=["c1"],
@@ -111,10 +114,52 @@ def test_run_broken_judge_and_grader_isolated(make_project, runner):
         grader={"cmd": "sh -c 'echo not-json'"},
     )
     res = runner.invoke(app, ["run", "-o", "json", "--no-environment"])
-    assert res.exit_code == 0, res.output
+    assert res.exit_code == 3, res.output
     data = json.loads(res.stdout)
     assert "exited with status 3" in data["cases_results"][0]["metrics"]["error"]
     assert "invalid JSON" in data["grader_metrics"]["error"]
+
+
+def test_run_all_judge_failures_exit_3(make_project, runner):
+    make_project(cmd="sh -c 'echo hi'", cases=["c1", "c2"], judge={"cmd": "sh -c 'exit 3'"})
+    res = runner.invoke(app, ["run", "-o", "json", "--no-environment"])
+    assert res.exit_code == 3, res.output
+    json.loads(res.stdout)  # report still rendered on stdout
+    assert "judge failed on all 2 cases" in res.stderr
+    assert "missing, not zero" in res.stderr
+
+
+def test_run_partial_judge_failure_exits_0(make_project, runner):
+    # One flaky judge invocation is recorded in the report but is not a
+    # wholesale apparatus failure — the run still exits 0.
+    judge_src = """
+import json, os
+from pathlib import Path
+m = json.loads(os.environ["TRAPTASK_MANIFEST"])
+if (Path(m["inputs_dir"]) / "crash").exists():
+    raise SystemExit(1)
+print(json.dumps({"score": 1.0}))
+"""
+    make_project(
+        cmd="sh -c 'cat'",
+        stdin="input.txt",
+        cases=["c1", "c2"],
+        inputs={"c1": {"input.txt": "x", "crash": ""}, "c2": {"input.txt": "y"}},
+        judge_src=judge_src,
+    )
+    res = runner.invoke(app, ["run", "--no-environment"])
+    assert res.exit_code == 0, res.output
+    # …but the missing scores are called out loudly on stderr.
+    assert "judge failed on 1 of 2 cases" in res.stderr
+    assert "c1" in res.stderr
+    assert "missing, not zero" in res.stderr
+
+
+def test_run_broken_grader_exits_3(make_project, runner):
+    make_project(cmd="sh -c 'echo hi'", cases=["c1"], grader={"cmd": "sh -c 'exit 7'"})
+    res = runner.invoke(app, ["run", "--no-environment"])
+    assert res.exit_code == 3, res.output
+    assert "grader failed" in res.stderr
 
 
 def test_run_fail_fast(make_project, runner):
@@ -240,9 +285,14 @@ def test_submit_not_logged_in(make_project, runner, monkeypatch):
     assert "not logged in" in res.output
 
 
-def test_init_stub(runner):
+def test_init_stub_is_honest(runner):
+    # Not implemented yet: must not exit 0 (scripts would read that as success)
+    # and must point at the hand-written path instead of a bare "not yet".
     res = runner.invoke(app, ["init"])
-    assert res.exit_code == 0
+    assert res.exit_code == 2
+    out = res.output.replace("\n", "")  # rich wraps long lines mid-URL
+    assert "isn't implemented yet" in out
+    assert "trap-yaml" in out
 
 
 # --- unanchored-provenance gate (leaderboard hides such runs) ------------------

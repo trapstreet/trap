@@ -5,7 +5,16 @@ from typing import Annotated
 
 import typer
 
-from trap.auth import DEFAULT_SERVER, ApiClient, ApiError, AuthStore, BrowserProvider, TokenProvider
+from trap.auth import (
+    DEFAULT_SERVER,
+    ApiClient,
+    ApiError,
+    AuthMismatchError,
+    AuthStore,
+    BrowserProvider,
+    TokenProvider,
+    resolve_auth,
+)
 from trap.cli._console import _die, console
 
 auth_app = typer.Typer(help="Manage authentication.")
@@ -28,11 +37,10 @@ def auth_login(
     By default opens a browser to complete OAuth. Pass --with-token to supply
     an api_key directly (useful for CI or headless environments).
 
-    The token is saved to ~/.config/trapstreet/auth.json (mode 600).
+    Tokens are stored per server in ~/.config/trapstreet/auth.json (mode 600):
+    logging in to one server leaves every other server's pairing untouched.
     """
-    stored = AuthStore().load()
-    # priority: --server / TRAPSTREET_URL > stored > default
-    resolved_server = server or (stored.server if stored else None) or DEFAULT_SERVER
+    resolved_server = server or DEFAULT_SERVER
 
     # BrowserProvider raises ValueError for a non-default server (the same check the
     # CLI used to duplicate), so provider construction sits inside the try alongside
@@ -53,44 +61,73 @@ def auth_login(
 
     path = AuthStore().save(auth_data)
     console.print(
-        "[green]✓ logged in[/green]"
+        f"[green]✓ logged in[/green] to {auth_data.server}"
         + (f" · solution [bold]{auth_data.solution}[/bold]" if auth_data.solution else "")
         + f" · token saved to {path}"
     )
 
 
 @auth_app.command("logout")
-def auth_logout() -> None:
-    """Delete the locally-stored api_key."""
+def auth_logout(
+    server: Annotated[
+        str | None,
+        typer.Option("--server", envvar="TRAPSTREET_URL", help="Which server's token to remove."),
+    ] = None,
+) -> None:
+    """Delete the locally-stored api_key for one server (other servers keep theirs)."""
+    target = server or DEFAULT_SERVER
     auth_store = AuthStore()
-    if not auth_store.exists:
-        console.print(f"already logged out — no file at {auth_store.PATH}")
+    if not auth_store.delete(target):
+        console.print(f"already logged out — no token stored for {target}")
         return
-    auth_store.delete()
-    console.print(f"[green]✓[/green] removed {auth_store.PATH}")
+    console.print(f"[green]✓[/green] removed the {target} profile from {auth_store.PATH}")
 
 
 @auth_app.command("status")
 def auth_status(
+    server: Annotated[
+        str | None,
+        typer.Option("--server", envvar="TRAPSTREET_URL", help="Which server's pairing to show."),
+    ] = None,
     verify: Annotated[
         bool,
         typer.Option("--verify/--no-verify", help="Ping server to verify token validity."),
     ] = True,
 ) -> None:
-    """Show current authentication state."""
-    stored = AuthStore().load()
-    if not stored:
-        console.print("[red]not logged in[/red]. Run [bold]tp auth login[/bold].")
+    """Show the authentication state in effect (env overrides applied) — exactly
+    the server/token pair `tp submit` would use. --server inspects another profile."""
+    auth_store = AuthStore()
+    target = server or DEFAULT_SERVER
+    stored = auth_store.load(target)
+    resolved = resolve_auth(stored, server_override=server)
+    if not resolved.api_key:
+        hint = "" if target == DEFAULT_SERVER else f" --server {target}"
+        console.print(
+            f"[red]not logged in[/red] to {target}. "
+            f"Run [bold]tp auth login{hint}[/bold] or set [bold]TRAPSTREET_API_KEY[/bold]."
+        )
+        if auth_store.servers():
+            console.print(f"  stored profiles: {', '.join(auth_store.servers())}")
         raise typer.Exit(code=1)
 
-    console.print(f"  server    {stored.server}")
-    if stored.solution:
+    console.print(f"  server    {resolved.server} [dim]({resolved.server_source})[/dim]")
+    console.print(f"  token     [dim]({resolved.api_key_source})[/dim]")
+    if stored and stored.solution and resolved.api_key_source == "stored":
         console.print(f"  solution  [bold]{stored.solution}[/bold]")
+    others = [s for s in auth_store.servers() if s != resolved.server.rstrip("/")]
+    if others:
+        console.print(f"  profiles  [dim]{', '.join(others)} — select with --server[/dim]")
+
+    try:
+        resolved.ensure_paired()
+    except AuthMismatchError as e:
+        console.print(f"[red]error[/red]: {e}")
+        raise typer.Exit(code=1) from None
 
     if not verify:
         return
 
-    client = ApiClient(stored.server, stored.api_key)
+    client = ApiClient(resolved.server, resolved.api_key)
     try:
         me = client.get_me()
     except ApiError as e:

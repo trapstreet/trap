@@ -1,32 +1,141 @@
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
 from trap.auth.client import ApiClient, ApiError
 from trap.auth.login import BrowserProvider, TokenProvider
 from trap.auth.oauth import OAuthCallbackServer
+from trap.auth.resolve import AuthMismatchError, resolve_auth
 from trap.auth.store import DEFAULT_SERVER, AuthData, AuthStore
 
-# -- store --------------------------------------------------------------------
+# -- store (one profile per server) --------------------------------------------
+
+UAT = "https://uat.trapstreet.run"
 
 
-def test_store_roundtrip(tmp_path, monkeypatch):
+@pytest.fixture
+def store(tmp_path, monkeypatch) -> AuthStore:
     monkeypatch.setattr(AuthStore, "PATH", tmp_path / "auth.json")
-    store = AuthStore()
-    assert store.load() is None and not store.exists
-    path = store.save(AuthData(server="https://s", api_key="k", solution="sol"))
+    return AuthStore()
+
+
+def test_store_roundtrip_default_server(store):
+    assert store.load() is None
+    path = store.save(AuthData(server=DEFAULT_SERVER, api_key="k", solution="sol"))
     assert oct(path.stat().st_mode)[-3:] == "600"
-    loaded = store.load()
+    loaded = store.load()  # no arg → DEFAULT_SERVER profile
     assert loaded is not None and loaded.api_key == "k" and loaded.solution == "sol"
-    store.delete()
-    assert not store.exists
+    assert loaded.server == DEFAULT_SERVER
 
 
-def test_store_corrupt_returns_none(tmp_path, monkeypatch):
-    monkeypatch.setattr(AuthStore, "PATH", tmp_path / "auth.json")
+def test_store_profiles_are_independent(store):
+    store.save(AuthData(server=DEFAULT_SERVER, api_key="prod-key"))
+    store.save(AuthData(server=UAT, api_key="uat-key"))
+    assert store.load().api_key == "prod-key"  # uat login must not clobber prod
+    assert store.load(UAT).api_key == "uat-key"
+    assert store.servers() == [DEFAULT_SERVER, UAT]
+
+
+def test_store_save_updates_existing_profile(store):
+    store.save(AuthData(server=DEFAULT_SERVER, api_key="old"))
+    store.save(AuthData(server=DEFAULT_SERVER, api_key="new"))
+    assert store.load().api_key == "new"
+    assert store.servers() == [DEFAULT_SERVER]
+
+
+def test_store_server_url_normalized(store):
+    store.save(AuthData(server=DEFAULT_SERVER + "/", api_key="k"))
+    assert store.load(DEFAULT_SERVER).api_key == "k"
+    assert store.load(DEFAULT_SERVER + "/").api_key == "k"
+    assert store.servers() == [DEFAULT_SERVER]
+
+
+def test_store_delete_per_server(store, tmp_path):
+    store.save(AuthData(server=DEFAULT_SERVER, api_key="p"))
+    store.save(AuthData(server=UAT, api_key="u"))
+    assert store.delete(UAT) is True
+    assert store.load(UAT) is None
+    assert store.load().api_key == "p"  # other profile untouched
+    assert store.delete(UAT) is False  # already gone
+    assert store.delete() is True  # last profile removed → file removed
+    assert not (tmp_path / "auth.json").exists()
+
+
+def test_store_migrates_legacy_single_object_file(store, tmp_path):
+    (tmp_path / "auth.json").write_text(json.dumps({"server": UAT, "api_key": "legacy", "solution": "sol"}))
+    assert store.load() is None  # legacy profile was uat, not prod
+    loaded = store.load(UAT)
+    assert loaded is not None and loaded.api_key == "legacy" and loaded.solution == "sol"
+    migrated = json.loads((tmp_path / "auth.json").read_text())
+    assert UAT in migrated["profiles"]  # file rewritten in the keyed format
+    assert oct((tmp_path / "auth.json").stat().st_mode)[-3:] == "600"
+
+
+def test_store_corrupt_returns_none(store, tmp_path):
     (tmp_path / "auth.json").write_text("not json{{{")
-    assert AuthStore().load() is None
+    assert store.load() is None
+    assert store.servers() == []
+    assert store.delete() is False
+
+
+# -- resolve (env overrides + server↔token pairing) ---------------------------
+
+STORED = AuthData(server="https://trapstreet.run", api_key="prod-key")
+
+
+def test_resolve_stored_only():
+    r = resolve_auth(STORED)
+    assert (r.server, r.server_source) == ("https://trapstreet.run", "stored")
+    assert (r.api_key, r.api_key_source) == ("prod-key", "stored")
+    r.ensure_paired()  # stored token on its own server — never a mismatch
+
+
+def test_resolve_nothing_defaults():
+    r = resolve_auth(None)
+    assert (r.server, r.server_source) == (DEFAULT_SERVER, "default")
+    assert (r.api_key, r.api_key_source) == (None, None)
+    r.ensure_paired()  # no token — nothing to mispair
+
+
+def test_resolve_env_overrides_both(monkeypatch):
+    monkeypatch.setenv("TRAPSTREET_URL", "https://uat.trapstreet.run")
+    monkeypatch.setenv("TRAPSTREET_API_KEY", "uat-key")
+    r = resolve_auth(STORED)
+    assert (r.server, r.server_source) == ("https://uat.trapstreet.run", "env")
+    assert (r.api_key, r.api_key_source) == ("uat-key", "env")
+    r.ensure_paired()  # explicit env token is taken as intended for the env server
+
+
+def test_resolve_mismatch_stored_token_env_server(monkeypatch):
+    monkeypatch.setenv("TRAPSTREET_URL", "https://uat.trapstreet.run")
+    r = resolve_auth(STORED)
+    assert (r.api_key, r.api_key_source) == ("prod-key", "stored")
+    with pytest.raises(AuthMismatchError, match=r"https://trapstreet\.run"):
+        r.ensure_paired()
+
+
+def test_resolve_mismatch_message_names_the_fix(monkeypatch):
+    monkeypatch.setenv("TRAPSTREET_URL", "https://uat.trapstreet.run")
+    with pytest.raises(AuthMismatchError) as exc:
+        resolve_auth(STORED).ensure_paired()
+    msg = str(exc.value)
+    assert "TRAPSTREET_API_KEY" in msg and "tp auth login" in msg
+    assert "https://uat.trapstreet.run" in msg
+
+
+def test_resolve_trailing_slash_is_not_a_mismatch(monkeypatch):
+    monkeypatch.setenv("TRAPSTREET_URL", "https://trapstreet.run/")
+    resolve_auth(STORED).ensure_paired()
+
+
+def test_resolve_blank_env_ignored(monkeypatch):
+    monkeypatch.setenv("TRAPSTREET_URL", "  ")
+    monkeypatch.setenv("TRAPSTREET_API_KEY", "")
+    r = resolve_auth(STORED)
+    assert (r.server_source, r.api_key_source) == ("stored", "stored")
 
 
 # -- client (httpx MockTransport) --------------------------------------------

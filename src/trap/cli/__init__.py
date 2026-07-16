@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -10,14 +9,22 @@ from typing import Annotated
 import typer
 
 from trap import __version__
-from trap.auth import DEFAULT_SERVER, ApiClient, ApiError, AuthStore
+from trap.auth import (
+    DEFAULT_SERVER,
+    ApiClient,
+    ApiError,
+    AuthMismatchError,
+    AuthStore,
+    effective_server,
+    resolve_auth,
+)
 from trap.cli._auth import auth_app
 from trap.cli._console import _die, _env_truthy, console, err_console
 from trap.display import CaseProgress, render_submit_result
 from trap.environment import EnvironmentDetector
 from trap.git_ops import GitOpsError, LocalRepo, ParsedGitUrl
 from trap.loader import ConfigError, TrapLoader, TraptaskLoader
-from trap.models import Provenance
+from trap.models import Provenance, is_infra_error
 from trap.report import OutputFormat, ReportHandle, renderer_factory
 from trap.runner import TaskRunner
 
@@ -243,9 +250,43 @@ def run(
         environment=environment_info,
     )
     renderer_factory(output).render(report_data)
-    # trap reports facts, not a verdict: a completed run exits 0 regardless of per-case
-    # exit codes or scores (read the grader / report.json to gate CI). trap-level
-    # failures (bad config, git errors) still exit non-zero via _die.
+    # trap reports facts, not a verdict: per-case exit codes and scores never set the
+    # exit code (read the grader / report.json to gate CI); trap-level failures (bad
+    # config, git errors) exit 2 via _die. But a broken measuring apparatus is not a
+    # fact about the solution: when the judge errored on *every* case, or the grader
+    # errored, the scores are missing — not zero — so exit 3 to keep scripts from
+    # reading an unscored run as a completed one.
+    judge_failed = [r for r in case_results if is_infra_error(r.metrics)]
+    judge_broken = (
+        traptask_yaml_loader.traptask.judge is not None
+        and bool(case_results)
+        and len(judge_failed) == len(case_results)
+    )
+    grader_broken = traptask_yaml_loader.traptask.grader is not None and (
+        is_infra_error(grader_metrics)
+    )
+    if judge_broken:
+        first = case_results[0]
+        err_console.print(
+            f"[red]error[/red]: judge failed on all {len(case_results)} cases — "
+            f"scores are missing, not zero. First error: {first.metrics['error']}\n"
+            f"  judge stderr: {report_handle.run_dir / first.case_id / 'judge' / 'stderr'}"
+        )
+    elif judge_failed:
+        # Some cases scored, some didn't: still a completed run (exit unchanged),
+        # but say loudly that those scores are missing, not zero.
+        err_console.print(
+            f"[yellow]warning[/yellow]: judge failed on {len(judge_failed)} of "
+            f"{len(case_results)} cases ({', '.join(r.case_id for r in judge_failed[:5])}"
+            f"{', …' if len(judge_failed) > 5 else ''}) — their scores are missing, not zero."
+        )
+    if grader_broken:
+        err_console.print(
+            f"[red]error[/red]: grader failed: {grader_metrics['error']}\n"
+            f"  grader stderr: {report_handle.run_dir / 'grader' / 'stderr'}"
+        )
+    if judge_broken or grader_broken:
+        raise typer.Exit(code=3)
 
 
 @app.command()
@@ -301,15 +342,18 @@ def submit(
     Reads from the .trap/<task>/<run>/report.json workspace that `tp run`
     populated.
     """
-    stored = AuthStore().load()
-    # priority: TRAPSTREET_URL env > stored > default
-    resolved_server = (
-        os.environ.get("TRAPSTREET_URL") or (stored.server if stored else None) or DEFAULT_SERVER
-    )
-    # priority: TRAPSTREET_API_KEY env > stored
-    resolved_key = os.environ.get("TRAPSTREET_API_KEY") or (stored.api_key if stored else None)
-    if not resolved_key:
-        raise _die("not logged in. Run [bold]tp auth login[/bold] or set [bold]TRAPSTREET_API_KEY[/bold].")
+    target = effective_server()
+    resolved = resolve_auth(AuthStore().load(target))  # the profile issued for the target server
+    if not resolved.api_key:
+        hint = "" if target == DEFAULT_SERVER else f" --server {target}"
+        raise _die(
+            f"not logged in to {target}. Run [bold]tp auth login{hint}[/bold] "
+            "or set [bold]TRAPSTREET_API_KEY[/bold]."
+        )
+    try:
+        resolved.ensure_paired()
+    except AuthMismatchError as e:
+        raise _die(e) from None
 
     try:
         task_alias = TrapLoader.from_solution(solution).resolve_task(task).alias
@@ -327,7 +371,7 @@ def submit(
     )
     report_path = report_handle.report_json_path
 
-    client = ApiClient(resolved_server, resolved_key)
+    client = ApiClient(resolved.server, resolved.api_key)
     try:
         resp_data = client.submit(report_path)
     except ApiError as e:
@@ -338,5 +382,9 @@ def submit(
 # Hidden until the scaffold is implemented — registered but not advertised in `--help`.
 @app.command(hidden=True)
 def init() -> None:
-    """Generate annotated trap.yaml + traptask.yaml scaffold."""
-    console.print("not yet")
+    """Not implemented yet — write trap.yaml by hand (see the trap.yaml reference)."""
+    console.print(
+        "[yellow]tp init isn't implemented yet.[/yellow] Write trap.yaml by hand — "
+        "see https://github.com/trapstreet/trap/blob/main/docs/reference/trap-yaml.md"
+    )
+    raise typer.Exit(code=2)

@@ -9,7 +9,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from trap.models import CaseResult, ReportData
+from trap.models import INFRA_ERROR_KEY, CaseResult, ReportData
 from trap.report.base import BaseRenderer
 
 
@@ -19,7 +19,15 @@ class RichRenderer(BaseRenderer):
 
     @staticmethod
     def _get_metrics_keys(data: ReportData) -> set[str]:
-        return {key for result in data.cases_results if result.metrics for key in result.metrics}
+        # The fold marker is machine-facing schema, not a metric — the error
+        # column already tells the human what happened.
+        return {
+            key
+            for result in data.cases_results
+            if result.metrics
+            for key in result.metrics
+            if key != INFRA_ERROR_KEY
+        }
 
     @staticmethod
     def _render_metric_cell(value: object) -> str:

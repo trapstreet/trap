@@ -33,6 +33,13 @@ print(json.dumps({"passed": ok, "score": sum(scores) / len(scores) if scores els
 """
 
 
+@pytest.fixture(autouse=True)
+def _isolate_trapstreet_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Strip the developer's shell auth env so tests always start unauthenticated."""
+    monkeypatch.delenv("TRAPSTREET_URL", raising=False)
+    monkeypatch.delenv("TRAPSTREET_API_KEY", raising=False)
+
+
 @pytest.fixture
 def runner() -> CliRunner:
     return CliRunner()

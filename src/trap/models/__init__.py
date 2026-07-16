@@ -4,7 +4,7 @@ from .cost import CaseCost, ModelCost
 from .environment import Cpu, Environment
 from .provenance import GitProvenance, Provenance
 from .report import ReportData
-from .results import CaseResult
+from .results import INFRA_ERROR_KEY, CaseResult, is_infra_error
 from .trap_yaml import Profile, TaskBinding, TrapConfig
 from .traptask_yaml import (
     DirsConfig,
@@ -16,6 +16,7 @@ from .traptask_yaml import (
 )
 
 __all__ = [
+    "INFRA_ERROR_KEY",
     "CaseCost",
     "CaseResult",
     "Cpu",
@@ -33,4 +34,5 @@ __all__ = [
     "TrapConfig",
     "TraptaskCase",
     "TraptaskConfig",
+    "is_infra_error",
 ]

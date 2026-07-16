@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from trap.models import INFRA_ERROR_KEY
+
 if TYPE_CHECKING:
     from trap.runner.capture import Capture
 
@@ -97,19 +99,34 @@ class CapturedSubprocess:
 
     def run_metrics_or_error(self, *, runner_name: str) -> Any:
         """Run the actor and return its parsed JSON metrics. A broken actor — timeout,
-        non-zero exit, or non-JSON output — is folded into an ``{"error": ...}`` metric
-        rather than raised, so one bad judge/grader never crashes the run or loses the
-        report (full detail is in the actor's stderr capture). ``runner_name`` ("judge" /
-        "grader") just labels the error."""
+        non-zero exit, or non-JSON output — is folded into an ``{"error": …, "infra": true}``
+        metric rather than raised, so one bad judge/grader never crashes the run or loses
+        the report (full detail is in the actor's stderr capture). The ``infra`` marker is
+        what distinguishes a fold from an actor's own metrics that happen to carry an
+        ``error`` key — the discriminator is part of the report.json schema, not a shape
+        convention. ``runner_name`` ("judge" / "grader") just labels the error."""
         result = self.run()
         if result.exit_code == self.TIMEOUT_EXIT_CODE:
-            return {"error": f"{runner_name} timed out after {self.timeout}s"}
+            return self._fold(f"{runner_name} timed out after {self.timeout}s")
         if result.exit_code != 0:
-            return {"error": f"{runner_name} exited with status {result.exit_code}"}
+            msg = f"{runner_name} exited with status {result.exit_code}"
+            # A stderr that names TRAPTASK_PAYLOAD is the old-generation-task
+            # signature: say so in words instead of leaving a bare status code.
+            if "TRAPTASK_PAYLOAD" in result.stderr:
+                msg += (
+                    " (its stderr mentions TRAPTASK_PAYLOAD — this task version was"
+                    " written for the legacy trap CLI. Use the task's latest version,"
+                    " or run this one with `uvx --from trapstreet-cli tp run`)"
+                )
+            return self._fold(msg)
         try:
             return json.loads(result.stdout)
         except json.JSONDecodeError as e:
-            return {"error": f"{runner_name} produced invalid JSON: {e}"}
+            return self._fold(f"{runner_name} produced invalid JSON: {e}")
+
+    @staticmethod
+    def _fold(message: str) -> dict[str, Any]:
+        return {"error": message, INFRA_ERROR_KEY: True}
 
     @staticmethod
     def _as_text(out: object) -> str:

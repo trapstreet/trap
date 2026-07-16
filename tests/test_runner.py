@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from trap.models import is_infra_error
 from trap.runner.capture import Capture
 from trap.runner.layout import CaseLayout
 from trap.runner.proc import CapturedSubprocess
@@ -49,6 +50,29 @@ def test_run_metrics_ok(tmp_path):
 def test_run_metrics_nonzero(tmp_path):
     out = _proc("sh -c 'exit 2'", tmp_path, tmp_path / "cap").run_metrics_or_error(runner_name="judge")
     assert "judge exited with status 2" in out["error"]
+    assert "legacy" not in out["error"]  # no legacy hint without the stderr marker
+    assert is_infra_error(out)  # folds carry the infra marker
+
+
+def test_run_metrics_nonzero_legacy_hint(tmp_path):
+    # A crash whose stderr names TRAPTASK_PAYLOAD is the old-generation-task
+    # signature (journey-2): the error must say so in words, not just "status 1".
+    cmd = "sh -c 'echo \"KeyError: TRAPTASK_PAYLOAD\" >&2; exit 1'"
+    out = _proc(cmd, tmp_path, tmp_path / "cap").run_metrics_or_error(runner_name="judge")
+    assert "judge exited with status 1" in out["error"]
+    assert "legacy" in out["error"]
+    assert "trapstreet-cli" in out["error"]
+
+
+def test_is_infra_error():
+    assert is_infra_error({"error": "judge exited with status 1", "infra": True})
+    assert not is_infra_error({"error": "judge exited with status 1"})  # no marker: verdict
+    assert not is_infra_error({"error": "boom", "score": 0.0})  # actor verdict with error field
+    assert not is_infra_error({"error": 3, "infra": True})  # error must be a string
+    assert not is_infra_error({"infra": True})
+    assert not is_infra_error({"score": 1.0})
+    assert not is_infra_error(None)
+    assert not is_infra_error("error")
 
 
 def test_run_metrics_bad_json(tmp_path):
