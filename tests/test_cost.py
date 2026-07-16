@@ -144,7 +144,10 @@ def test_accumulate_unknown_model_stays_unknown():
     assert entry.cost_usd is None
     assert entry.calls == 2 and entry.prompt_tokens == 70
 
-    # priced model unaffected
+    # priced model unaffected — and known + known accumulates
     proxy._accumulate("openai", 100, 50, "gpt-5.4-nano")
     priced = proxy._cost_buckets[("openai", "gpt-5.4-nano")]
-    assert priced.cost_usd is not None and priced.cost_usd > 0
+    first = priced.cost_usd
+    assert first is not None and first > 0
+    proxy._accumulate("openai", 100, 50, "gpt-5.4-nano")
+    assert priced.cost_usd == pytest.approx(first * 2)

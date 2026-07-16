@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from trap.display.report import RichRenderer
 from trap.display.submit import render_submit_result
 
 
@@ -14,3 +15,9 @@ def test_render_submit_lean_response(capsys):
     render_submit_result({})
     out = capsys.readouterr().out
     assert "submitted" in out and "?" in out
+
+
+def test_render_cost_unknown_is_question_mark():
+    # unknown (unpriced model) must be visually distinct from a measured zero
+    assert RichRenderer._render_cost(None) == "[dim]?[/dim]"
+    assert RichRenderer._render_cost(0.0) == "[dim]—[/dim]"

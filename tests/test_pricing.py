@@ -108,3 +108,24 @@ def test_calculator_uses_served_prices_end_to_end(tmp_path, monkeypatch):
     _write_cache(tmp_path, time.time())
     cost = calculate_call_cost(1_000_000, 1_000_000, "gpt-3.5-turbo-0125")
     assert cost == pytest.approx(0.5 + 1.5)
+
+
+def test_default_cache_path_without_override(monkeypatch):
+    monkeypatch.delenv("TRAP_PRICING_CACHE", raising=False)
+    p = pricing._cache_path()
+    assert p.parts[-3:] == (".config", "trapstreet", "pricing.json")
+
+
+def test_corrupt_cache_falls_through(tmp_path):
+    # cache file parses as JSON but isn't the wire shape → unusable → bundled
+    (tmp_path / "pricing-cache.json").write_text(json.dumps({"unit": "usd_per_token", "prices": []}))
+    assert pricing.get_price_rows(BUNDLED) == BUNDLED
+
+
+def test_cache_write_failure_still_returns_fetched(tmp_path, monkeypatch):
+    # cache path's parent is a FILE → mkdir raises OSError → swallowed, rows still served
+    blocker = tmp_path / "blocker"
+    blocker.write_text("")
+    monkeypatch.setenv("TRAP_PRICING_CACHE", str(blocker / "pricing.json"))
+    _mock_fetch(monkeypatch, payload=WIRE)
+    assert pricing.get_price_rows(BUNDLED) == [("gpt-3.5-turbo", 0.5, 1.5)]
