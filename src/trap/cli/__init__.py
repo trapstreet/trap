@@ -262,9 +262,7 @@ def run(
         and bool(case_results)
         and len(judge_failed) == len(case_results)
     )
-    grader_broken = traptask_yaml_loader.traptask.grader is not None and (
-        is_infra_error(grader_metrics)
-    )
+    grader_broken = traptask_yaml_loader.traptask.grader is not None and (is_infra_error(grader_metrics))
     if judge_broken:
         first = case_results[0]
         err_console.print(
