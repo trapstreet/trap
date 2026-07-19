@@ -144,7 +144,7 @@ def _passing(make_project, **kw):
 def test_submit_no_run(make_project, runner, monkeypatch):
     make_project(cmd="sh -c 'echo hi'", cases=["c1"])
     monkeypatch.setenv("TRAPSTREET_API_KEY", "k")
-    res = runner.invoke(app, ["submit", "t"])
+    res = runner.invoke(app, ["submit", "--task", "t"])
     assert res.exit_code == 2 and "no completed runs" in res.output
 
 
@@ -157,7 +157,7 @@ def test_submit_api_error(make_project, runner, monkeypatch):
         raise ApiError("server exploded")
 
     monkeypatch.setattr("trap.auth.client.ApiClient.submit", boom)
-    res = runner.invoke(app, ["submit", "t"])
+    res = runner.invoke(app, ["submit", "--task", "t"])
     assert res.exit_code == 2 and "server exploded" in res.output
 
 
@@ -175,7 +175,7 @@ def test_submit_uses_stored_credentials(make_project, runner, monkeypatch, tmp_p
         return {"run": {"passed": True}}
 
     monkeypatch.setattr("trap.auth.client.ApiClient.submit", fake_submit)
-    assert runner.invoke(app, ["submit", "t"]).exit_code == 0
+    assert runner.invoke(app, ["submit", "--task", "t"]).exit_code == 0
     assert captured["server"] == "https://stored"
 
 

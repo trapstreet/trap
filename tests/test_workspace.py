@@ -115,7 +115,7 @@ def test_report_miss_lists_known_solutions(make_project, runner):
     assert "no completed runs" in res.output
     assert "other-sol-abc123" in res.output
     # with runs present the likely cause is a mismatch, not a missing tp run
-    assert "--solution" in res.output
+    assert "SOLUTION" in res.output
     assert "tp run first" not in res.output
 
 
@@ -135,7 +135,7 @@ def test_runs_are_solution_scoped(make_project, runner, tmp_path):
         json.dumps({"cmd": "sh -c 'echo two'", "tasks": {"t": {"source": str(tmp_path / "task")}}})
     )
     assert runner.invoke(app, ["run", "--no-environment"]).exit_code == 0
-    assert runner.invoke(app, ["run", "--solution", "other", "--no-environment"]).exit_code == 0
+    assert runner.invoke(app, ["run", "other", "--no-environment"]).exit_code == 0
     root = (sol / ".trap").resolve()
     keys = sorted(p.name for p in (root / "runs").iterdir())
     assert len(keys) == 2  # one namespace per solution, each deriving its own latest

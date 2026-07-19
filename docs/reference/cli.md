@@ -4,28 +4,28 @@ The installed command is `tp`.
 
 ## tp run
 
-Run a task against a solution (from the directory holding `trap.yaml`, or use `--solution`).
+Run a task against a solution (the positional argument; defaults to the `trap.yaml` in the cwd).
 
 ```
-tp run [TASK] [OPTIONS]
+tp run [SOLUTION] [OPTIONS]
 ```
 
 | Flag | Default | Description |
 |---|---|---|
-| `TASK` (positional) | first task | task alias (the `tasks:` key) to run |
-| `--solution` | cwd | solution to run: a local path or a git+ URL (cloned) |
-| `--clone-to` | `./<repo>` | where to clone a git+ URL `--solution` |
+| `SOLUTION` (positional) | cwd | solution to run: a local path or a git+ URL (cloned) |
+| `--task` | first task | task alias (the `tasks:` key) to run |
+| `--workspace / -w` | `.trap` | directory for run artifacts |
+| `--output / -o` | `rich` | renderer: `rich` or `json` |
+| `--clone-to` | `./<repo>` | where to clone a git+ URL `SOLUTION` |
 | `--trust-remote` | `false` | skip the confirmation before running a remote source (see below) |
 | `--allow-unanchored` | `false` | skip the confirmation for a run with no git provenance (see below) |
 | `--tag / -t` | (none) | filter cases by tag; repeatable |
-| `--output / -o` | `rich` | renderer: `rich` or `json` |
 | `--fail-fast` | `false` | stop after the first case whose solution exits non-zero |
 | `--setup-solution` / `--setup-task` | `false` | force the solution's / task's `setup_cmd` |
 | `--cost / --no-cost` | on | track LLM tokens/spend via the proxy |
 | `--environment / --no-environment` | on | record host CPU/RAM/OS/Python in the report |
-| `--workspace / -w` | `.trap` | directory for run artifacts |
 
-**Remote sources.** A remote `--solution git+<url>` (or a task whose `source` is a git+
+**Remote sources.** A remote `git+<url>` solution (or a task whose `source` is a git+
 URL) makes trap **download and run code you may not have seen** — its `setup_cmd`, the
 solution, and any judge/grader. trap asks for confirmation `[y/N]` first; pre-authorise
 with `--trust-remote` or `TRAP_TRUST_REMOTE=1`. With no TTY and no authorisation it
@@ -48,16 +48,16 @@ means a trap-level failure: bad/missing config, git error, declined remote, etc.
 Re-render a stored run without re-executing the solution.
 
 ```
-tp report [TASK] [RUN] [OPTIONS]
+tp report [SOLUTION] [OPTIONS]
 ```
 
 | Flag | Default | Description |
 |---|---|---|
-| `TASK` (positional) | first task | task alias |
-| `RUN` (positional) | `latest` | timestamp directory name, or `latest` |
-| `--solution` | cwd | local solution path holding `trap.yaml` |
-| `--output / -o` | `rich` | renderer: `rich` or `json` |
+| `SOLUTION` (positional) | cwd | local solution path holding `trap.yaml` |
+| `--task` | first task | task alias |
+| `--run / -r` | `latest` | timestamp directory name, or `latest` |
 | `--workspace / -w` | `.trap` | directory containing run artifacts |
+| `--output / -o` | `rich` | renderer: `rich` or `json` |
 
 ## tp submit
 
@@ -65,13 +65,13 @@ Upload a run's `report.json` to trapstreet. Requires auth (`tp auth login` or
 `TRAPSTREET_API_KEY`).
 
 ```
-tp submit [TASK] [OPTIONS]
+tp submit [SOLUTION] [OPTIONS]
 ```
 
 | Flag | Default | Description |
 |---|---|---|
-| `TASK` (positional) | first task | task alias (also the trapstreet task id) |
-| `--solution` | cwd | local solution path holding `trap.yaml` |
+| `SOLUTION` (positional) | cwd | local solution path holding `trap.yaml` |
+| `--task` | first task | task alias (also the trapstreet task id) |
 | `--run / -r` | `latest` | which run to upload |
 | `--workspace / -w` | `.trap` | directory containing run artifacts |
 | `--allow-unanchored` | `false` | skip the confirmation for a run with no git provenance (see `tp run`) |

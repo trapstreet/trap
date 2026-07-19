@@ -68,7 +68,7 @@ graph TD
 
 ```mermaid
 flowchart TD
-    A["tp run &lt;alias&gt;"] --> B["TrapLoader.from_solution<br/>clone solution + run setup_cmd"]
+    A["tp run --task &lt;alias&gt;"] --> B["TrapLoader.from_solution<br/>clone solution + run setup_cmd"]
     B --> C["resolve_task(alias)"]
     C --> D["TraptaskLoader.from_task_binding<br/>clone task + setup_cmd · discover cases"]
     D --> E{"TaskRunner.run<br/>for each case"}
