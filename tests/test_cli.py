@@ -224,7 +224,7 @@ def test_report_missing_run(make_project, runner):
     _passing(make_project)
     res = runner.invoke(app, ["report"])
     assert res.exit_code == 2
-    assert "no report" in res.output
+    assert "no completed runs" in res.output
 
 
 # --- submit ------------------------------------------------------------------

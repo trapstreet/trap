@@ -17,9 +17,10 @@ from trap.display import CaseProgress, render_submit_result
 from trap.environment import EnvironmentDetector
 from trap.git_ops import GitOpsError, LocalRepo, ParsedGitUrl
 from trap.loader import ConfigError, TrapLoader, TraptaskLoader
-from trap.models import Provenance
-from trap.report import OutputFormat, ReportHandle, renderer_factory
+from trap.models import Provenance, ReportData
+from trap.report import OutputFormat, renderer_factory
 from trap.runner import TaskRunner
+from trap.workspace import SolutionIdentity, Workspace
 
 app = typer.Typer(help="AI prompt / agent / workflow / testing framework.")
 app.add_typer(auth_app, name="auth")
@@ -44,6 +45,22 @@ def _main(
     ] = False,
 ) -> None:
     """AI prompt / agent / workflow / testing framework."""
+
+
+def _no_report(workspace: Workspace, error: FileNotFoundError) -> typer.Exit:
+    """Exit for a report miss, with advice matching the likely cause: an empty
+    workspace means the user never ran; existing runs under *other* solution keys
+    mean a cwd / --solution mismatch, where re-running would just miss again."""
+    msg = str(error)
+    if keys := workspace.solution_keys():
+        msg += (
+            "\nsolutions with runs in this workspace: "
+            + ", ".join(keys)
+            + "\ncheck that --solution (and the cwd) match the ones used for [bold]tp run[/bold]"
+        )
+    else:
+        msg += ". Run [bold]tp run[/bold] first."
+    return _die(msg)
 
 
 def _confirm_remote(url: str, *, trust: bool) -> None:
@@ -145,7 +162,7 @@ def run(
             help="Force-run the task's setup_cmd even when no remote pull brought new code.",
         ),
     ] = False,
-    workspace: Annotated[Path, typer.Option("--workspace", "-w")] = Path(".trap"),
+    workspace: Annotated[Path, typer.Option("--workspace", "-w")] = Path(Workspace.DEFAULT_DIRNAME),
     environment: Annotated[
         bool,
         typer.Option(
@@ -184,8 +201,8 @@ def run(
         task_binding = trap_yaml_loader.resolve_task(task)
         if ParsedGitUrl.looks_remote(task_binding.source):
             _confirm_remote(task_binding.source, trust=trust)
-        traptask_yaml_loader = TraptaskLoader.from_task(
-            task_binding, trap_yaml_loader.trap_dir, setup=setup_task
+        traptask_yaml_loader = TraptaskLoader.from_task_binding(
+            task_binding, trap_yaml_loader.trap_dir, setup=setup_task, workspace_root=workspace.resolve()
         )
     except (GitOpsError, ConfigError, subprocess.CalledProcessError) as e:
         raise _die(e) from None
@@ -204,14 +221,14 @@ def run(
 
     started_at_local = datetime.now()
     ts = started_at_local.isoformat(timespec="seconds")
-    report_handle = ReportHandle(workspace.resolve(), task_binding.alias, ts)
+    ws = Workspace(workspace.resolve(), SolutionIdentity.from_spec(solution).dirname, task_binding.alias)
 
     runner = TaskRunner(
         trap_config=trap_yaml_loader.config,
         trap_dir=trap_yaml_loader.trap_dir,
         traptask_config=traptask_yaml_loader.traptask,
         traptask_dir=traptask_yaml_loader.traptask_dir,
-        run_dir=report_handle.run_dir,
+        run_dir=ws.run_dir(ts),
         cost_enabled=cost,
     )
     prog_console = console if output == OutputFormat.rich else None
@@ -233,8 +250,8 @@ def run(
         except Exception:
             environment_info = None
 
-    report_data = report_handle.save(
-        case_results=case_results,
+    report_data = ReportData.from_run(
+        cases_results=case_results,
         trap_config=trap_yaml_loader.config,
         started_at_utc=started_at_local.astimezone(UTC),
         finished_at_utc=finished_at_utc,
@@ -242,7 +259,11 @@ def run(
         provenance=provenance,
         environment=environment_info,
     )
+    ws.save_as_report(ts, report_data)
     renderer_factory(output).render(report_data)
+    if output == OutputFormat.rich:
+        # Where the artifacts landed — the run id doubles as the `--run` handle.
+        console.print(f"[dim]run {ts} → {ws.report_json_path(ts)}[/dim]")
     # trap reports facts, not a verdict: a completed run exits 0 regardless of per-case
     # exit codes or scores (read the grader / report.json to gate CI). trap-level
     # failures (bad config, git errors) still exit non-zero via _die.
@@ -257,18 +278,18 @@ def report(
         typer.Option("--solution", help="Local solution path holding trap.yaml (default: cwd)."),
     ] = None,
     output: Annotated[OutputFormat, typer.Option("--output", "-o")] = OutputFormat.rich,
-    workspace: Annotated[Path, typer.Option("--workspace", "-w")] = Path(".trap"),
+    workspace: Annotated[Path, typer.Option("--workspace", "-w")] = Path(Workspace.DEFAULT_DIRNAME),
 ) -> None:
     """Display a report for a task (defaults to latest run)."""
     try:
         task_alias = TrapLoader.from_solution(solution).resolve_task(task).alias
     except (GitOpsError, ConfigError) as e:
         raise _die(e) from None
-    handle = ReportHandle(workspace.resolve(), task_alias, run)
+    ws = Workspace(workspace.resolve(), SolutionIdentity.from_spec(solution).dirname, task_alias)
     try:
-        report_data = handle.load()
-    except FileNotFoundError:
-        raise _die(f"no report at {handle.report_json_path}; run `tp run` first") from None
+        report_data = ws.load(run)
+    except FileNotFoundError as e:
+        raise _no_report(ws, e) from None
     renderer_factory(output).render(report_data)
 
 
@@ -285,7 +306,7 @@ def submit(
         str | None,
         typer.Option("--solution", help="Local solution path holding trap.yaml (default: cwd)."),
     ] = None,
-    workspace: Annotated[Path, typer.Option("--workspace", "-w")] = Path(".trap"),
+    workspace: Annotated[Path, typer.Option("--workspace", "-w")] = Path(Workspace.DEFAULT_DIRNAME),
     run: Annotated[str, typer.Option("--run", "-r", help="Which run to upload.")] = "latest",
     allow_unanchored: Annotated[
         bool,
@@ -298,8 +319,8 @@ def submit(
 ) -> None:
     """Upload a report.json to trapstreet.
 
-    Reads from the .trap/<task>/<run>/report.json workspace that `tp run`
-    populated.
+    Reads from the .trap/runs/<solution>/<task>/<run>/report.json workspace
+    that `tp run` populated.
     """
     stored = AuthStore().load()
     # priority: TRAPSTREET_URL env > stored > default
@@ -315,17 +336,17 @@ def submit(
         task_alias = TrapLoader.from_solution(solution).resolve_task(task).alias
     except (GitOpsError, ConfigError) as e:
         raise _die(e) from None
-    report_handle = ReportHandle(workspace.resolve(), task_alias, run)
+    ws = Workspace(workspace.resolve(), SolutionIdentity.from_spec(solution).dirname, task_alias)
     try:
-        report_data = report_handle.load()
-    except FileNotFoundError:
-        raise _die(f"no report at {report_handle.report_json_path}. Run [bold]tp run[/bold] first.") from None
+        report_data = ws.load(run)
+    except FileNotFoundError as e:
+        raise _no_report(ws, e) from None
     # Repeat the unanchored-provenance gate at upload time — the report records
     # what `tp run` saw, so the checkouts aren't re-probed here.
     _confirm_unanchored(
         report_data.provenance, allow=allow_unanchored or _env_truthy("TRAP_ALLOW_UNANCHORED")
     )
-    report_path = report_handle.report_json_path
+    report_path = ws.report_json_path(run)
 
     client = ApiClient(resolved_server, resolved_key)
     try:

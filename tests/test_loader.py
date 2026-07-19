@@ -104,4 +104,6 @@ def test_cases_and_tags(tmp_path):
 
 def test_from_task_clone_to_on_local(tmp_path):
     with pytest.raises(GitOpsError):
-        TraptaskLoader.from_task(TaskBinding(alias="t", source="../task", clone_to=Path("x")), tmp_path)
+        TraptaskLoader.from_task_binding(
+            TaskBinding(alias="t", source="../task", clone_to=Path("x")), tmp_path
+        )

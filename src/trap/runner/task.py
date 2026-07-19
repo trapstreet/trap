@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator
-from datetime import datetime
 from functools import cached_property
 from pathlib import Path
 from typing import Any
@@ -39,18 +38,6 @@ class TaskRunner:
     def task_expected_dir(self) -> Path:
         """The task's expected/ dir (traptask_dir / dirs.expected), resolved once on first use."""
         return (self.traptask_dir / self.traptask_config.dirs.expected).resolve()
-
-    def _update_latest(self) -> None:
-        latest = self.run_dir.parent / "latest"
-        if latest.is_symlink():
-            latest.unlink()
-        elif latest.exists():
-            # Path exists but isn't a symlink — likely an interrupted prior run
-            # or a sync tool that materialized the symlink as a real directory.
-            # Move it aside (non-destructive) so subsequent runs self-heal.
-            suffix = datetime.now().isoformat(timespec="microseconds")
-            latest.rename(latest.with_name(f"latest.broken.{suffix}"))
-        latest.symlink_to(self.run_dir.name)
 
     def _iter_cases(
         self,
@@ -98,5 +85,4 @@ class TaskRunner:
             # still completes and the report still saves).
             grader_metrics = GraderRunner(self, case_results).run()
 
-        self._update_latest()
         return case_results, grader_metrics

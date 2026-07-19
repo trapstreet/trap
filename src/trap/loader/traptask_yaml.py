@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from trap.loader.errors import ConfigError
 from trap.models import TaskBinding, TraptaskCase, TraptaskConfig
+from trap.workspace import Workspace
 
 
 class TraptaskLoader:
@@ -41,13 +42,21 @@ class TraptaskLoader:
         return TraptaskConfig(cases=tuple(TraptaskCase(id=case_id) for case_id in case_ids))
 
     @classmethod
-    def from_task(cls, task: TaskBinding, trap_dir: Path, setup: bool = False) -> TraptaskLoader:
+    def from_task_binding(
+        cls,
+        task_binding: TaskBinding,
+        trap_dir: Path,
+        setup: bool = False,
+        workspace_root: Path = Path(Workspace.DEFAULT_DIRNAME),
+    ) -> TraptaskLoader:
         """Resolve traptask.yaml from a TaskBinding's source and the trap.yaml directory.
 
         Mirrors `TrapLoader.from_solution`: `source` is a local path or a git+ URL.
-        A URL clones into `clone_to` (omitted → hidden cache .trap/repos/<repo>,
-        since the task is a dependency); a local path uses it in place and rejects
-        `clone_to`. Raises GitOpsError on a bad spec (caller maps it to a CLI error).
+        A URL clones into `clone_to` (resolved against `trap_dir`, since it is the
+        solution author's config) or, when omitted, the workspace's hidden
+        `<workspace_root>/repos/<repo>` cache — the same root that holds run
+        artifacts; a local path uses it in place and rejects `clone_to`.
+        Raises GitOpsError on a bad spec (caller maps it to a CLI error).
 
         The task's `setup_cmd` (declared in its traptask.yaml, so it travels with the
         task version) prepares the checkout. It auto-runs when a remote pull brought
@@ -56,17 +65,20 @@ class TraptaskLoader:
         """
         from trap.git_ops import GitOpsError, ParsedGitUrl, RemoteRepo
 
-        if ParsedGitUrl.looks_remote(task.source):
-            parsed = ParsedGitUrl.from_full_url(task.source)
-            dest = task.clone_to or Path(".trap") / "repos" / parsed.basename
-            remote_repo = RemoteRepo(parsed, (trap_dir / dest).resolve())
+        if ParsedGitUrl.looks_remote(task_binding.source):
+            parsed = ParsedGitUrl.from_full_url(task_binding.source)
+            if task_binding.clone_to is not None:
+                dest = trap_dir / task_binding.clone_to
+            else:
+                dest = Workspace.clone_cache_dir(workspace_root, parsed.basename)
+            remote_repo = RemoteRepo(parsed, dest.resolve())
             is_local_changed = remote_repo.ensure()
             traptask_dir = remote_repo.local_dir
         else:
-            if task.clone_to is not None:
+            if task_binding.clone_to is not None:
                 raise GitOpsError("clone_to only applies to a remote (git URL) source")
             is_local_changed = False
-            traptask_dir = (trap_dir / task.source).resolve()
+            traptask_dir = (trap_dir / task_binding.source).resolve()
         loader = cls(traptask_dir / "traptask.yaml")
         if (is_local_changed or setup) and loader.traptask.setup_cmd:
             # raises subprocess.CalledProcessError on non-zero exit
