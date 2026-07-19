@@ -13,12 +13,11 @@ from trap import __version__
 from trap.auth import DEFAULT_SERVER, ApiClient, ApiError, AuthStore
 from trap.cli._auth import auth_app
 from trap.cli._console import _die, _env_truthy, console, err_console
-from trap.display import CaseProgress, render_submit_result
+from trap.display import CaseProgress, OutputFormat, render_submit_result, renderer_factory
 from trap.environment import EnvironmentDetector
 from trap.git_ops import GitOpsError, LocalRepo, ParsedGitUrl
 from trap.loader import ConfigError, TrapLoader, TraptaskLoader
 from trap.models import Provenance, ReportData
-from trap.report import OutputFormat, renderer_factory
 from trap.runner import TaskRunner
 from trap.workspace import SolutionIdentity, Workspace
 
