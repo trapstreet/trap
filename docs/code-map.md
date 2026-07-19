@@ -17,18 +17,16 @@ graph TD
     cli["cli — Typer CLI<br/>(run · report · submit · auth)"]
     loader["loader<br/>load trap.yaml / traptask.yaml"]
     runner["runner<br/>run solution per case"]
-    report["report<br/>report renderers"]
     cost["cost<br/>LLM spend proxy"]
     git_ops["git_ops<br/>clone + git provenance"]
     environment["environment<br/>host machine detect"]
-    display["display<br/>progress / submit UI"]
+    display["display<br/>progress / report / submit UI"]
     auth["auth<br/>login + ApiClient"]
     workspace["workspace<br/>.trap addressing + report IO"]
     models[("models<br/>pydantic data layer")]
 
     cli --> loader
     cli --> runner
-    cli --> report
     cli --> git_ops
     cli --> environment
     cli --> display
@@ -40,7 +38,6 @@ graph TD
     loader --> workspace
     runner --> cost
     runner --> models
-    report --> models
     workspace --> git_ops
     workspace --> models
     cost --> models
@@ -62,10 +59,9 @@ graph TD
 | `runner` | Execute the solution subprocess per case; run judge/grader | `TaskRunner` |
 | `cost` | Intercept LLM API calls via a local reverse proxy; tally spend | `CostProxy` |
 | `git_ops` | Clone/fetch repos; compute `{repo, commit}` provenance | `LocalRepo`, `RemoteRepo`, `ParsedGitUrl` |
-| `report` | Render a report rich/json | `RichRenderer`, `JsonRenderer` |
 | `workspace` | `.trap` addressing (solution keys, run layout, derived `latest`) + `report.json` IO | `SolutionIdentity`, `Workspace` |
 | `environment` | Best-effort host machine detection | `EnvironmentDetector` |
-| `display` | Live progress bar; submit-result rendering | `CaseProgress` |
+| `display` | Live progress bar; report + submit-result rendering | `CaseProgress`, `RichRenderer`, `JsonRenderer` |
 | `auth` | Login (OAuth), token store, upload client | `ApiClient`, `AuthStore` |
 
 ## 2. `tp run` runtime flow

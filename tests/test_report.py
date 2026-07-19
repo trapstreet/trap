@@ -4,9 +4,8 @@ import json
 
 from rich.console import Console
 
+from trap.display.report import JsonRenderer, RichRenderer
 from trap.models import CaseCost, CaseResult, ModelCost, ReportData
-from trap.report.json import JsonRenderer
-from trap.report.rich import RichRenderer
 
 
 def _data(cases, grader=None):
