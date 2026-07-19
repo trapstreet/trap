@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import http.server
+import math
 import socketserver
 import threading
 from functools import cached_property
@@ -81,7 +82,13 @@ class CostProxy:
             else:
                 entry.prompt_tokens += prompt_tokens
                 entry.completion_tokens += completion_tokens
-                entry.cost_usd += call_cost
+                # ModelCost normalises NaN to None (unknown); a bucket is keyed
+                # by (provider, model) so known/unknown never mixes — but keep
+                # the arithmetic total-safe anyway: unknown stays unknown.
+                if entry.cost_usd is None or math.isnan(call_cost):
+                    entry.cost_usd = None
+                else:
+                    entry.cost_usd += call_cost
                 entry.calls += 1
 
 

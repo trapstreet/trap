@@ -51,7 +51,10 @@ class RichRenderer(BaseRenderer):
         return f"[red]{result.exit_code}[/red]"
 
     @staticmethod
-    def _render_cost(usd: float) -> str:
+    def _render_cost(usd: float | None) -> str:
+        if usd is None:
+            # unknown (unpriced model) — distinct from a measured zero
+            return "[dim]?[/dim]"
         if usd <= 0:
             return "[dim]—[/dim]"
         if usd < 0.001:

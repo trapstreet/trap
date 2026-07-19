@@ -33,6 +33,22 @@ print(json.dumps({"passed": ok, "score": sum(scores) / len(scores) if scores els
 """
 
 
+@pytest.fixture(autouse=True)
+def hermetic_pricing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Keep the price-table source chain off the network and off the real user
+    cache: point the cache at a per-test path and stub the fetch seam (never
+    the shared httpx module — other tests drive loopback servers through it)
+    so everyone silently gets the bundled prices. Pricing tests restore the
+    real fetch and mock httpx.get themselves."""
+    from trap.cost import calculator, pricing
+
+    monkeypatch.setenv("TRAP_PRICING_CACHE", str(tmp_path / "pricing-cache.json"))
+    monkeypatch.setattr(pricing, "_fetch_and_cache", lambda: None)
+    calculator._price_rows.cache_clear()
+    yield
+    calculator._price_rows.cache_clear()
+
+
 @pytest.fixture
 def runner() -> CliRunner:
     return CliRunner()

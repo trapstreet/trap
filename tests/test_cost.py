@@ -131,3 +131,23 @@ def test_proxy_forwards_and_accounts(monkeypatch):
         srv.shutdown()
     openai = next(m for m in cost.by_model if m.provider == "openai")
     assert (openai.prompt_tokens, openai.completion_tokens, openai.calls) == (11, 7, 1)
+
+
+def test_accumulate_unknown_model_stays_unknown():
+    # Regression: an unpriced model's NaN call cost must land as None (unknown)
+    # in the bucket and stay None across repeated calls — never 0, never NaN
+    # (NaN serialises to JSON null, which the pre-fix loader couldn't read back).
+    proxy = CostProxy()
+    proxy._accumulate("openai", 60, 39, "gpt-3.5-turbo")  # not in the price table
+    proxy._accumulate("openai", 10, 5, "gpt-3.5-turbo")
+    (entry,) = proxy._cost_buckets.values()
+    assert entry.cost_usd is None
+    assert entry.calls == 2 and entry.prompt_tokens == 70
+
+    # priced model unaffected — and known + known accumulates
+    proxy._accumulate("openai", 100, 50, "gpt-5.4-nano")
+    priced = proxy._cost_buckets[("openai", "gpt-5.4-nano")]
+    first = priced.cost_usd
+    assert first is not None and first > 0
+    proxy._accumulate("openai", 100, 50, "gpt-5.4-nano")
+    assert priced.cost_usd == pytest.approx(first * 2)
