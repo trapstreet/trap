@@ -32,7 +32,7 @@ def test_version(runner):
 
 def test_run_full_pipeline(make_project, runner):
     _passing(make_project)
-    res = runner.invoke(app, ["run", "t", "--no-environment"])
+    res = runner.invoke(app, ["run", "--task", "t", "--no-environment"])
     assert res.exit_code == 0, res.output
     assert "1 case" in res.output
     assert '"passed": true' in res.output  # grader output rendered verbatim
@@ -40,7 +40,7 @@ def test_run_full_pipeline(make_project, runner):
 
 def test_run_default_task_and_environment(make_project, runner):
     _passing(make_project)
-    res = runner.invoke(app, ["run"])  # no task arg → first task; environment on
+    res = runner.invoke(app, ["run"])  # no --task → first task; environment on
     assert res.exit_code == 0, res.output
 
 
@@ -143,7 +143,7 @@ def test_run_invalid_config(runner, tmp_path, monkeypatch):
 
 def test_run_unknown_task_alias_lists_available(make_project, runner):
     _passing(make_project)
-    res = runner.invoke(app, ["run", "nope"])
+    res = runner.invoke(app, ["run", "--task", "nope"])
     assert res.exit_code == 2
     assert "available: t" in res.output
 
@@ -161,7 +161,7 @@ def test_run_malformed_yaml(runner, tmp_path, monkeypatch):
 
 def test_run_remote_refused_without_tty(runner, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    res = runner.invoke(app, ["run", "--solution", "git+https://example.invalid/x.git"])
+    res = runner.invoke(app, ["run", "git+https://example.invalid/x.git"])
     assert res.exit_code == 2
     assert "needs confirmation" in res.output
 
@@ -196,7 +196,7 @@ def test_run_remote_trusted_proceeds_to_clone(runner, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     # file:// to a nonexistent path fails fast at clone (no network), proving the gate
     # was bypassed and the loader was reached.
-    res = runner.invoke(app, ["run", "--solution", "git+file:///nonexistent-trap-repo", "--trust-remote"])
+    res = runner.invoke(app, ["run", "git+file:///nonexistent-trap-repo", "--trust-remote"])
     assert res.exit_code == 2
     assert "git clone failed" in res.output
 
@@ -204,7 +204,7 @@ def test_run_remote_trusted_proceeds_to_clone(runner, tmp_path, monkeypatch):
 def test_run_remote_trusted_via_env(runner, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("TRAP_TRUST_REMOTE", "1")
-    res = runner.invoke(app, ["run", "--solution", "git+file:///nonexistent-trap-repo"])
+    res = runner.invoke(app, ["run", "git+file:///nonexistent-trap-repo"])
     assert res.exit_code == 2
     assert "git clone failed" in res.output
 
@@ -285,7 +285,7 @@ def test_submit_repeats_gate_with_stored_reason(make_project, runner, monkeypatc
     assert runner.invoke(app, ["run", "--no-environment"]).exit_code == 0
     monkeypatch.setenv("TRAPSTREET_API_KEY", "k")
     monkeypatch.setattr("trap.auth.client.ApiClient.submit", lambda self, path: {"run": {"passed": True}})
-    res = runner.invoke(app, ["submit", "t"])  # fixture pre-authorises the gate
+    res = runner.invoke(app, ["submit", "--task", "t"])  # fixture pre-authorises the gate
     assert res.exit_code == 0, res.output
     # the reason was saved in the report's `issue` field, so submit names it too
     assert "solution has no git provenance (not a git repo)" in res.stderr
@@ -297,7 +297,7 @@ def test_submit_unanchored_refused_without_tty(make_project, runner, monkeypatch
     assert runner.invoke(app, ["run", "--no-environment"]).exit_code == 0
     monkeypatch.setenv("TRAPSTREET_API_KEY", "k")
     monkeypatch.delenv("TRAP_ALLOW_UNANCHORED", raising=False)
-    res = runner.invoke(app, ["submit", "t"])
+    res = runner.invoke(app, ["submit", "--task", "t"])
     assert res.exit_code == 2
     assert "needs confirmation" in res.output
 

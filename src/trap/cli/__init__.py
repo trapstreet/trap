@@ -49,13 +49,13 @@ def _main(
 def _no_report(workspace: Workspace, error: FileNotFoundError) -> typer.Exit:
     """Exit for a report miss, with advice matching the likely cause: an empty
     workspace means the user never ran; existing runs under *other* solution keys
-    mean a cwd / --solution mismatch, where re-running would just miss again."""
+    mean a cwd / SOLUTION mismatch, where re-running would just miss again."""
     msg = str(error)
     if keys := workspace.solution_keys():
         msg += (
             "\nsolutions with runs in this workspace: "
             + ", ".join(keys)
-            + "\ncheck that --solution (and the cwd) match the ones used for [bold]tp run[/bold]"
+            + "\ncheck that SOLUTION (and the cwd) match the ones used for [bold]tp run[/bold]"
         )
     else:
         msg += ". Run [bold]tp run[/bold] first."
@@ -119,14 +119,19 @@ def _confirm_unanchored(provenance: Provenance, *, allow: bool) -> None:
 
 @app.command()
 def run(
-    task: Annotated[str | None, typer.Argument()] = None,
     solution: Annotated[
         str | None,
-        typer.Option("--solution", help="Solution to run: a local path or a git+ URL (default: cwd)."),
+        typer.Argument(help="Solution to run: a local path or a git+ URL (default: cwd)."),
     ] = None,
+    task: Annotated[
+        str | None,
+        typer.Option("--task", help="Task alias from trap.yaml (default: the first task)."),
+    ] = None,
+    workspace: Annotated[Path, typer.Option("--workspace", "-w")] = Path(Workspace.DEFAULT_DIRNAME),
+    output: Annotated[OutputFormat, typer.Option("--output", "-o")] = OutputFormat.rich,
     clone_to: Annotated[
         Path | None,
-        typer.Option("--clone-to", help="Where to clone a git+ URL --solution (default: ./<repo>)."),
+        typer.Option("--clone-to", help="Where to clone a git+ URL SOLUTION (default: ./<repo>)."),
     ] = None,
     trust_remote: Annotated[
         bool,
@@ -145,7 +150,6 @@ def run(
         ),
     ] = False,
     tags: Annotated[list[str] | None, typer.Option("--tag", "-t")] = None,
-    output: Annotated[OutputFormat, typer.Option("--output", "-o")] = OutputFormat.rich,
     fail_fast: Annotated[bool, typer.Option("--fail-fast")] = False,
     setup_solution: Annotated[
         bool,
@@ -161,7 +165,6 @@ def run(
             help="Force-run the task's setup_cmd even when no remote pull brought new code.",
         ),
     ] = False,
-    workspace: Annotated[Path, typer.Option("--workspace", "-w")] = Path(Workspace.DEFAULT_DIRNAME),
     environment: Annotated[
         bool,
         typer.Option(
@@ -179,11 +182,11 @@ def run(
 ) -> None:
     """Run a task against a solution.
 
-    --solution is the solution to run: a local path, or a git+ URL to clone
-    into ./<repo> (or --clone-to). Omit it to use the trap.yaml in the cwd.
+    SOLUTION is a local path, or a git+ URL to clone into ./<repo> (or
+    --clone-to). Omit it to use the trap.yaml in the cwd.
     """
     # Gate trap's auto-download-and-run of any remote source before it happens — once
-    # for a remote --solution, once for a remote task source (resolved from trap.yaml).
+    # for a remote SOLUTION, once for a remote task source (resolved from trap.yaml).
     trust = trust_remote or _env_truthy("TRAP_TRUST_REMOTE")
     if solution is not None and ParsedGitUrl.looks_remote(solution):
         _confirm_remote(solution, trust=trust)
@@ -270,14 +273,17 @@ def run(
 
 @app.command()
 def report(
-    task: Annotated[str | None, typer.Argument()] = None,
-    run: Annotated[str, typer.Argument()] = "latest",
     solution: Annotated[
         str | None,
-        typer.Option("--solution", help="Local solution path holding trap.yaml (default: cwd)."),
+        typer.Argument(help="Local solution path holding trap.yaml (default: cwd)."),
     ] = None,
-    output: Annotated[OutputFormat, typer.Option("--output", "-o")] = OutputFormat.rich,
+    task: Annotated[
+        str | None,
+        typer.Option("--task", help="Task alias from trap.yaml (default: the first task)."),
+    ] = None,
+    run: Annotated[str, typer.Option("--run", "-r", help="Which run to display.")] = "latest",
     workspace: Annotated[Path, typer.Option("--workspace", "-w")] = Path(Workspace.DEFAULT_DIRNAME),
+    output: Annotated[OutputFormat, typer.Option("--output", "-o")] = OutputFormat.rich,
 ) -> None:
     """Display a report for a task (defaults to latest run)."""
     try:
@@ -294,19 +300,20 @@ def report(
 
 @app.command()
 def submit(
+    solution: Annotated[
+        str | None,
+        typer.Argument(help="Local solution path holding trap.yaml (default: cwd)."),
+    ] = None,
     task: Annotated[
         str | None,
-        typer.Argument(
-            help="Task name (defaults to first task in trap.yaml). "
+        typer.Option(
+            "--task",
+            help="Task alias from trap.yaml (default: the first task). "
             "Used as both the local run dir and the trapstreet task_id.",
         ),
     ] = None,
-    solution: Annotated[
-        str | None,
-        typer.Option("--solution", help="Local solution path holding trap.yaml (default: cwd)."),
-    ] = None,
-    workspace: Annotated[Path, typer.Option("--workspace", "-w")] = Path(Workspace.DEFAULT_DIRNAME),
     run: Annotated[str, typer.Option("--run", "-r", help="Which run to upload.")] = "latest",
+    workspace: Annotated[Path, typer.Option("--workspace", "-w")] = Path(Workspace.DEFAULT_DIRNAME),
     allow_unanchored: Annotated[
         bool,
         typer.Option(

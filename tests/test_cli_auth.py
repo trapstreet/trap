@@ -84,6 +84,6 @@ def test_submit_success(make_project, runner, tmp_path, monkeypatch):
         "trap.auth.client.ApiClient.submit",
         lambda self, path: {"run": {"id": "r1"}, "view_url": "http://x/runs/r1"},
     )
-    res = runner.invoke(app, ["submit", "t"])
+    res = runner.invoke(app, ["submit", "--task", "t"])
     assert res.exit_code == 0, res.output
     assert "submitted" in res.output and "r1" in res.output

@@ -43,7 +43,7 @@ hash of its full identity — the resolved absolute path for a local solution, o
 normalised URL + subdirectory for a `git+` one. Aliases of the same solution (`./x`,
 `x`, an absolute path) map to the same key; same-named solutions at different paths get
 different keys. You never type the key: `tp report` / `tp submit` derive it from the
-same `--solution` value you ran with.
+same `SOLUTION` argument you ran with.
 
 ## `latest` is derived
 
@@ -70,8 +70,8 @@ stale.
 Use `tp report` to re-render any stored run without re-executing the solution:
 
 ```bash
-tp report                              # latest run
-tp report test 2026-05-09T14:30:00    # specific run by timestamp
+tp report                                       # latest run
+tp report --task test --run 2026-05-09T14:30:00 # specific run by timestamp
 ```
 
 `tp run` prints the run id and report path when it finishes; the id doubles as the

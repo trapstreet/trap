@@ -56,17 +56,17 @@ From `examples/echo/solution/`:
 
 ```bash
 tp run                # default task
-tp run test           # a named task
+tp run --task test    # a named task
 tp run -t smoke       # only `smoke`-tagged cases
 tp run --output json  # machine-readable
 ```
 
-Artifacts go to `.trap/<task>/<timestamp>/` (with a `latest` symlink). Re-display a
+Artifacts go to `.trap/runs/<solution-key>/<task>/<timestamp>/`. Re-display a
 stored run without re-executing it:
 
 ```bash
-tp report                            # latest
-tp report test 2026-05-09T14:30:00   # a specific run
+tp report                                       # latest
+tp report --task test --run 2026-05-09T14:30:00 # a specific run
 ```
 
 ## Next
