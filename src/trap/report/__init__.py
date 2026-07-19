@@ -3,11 +3,10 @@ from __future__ import annotations
 import enum
 
 from trap.report.base import BaseRenderer
-from trap.report.handle import ReportHandle
 from trap.report.json import JsonRenderer
 from trap.report.rich import RichRenderer
 
-__all__ = ["BaseRenderer", "JsonRenderer", "OutputFormat", "ReportHandle", "RichRenderer", "renderer_factory"]
+__all__ = ["BaseRenderer", "JsonRenderer", "OutputFormat", "RichRenderer", "renderer_factory"]
 
 
 class OutputFormat(enum.StrEnum):

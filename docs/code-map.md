@@ -17,12 +17,13 @@ graph TD
     cli["cli — Typer CLI<br/>(run · report · submit · auth)"]
     loader["loader<br/>load trap.yaml / traptask.yaml"]
     runner["runner<br/>run solution per case"]
-    report["report<br/>ReportHandle + renderers"]
+    report["report<br/>report renderers"]
     cost["cost<br/>LLM spend proxy"]
     git_ops["git_ops<br/>clone + git provenance"]
     environment["environment<br/>host machine detect"]
     display["display<br/>progress / submit UI"]
     auth["auth<br/>login + ApiClient"]
+    workspace["workspace<br/>.trap addressing + report IO"]
     models[("models<br/>pydantic data layer")]
 
     cli --> loader
@@ -32,12 +33,16 @@ graph TD
     cli --> environment
     cli --> display
     cli --> auth
+    cli --> workspace
     cli --> models
     loader --> git_ops
     loader --> models
+    loader --> workspace
     runner --> cost
     runner --> models
     report --> models
+    workspace --> git_ops
+    workspace --> models
     cost --> models
     git_ops --> models
     environment --> models
@@ -57,7 +62,8 @@ graph TD
 | `runner` | Execute the solution subprocess per case; run judge/grader | `TaskRunner` |
 | `cost` | Intercept LLM API calls via a local reverse proxy; tally spend | `CostProxy` |
 | `git_ops` | Clone/fetch repos; compute `{repo, commit}` provenance | `LocalRepo`, `RemoteRepo`, `ParsedGitUrl` |
-| `report` | Write `report.json`; render rich/json | `ReportHandle`, `RichRenderer` |
+| `report` | Render a report rich/json | `RichRenderer`, `JsonRenderer` |
+| `workspace` | `.trap` addressing (solution keys, run layout, derived `latest`) + `report.json` IO | `SolutionIdentity`, `Workspace` |
 | `environment` | Best-effort host machine detection | `EnvironmentDetector` |
 | `display` | Live progress bar; submit-result rendering | `CaseProgress` |
 | `auth` | Login (OAuth), token store, upload client | `ApiClient`, `AuthStore` |
@@ -68,14 +74,14 @@ graph TD
 flowchart TD
     A["tp run &lt;alias&gt;"] --> B["TrapLoader.from_solution<br/>clone solution + run setup_cmd"]
     B --> C["resolve_task(alias)"]
-    C --> D["TraptaskLoader.from_task<br/>clone task + setup_cmd · discover cases"]
+    C --> D["TraptaskLoader.from_task_binding<br/>clone task + setup_cmd · discover cases"]
     D --> E{"TaskRunner.run<br/>for each case"}
     E --> F["subprocess(cmd)<br/>(CostProxy intercepts LLM calls)"]
     F --> G["judge subprocess → metrics"]
     G --> E
     E --> H["grader subprocess → grader_metrics"]
     H --> P["LocalRepo.provenance (solution + task git)<br/>EnvironmentDetector.detect (host)"]
-    P --> S["ReportHandle.save → report.json"]
+    P --> S["Workspace.save_as_report → report.json"]
     S --> R["renderer: rich table / json"]
 ```
 
