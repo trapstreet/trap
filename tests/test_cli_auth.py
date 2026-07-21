@@ -183,7 +183,7 @@ def test_auth_status_mismatched_profile_refuses(runner, tmp_path, monkeypatch):
 def test_submit_mismatched_profile_refuses(runner, tmp_path, monkeypatch):
     _store_at(monkeypatch, tmp_path)
     _mismatched_pairing(monkeypatch)
-    res = runner.invoke(app, ["submit", "t"])
+    res = runner.invoke(app, ["submit", "--task", "t"])
     assert res.exit_code == 2, res.output
     assert "issued for" in res.output
 
@@ -229,7 +229,7 @@ def test_submit_stored_token_never_sent_to_unpaired_server(runner, tmp_path, mon
         raise AssertionError("submit must not be called for an unpaired server")
 
     monkeypatch.setattr("trap.auth.client.ApiClient.submit", no_submit)
-    res = runner.invoke(app, ["submit", "t"])
+    res = runner.invoke(app, ["submit", "--task", "t"])
     assert res.exit_code == 2, res.output
     assert "not logged in" in res.output and "uat.trapstreet.run" in res.output
 
@@ -249,7 +249,7 @@ def test_submit_uses_profile_matching_env_server(make_project, runner, tmp_path,
         return {"run": {"passed": True, "id": "r1", "total_score": 1.0}}
 
     monkeypatch.setattr("trap.auth.client.ApiClient.submit", fake_submit)
-    res = runner.invoke(app, ["submit", "t"])
+    res = runner.invoke(app, ["submit", "--task", "t"])
     assert res.exit_code == 0, res.output
     assert seen == {"server": UAT, "key": "uat-key"}
 
@@ -270,6 +270,6 @@ def test_submit_env_key_pairs_with_env_server(make_project, runner, tmp_path, mo
         return {"run": {"passed": True, "id": "r1", "total_score": 1.0}}
 
     monkeypatch.setattr("trap.auth.client.ApiClient.submit", fake_submit)
-    res = runner.invoke(app, ["submit", "t"])
+    res = runner.invoke(app, ["submit", "--task", "t"])
     assert res.exit_code == 0, res.output
     assert seen == {"server": UAT, "key": "uat-key"}
