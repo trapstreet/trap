@@ -56,7 +56,9 @@ def test_auth_login_browser_custom_server_rejected(runner, tmp_path, monkeypatch
 def test_auth_logout(runner, tmp_path, monkeypatch):
     """Default logout targets the default server; legacy single-object files count."""
     _store_at(monkeypatch, tmp_path)
-    (tmp_path / "auth.json").write_text(json.dumps({"server": DEFAULT_SERVER, "api_key": "k"}))
+    (tmp_path / "auth.json").write_text(
+        json.dumps({"version": 2, "profiles": {DEFAULT_SERVER: {"api_key": "k"}}})
+    )
     res = runner.invoke(app, ["auth", "logout"])
     assert res.exit_code == 0 and "removed" in res.output
     res2 = runner.invoke(app, ["auth", "logout"])
@@ -82,10 +84,10 @@ def test_auth_status_not_logged_in(runner, tmp_path, monkeypatch):
 
 
 def test_auth_status_no_verify(runner, tmp_path, monkeypatch):
-    """Reads the default-server profile — including from a legacy-format file."""
+    """Reads the default-server profile from the v2 keyed file."""
     _store_at(monkeypatch, tmp_path)
     (tmp_path / "auth.json").write_text(
-        json.dumps({"server": DEFAULT_SERVER, "api_key": "k", "solution": "sol"})
+        json.dumps({"version": 2, "profiles": {DEFAULT_SERVER: {"api_key": "k", "account": "sol"}}})
     )
     res = runner.invoke(app, ["auth", "status", "--no-verify"])
     assert res.exit_code == 0
@@ -94,7 +96,9 @@ def test_auth_status_no_verify(runner, tmp_path, monkeypatch):
 
 def test_auth_status_verify(runner, tmp_path, monkeypatch):
     _store_at(monkeypatch, tmp_path)
-    (tmp_path / "auth.json").write_text(json.dumps({"server": DEFAULT_SERVER, "api_key": "k"}))
+    (tmp_path / "auth.json").write_text(
+        json.dumps({"version": 2, "profiles": {DEFAULT_SERVER: {"api_key": "k"}}})
+    )
     monkeypatch.setattr("trap.auth.client.ApiClient.get_me", lambda self: {"user": {"name": "Alice"}})
     res = runner.invoke(app, ["auth", "status"])
     assert res.exit_code == 0

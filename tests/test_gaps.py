@@ -169,7 +169,7 @@ def test_submit_uses_stored_credentials(make_project, runner, monkeypatch, tmp_p
     monkeypatch.setattr("trap.auth.store.AuthStore.PATH", tmp_path / "auth.json")
     # legacy single-object file: migrated on read, then read as the default-server profile
     (tmp_path / "auth.json").write_text(
-        json.dumps({"server": "https://trapstreet.run", "api_key": "stored-key"})
+        json.dumps({"version": 2, "profiles": {"https://trapstreet.run": {"api_key": "stored-key"}}})
     )
     captured = {}
 
@@ -377,7 +377,9 @@ def test_auth_login_empty_token_errors(runner, tmp_path, monkeypatch):
 
 def test_auth_status_verify_error(runner, tmp_path, monkeypatch):
     monkeypatch.setattr("trap.auth.store.AuthStore.PATH", tmp_path / "auth.json")
-    (tmp_path / "auth.json").write_text(json.dumps({"server": "https://s", "api_key": "k"}))
+    (tmp_path / "auth.json").write_text(
+        json.dumps({"version": 2, "profiles": {"https://s": {"api_key": "k"}}})
+    )
 
     def boom(self):
         raise ApiError("token is invalid")

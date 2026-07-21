@@ -38,8 +38,7 @@ class _CallbackHandler(http.server.BaseHTTPRequestHandler):
             self._respond(400, "text/plain", b"missing api_key in query string")
             return
 
-        # `account` since web #95; older servers only send the v1-era `solution`
-        account = (params.get("account") or params.get("solution") or [None])[0]
+        account = (params.get("account") or [None])[0]
         srv: OAuthCallbackServer = self.server  # type: ignore[assignment]
         srv._receive(AuthData(server=srv._server_url, api_key=api_key, account=account))
         self._respond(200, "text/html; charset=utf-8", self._SUCCESS_HTML)

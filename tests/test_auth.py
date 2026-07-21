@@ -64,14 +64,13 @@ def test_store_delete_per_server(store, tmp_path):
     assert not (tmp_path / "auth.json").exists()
 
 
-def test_store_migrates_legacy_single_object_file(store, tmp_path):
-    (tmp_path / "auth.json").write_text(json.dumps({"server": UAT, "api_key": "legacy", "solution": "sol"}))
-    assert store.load() is None  # legacy profile was uat, not prod
-    loaded = store.load(UAT)
-    assert loaded is not None and loaded.api_key == "legacy" and loaded.account == "sol"
-    migrated = json.loads((tmp_path / "auth.json").read_text())
-    assert UAT in migrated["profiles"]  # file rewritten in the keyed format
-    assert oct((tmp_path / "auth.json").stat().st_mode)[-3:] == "600"
+def test_store_ignores_legacy_single_object_file(store, tmp_path):
+    # no migration by design: a pre-profile flat file reads as empty — the
+    # fix is one `tp auth login`, not a compat branch we carry forever
+    (tmp_path / "auth.json").write_text(json.dumps({"server": UAT, "api_key": "legacy", "account": "sol"}))
+    assert store.load() is None
+    assert store.load(UAT) is None
+    assert store.servers() == []
 
 
 def test_store_corrupt_returns_none(store, tmp_path):
@@ -97,23 +96,10 @@ def test_store_unrecognized_object_returns_none(store, tmp_path):
 def test_store_invalid_profile_returns_none(store, tmp_path):
     # keyed shape, but the profile itself is missing api_key
     (tmp_path / "auth.json").write_text(
-        json.dumps({"version": 2, "profiles": {DEFAULT_SERVER: {"solution": "sol"}}})
+        json.dumps({"version": 2, "profiles": {DEFAULT_SERVER: {"account": "sol"}}})
     )
     assert store.load() is None
     assert store.servers() == [DEFAULT_SERVER]  # listed, just not loadable
-
-
-def test_store_legacy_migration_survives_readonly_file(store, tmp_path, monkeypatch):
-    # the in-place upgrade is best-effort: if the rewrite fails, the parsed
-    # profile is still served for this run
-    (tmp_path / "auth.json").write_text(json.dumps({"server": UAT, "api_key": "legacy"}))
-
-    def failing_write(self, profiles):
-        raise OSError("read-only")
-
-    monkeypatch.setattr(AuthStore, "_write", failing_write)
-    loaded = store.load(UAT)
-    assert loaded is not None and loaded.api_key == "legacy"
 
 
 # -- resolve (env overrides + server↔token pairing) ---------------------------
@@ -291,7 +277,7 @@ def test_oauth_callback_success(monkeypatch):
     srv = OAuthCallbackServer("https://trapstreet.run/")
 
     def fake_open(url):
-        httpx.get(f"http://127.0.0.1:{srv.port}/callback?api_key=K&solution=S")
+        httpx.get(f"http://127.0.0.1:{srv.port}/callback?api_key=K&account=S")
 
     monkeypatch.setattr("trap.auth.oauth.webbrowser.open", fake_open)
     assert "/cli/authorize" in srv.auth_url
@@ -321,22 +307,10 @@ def test_oauth_rejects_missing_key(monkeypatch):
 
 
 def test_store_saves_account_key_never_solution(store, tmp_path):
-    # the rename is complete on write: new files say "account"; "solution" is
-    # only ever accepted on read (legacy files / old servers)
+    # the rename is total: files say "account", and the v1-era "solution" key
+    # is dead everywhere — not written, not read (no compat by design)
     store.save(AuthData(server=DEFAULT_SERVER, api_key="k", account="me"))
     raw = json.loads((tmp_path / "auth.json").read_text())
     profile = raw["profiles"][DEFAULT_SERVER]
     assert profile["account"] == "me"
     assert "solution" not in profile
-
-
-def test_oauth_callback_prefers_account_over_legacy_solution(monkeypatch):
-    # web #95 dual-emits account+solution during the transition; account wins
-    srv = OAuthCallbackServer("https://trapstreet.run/")
-
-    def fake_open(url):
-        httpx.get(f"http://127.0.0.1:{srv.port}/callback?api_key=K&account=A&solution=S")
-
-    monkeypatch.setattr("trap.auth.oauth.webbrowser.open", fake_open)
-    assert srv.run(timeout=5) is True
-    assert srv.auth_data is not None and srv.auth_data.account == "A"
