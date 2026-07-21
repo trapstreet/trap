@@ -166,17 +166,20 @@ def test_submit_uses_stored_credentials(make_project, runner, monkeypatch, tmp_p
     assert runner.invoke(app, ["run", "--no-environment"]).exit_code == 0
     monkeypatch.delenv("TRAPSTREET_API_KEY", raising=False)
     monkeypatch.delenv("TRAPSTREET_URL", raising=False)
-    monkeypatch.setattr("trap.auth.store.AuthStore.PATH", tmp_path / "auth.json")
-    (tmp_path / "auth.json").write_text(json.dumps({"server": "https://stored", "api_key": "stored-key"}))
+    monkeypatch.setattr("trap.auth.store.CredentialStore.PATH", tmp_path / "auth.json")
+    # a legacy single-object file: migrated on read, then resolved as the default profile
+    (tmp_path / "auth.json").write_text(
+        json.dumps({"server": "https://trapstreet.run", "api_key": "stored-key"})
+    )
     captured = {}
 
     def fake_submit(self, path):
-        captured["server"] = self._server
+        captured["server"], captured["key"] = self._server, self._api_key
         return {"run": {"passed": True}}
 
     monkeypatch.setattr("trap.auth.client.ApiClient.submit", fake_submit)
     assert runner.invoke(app, ["submit", "--task", "t"]).exit_code == 0
-    assert captured["server"] == "https://stored"
+    assert captured == {"server": "https://trapstreet.run", "key": "stored-key"}
 
 
 # -- TaskRunner: no callbacks; fail-fast ---------------------------------------
@@ -353,25 +356,25 @@ def test_provenance_swallows_probe_error(tmp_path, monkeypatch):
 
 
 def test_auth_login_browser_default(runner, tmp_path, monkeypatch):
-    monkeypatch.setattr("trap.auth.store.AuthStore.PATH", tmp_path / "auth.json")
-    from trap.auth.store import DEFAULT_SERVER, AuthData
+    monkeypatch.setattr("trap.auth.store.CredentialStore.PATH", tmp_path / "auth.json")
+    from trap.auth.store import DEFAULT_SERVER, Credential
 
     monkeypatch.setattr(
         "trap.cli._auth.BrowserProvider.acquire",
-        lambda self: AuthData(server=DEFAULT_SERVER, api_key="k", solution="s"),
+        lambda self: Credential(server=DEFAULT_SERVER, api_key="k", solution="s"),
     )
     res = runner.invoke(app, ["auth", "login"])
     assert res.exit_code == 0 and "logged in" in res.output
 
 
 def test_auth_login_empty_token_errors(runner, tmp_path, monkeypatch):
-    monkeypatch.setattr("trap.auth.store.AuthStore.PATH", tmp_path / "auth.json")
+    monkeypatch.setattr("trap.auth.store.CredentialStore.PATH", tmp_path / "auth.json")
     res = runner.invoke(app, ["auth", "login", "--with-token"], input="\n")
     assert res.exit_code == 2
 
 
 def test_auth_status_verify_error(runner, tmp_path, monkeypatch):
-    monkeypatch.setattr("trap.auth.store.AuthStore.PATH", tmp_path / "auth.json")
+    monkeypatch.setattr("trap.auth.store.CredentialStore.PATH", tmp_path / "auth.json")
     (tmp_path / "auth.json").write_text(json.dumps({"server": "https://s", "api_key": "k"}))
 
     def boom(self):

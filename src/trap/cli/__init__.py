@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -10,7 +9,14 @@ from typing import Annotated
 import typer
 
 from trap import __version__
-from trap.auth import DEFAULT_SERVER, ApiClient, ApiError, AuthStore
+from trap.auth import (
+    DEFAULT_SERVER,
+    ApiClient,
+    ApiError,
+    CredentialStore,
+    CredentialStoreError,
+    ResolvedAuth,
+)
 from trap.cli._auth import auth_app
 from trap.cli._console import _die, _env_truthy, console, err_console
 from trap.display import CaseProgress, OutputFormat, render_submit_result, renderer_factory
@@ -328,15 +334,16 @@ def submit(
     Reads from the .trap/runs/<solution>/<task>/<run>/report.json workspace
     that `tp run` populated.
     """
-    stored = AuthStore().load()
-    # priority: TRAPSTREET_URL env > stored > default
-    resolved_server = (
-        os.environ.get("TRAPSTREET_URL") or (stored.server if stored else None) or DEFAULT_SERVER
-    )
-    # priority: TRAPSTREET_API_KEY env > stored
-    resolved_key = os.environ.get("TRAPSTREET_API_KEY") or (stored.api_key if stored else None)
-    if not resolved_key:
-        raise _die("not logged in. Run [bold]tp auth login[/bold] or set [bold]TRAPSTREET_API_KEY[/bold].")
+    try:
+        resolved = ResolvedAuth.resolve(CredentialStore())
+    except CredentialStoreError as e:
+        raise _die(e) from None
+    if resolved.api_key is None:
+        hint = "" if resolved.server == DEFAULT_SERVER else f" --server {resolved.server}"
+        raise _die(
+            f"not logged in to {resolved.server}. Run [bold]tp auth login{hint}[/bold] "
+            "or set [bold]TRAPSTREET_API_KEY[/bold]."
+        )
 
     try:
         task_alias = TrapLoader.from_solution(solution).resolve_task(task).alias
@@ -354,7 +361,7 @@ def submit(
     )
     report_path = ws.report_json_path(run)
 
-    client = ApiClient(resolved_server, resolved_key)
+    client = ApiClient(resolved.server, resolved.api_key)
     try:
         resp_data = client.submit(report_path)
     except ApiError as e:

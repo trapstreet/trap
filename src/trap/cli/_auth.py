@@ -5,7 +5,16 @@ from typing import Annotated
 
 import typer
 
-from trap.auth import DEFAULT_SERVER, ApiClient, ApiError, AuthStore, BrowserProvider, TokenProvider
+from trap.auth import (
+    DEFAULT_SERVER,
+    ApiClient,
+    ApiError,
+    BrowserProvider,
+    CredentialStore,
+    CredentialStoreError,
+    ResolvedAuth,
+    TokenProvider,
+)
 from trap.cli._console import _die, console
 
 auth_app = typer.Typer(help="Manage authentication.")
@@ -25,14 +34,13 @@ def auth_login(
 ) -> None:
     """Authenticate this machine with Trapstreet.
 
-    By default opens a browser to complete OAuth. Pass --with-token to supply
-    an api_key directly (useful for CI or headless environments).
+    By default opens a browser to complete OAuth. Pass --with-token to supply an
+    api_key directly (useful for CI or headless environments).
 
-    The token is saved to ~/.config/trapstreet/auth.json (mode 600).
+    Tokens are stored per server in ~/.config/trapstreet/auth.json (mode 600):
+    logging in to one server leaves every other server's pairing untouched.
     """
-    stored = AuthStore().load()
-    # priority: --server / TRAPSTREET_URL > stored > default
-    resolved_server = server or (stored.server if stored else None) or DEFAULT_SERVER
+    resolved_server = server or DEFAULT_SERVER
 
     # BrowserProvider raises ValueError for a non-default server (the same check the
     # CLI used to duplicate), so provider construction sits inside the try alongside
@@ -51,46 +59,74 @@ def auth_login(
     except (ValueError, TimeoutError) as e:
         raise _die(e) from None
 
-    path = AuthStore().save(auth_data)
+    try:
+        path = CredentialStore().save(auth_data)
+    except CredentialStoreError as e:
+        raise _die(e) from None
     console.print(
-        "[green]✓ logged in[/green]"
+        f"[green]✓ logged in[/green] to {auth_data.server}"
         + (f" · solution [bold]{auth_data.solution}[/bold]" if auth_data.solution else "")
         + f" · token saved to {path}"
     )
 
 
 @auth_app.command("logout")
-def auth_logout() -> None:
-    """Delete the locally-stored api_key."""
-    auth_store = AuthStore()
-    if not auth_store.exists:
-        console.print(f"already logged out — no file at {auth_store.PATH}")
+def auth_logout(
+    server: Annotated[
+        str | None,
+        typer.Option("--server", envvar="TRAPSTREET_URL", help="Which server's token to remove."),
+    ] = None,
+) -> None:
+    """Delete the stored api_key for one server (other servers keep theirs)."""
+    target = server or DEFAULT_SERVER
+    try:
+        removed = CredentialStore().delete(target)
+    except CredentialStoreError as e:
+        raise _die(e) from None
+    if not removed:
+        console.print(f"already logged out — no token stored for {target}")
         return
-    auth_store.delete()
-    console.print(f"[green]✓[/green] removed {auth_store.PATH}")
+    console.print(f"[green]✓[/green] removed the {target} credential")
 
 
 @auth_app.command("status")
 def auth_status(
+    server: Annotated[
+        str | None,
+        typer.Option("--server", envvar="TRAPSTREET_URL", help="Which server's pairing to show."),
+    ] = None,
     verify: Annotated[
         bool,
         typer.Option("--verify/--no-verify", help="Ping server to verify token validity."),
     ] = True,
 ) -> None:
-    """Show current authentication state."""
-    stored = AuthStore().load()
-    if not stored:
-        console.print("[red]not logged in[/red]. Run [bold]tp auth login[/bold].")
+    """Show the authentication in effect (env overrides applied) — exactly the
+    server/token pair `tp submit` would use. --server inspects another credential."""
+    store = CredentialStore()
+    try:
+        resolved = ResolvedAuth.resolve(store, server_override=server)
+    except CredentialStoreError as e:
+        raise _die(e) from None
+    if resolved.api_key is None:
+        hint = "" if resolved.server == DEFAULT_SERVER else f" --server {resolved.server}"
+        console.print(
+            f"[red]not logged in[/red] to {resolved.server}. "
+            f"Run [bold]tp auth login{hint}[/bold] or set [bold]TRAPSTREET_API_KEY[/bold]."
+        )
+        if store.servers():
+            console.print(f"  stored credentials: {', '.join(store.servers())}")
         raise typer.Exit(code=1)
 
-    console.print(f"  server    {stored.server}")
-    if stored.solution:
+    console.print(f"  server    {resolved.server} [dim]({resolved.server_source})[/dim]")
+    console.print(f"  token     [dim]({resolved.api_key_source})[/dim]")
+    stored = store.load(resolved.server)
+    if resolved.api_key_source == "stored" and stored and stored.solution:
         console.print(f"  solution  [bold]{stored.solution}[/bold]")
 
     if not verify:
         return
 
-    client = ApiClient(stored.server, stored.api_key)
+    client = ApiClient(resolved.server, resolved.api_key)
     try:
         me = client.get_me()
     except ApiError as e:

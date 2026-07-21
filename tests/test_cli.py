@@ -234,7 +234,7 @@ def test_submit_not_logged_in(make_project, runner, monkeypatch):
     _passing(make_project)
     monkeypatch.delenv("TRAPSTREET_API_KEY", raising=False)
     # point auth store at an empty location so no stored token is found
-    monkeypatch.setattr("trap.auth.store.AuthStore.PATH", Path("/nonexistent/auth.json"))
+    monkeypatch.setattr("trap.auth.store.CredentialStore.PATH", Path("/nonexistent/auth.json"))
     res = runner.invoke(app, ["submit"])
     assert res.exit_code == 2
     assert "not logged in" in res.output

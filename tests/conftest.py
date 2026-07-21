@@ -33,6 +33,16 @@ print(json.dumps({"passed": ok, "score": sum(scores) / len(scores) if scores els
 """
 
 
+@pytest.fixture(autouse=True)
+def _isolate_auth(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Isolate every test from the developer's real credential store: strip the auth env
+    vars and point the store at a throwaway path, so no test can read — or, via legacy
+    migration, rewrite — ~/.config/trapstreet/auth.json."""
+    monkeypatch.delenv("TRAPSTREET_URL", raising=False)
+    monkeypatch.delenv("TRAPSTREET_API_KEY", raising=False)
+    monkeypatch.setattr("trap.auth.store.CredentialStore.PATH", tmp_path / "auth.json")
+
+
 @pytest.fixture
 def runner() -> CliRunner:
     return CliRunner()

@@ -76,15 +76,29 @@ tp submit [SOLUTION] [OPTIONS]
 | `--workspace / -w` | `.trap` | directory containing run artifacts |
 | `--allow-unanchored` | `false` | skip the confirmation for a run with no git provenance (see `tp run`) |
 
+**Server/token resolution.** The target server is `TRAPSTREET_URL` env >
+`https://trapstreet.run`. The token is `TRAPSTREET_API_KEY` env > the stored credential *for
+that server* (`tp auth login --server <url>`). Tokens are stored per server and never
+borrowed across servers, so pointing `TRAPSTREET_URL` at a server you haven't paired makes
+`tp submit` report logged-out rather than send another server's credential. `tp auth status`
+reports the same resolved pair.
+
 ## tp auth
 
 ```
-tp auth login [--server URL] [--with-token] [--timeout SECONDS]
-tp auth logout
-tp auth status [--verify / --no-verify]
+tp auth login  [--server URL] [--with-token] [--timeout SECONDS]
+tp auth logout [--server URL]
+tp auth status [--server URL] [--verify / --no-verify]
 ```
 
 `login` opens a browser for OAuth by default (only on `https://trapstreet.run`); pass
-`--with-token` to read an API key from stdin instead (for CI / custom servers). The token
-is saved to `~/.config/trapstreet/auth.json` (mode 600). `status` shows the current
-identity and, unless `--no-verify`, pings the server to check the token.
+`--with-token` to read an API key from stdin instead (for CI / custom servers). Tokens are
+stored one credential per server in `~/.config/trapstreet/auth.json` (mode 600), keyed by server
+URL — logging in to one server never displaces another's. Legacy single-token files are migrated
+to the keyed shape automatically on first read. All three commands default to
+`https://trapstreet.run`; `--server` (or `TRAPSTREET_URL`) selects another credential.
+
+`status` shows the server and token **in effect** — after env overrides, each annotated with
+its source (`env` / `stored` / `default`) — exactly what `tp submit` would use. Targeting a
+server with no stored credential reports logged-out for it (exit 1). Unless `--no-verify`, it
+then pings the server to check the token.

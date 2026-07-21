@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from trap.auth.oauth import OAuthCallbackServer
-from trap.auth.store import DEFAULT_SERVER, AuthData
+from trap.auth.store import DEFAULT_SERVER, Credential
 
 
 class TokenProvider:
@@ -13,10 +13,10 @@ class TokenProvider:
     def pre_message(self) -> str:
         return "authenticating with api_key"
 
-    def acquire(self) -> AuthData:
+    def acquire(self) -> Credential:
         if not self._token:
             raise ValueError("empty api_key")
-        return AuthData(server=self._server, api_key=self._token)
+        return Credential(server=self._server, api_key=self._token)
 
 
 class BrowserProvider:
@@ -32,7 +32,7 @@ class BrowserProvider:
     def pre_message(self) -> str:
         return f"opening [link={self._cb.auth_url}]{self._cb.auth_url}[/link]"
 
-    def acquire(self) -> AuthData:
+    def acquire(self) -> Credential:
         if not self._cb.run(self._timeout):
             raise TimeoutError(f"timed out after {self._timeout}s waiting for browser approval")
         assert self._cb.auth_data is not None
