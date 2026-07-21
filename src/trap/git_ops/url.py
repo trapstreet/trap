@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 
 from trap.git_ops.base import GitOpsError
 
@@ -96,3 +97,17 @@ class ParsedGitUrl:
         if m:
             return f"https://{m.group(1)}/{m.group(2)}"
         return re.sub(r"\.git$", "", self.repo)  # https/http: drop trailing .git
+
+    @property
+    def dir_basename(self) -> str:
+        """Basename of the directory the URL addresses: the subdirectory when one
+        is set, else the repo."""
+        return PurePosixPath(self.subdirectory).name if self.subdirectory else self.basename
+
+    @property
+    def normalised_dir_url(self) -> str:
+        """Canonical, rev-independent address of the directory the URL points at:
+        ``normalised_url`` plus ``#<subdirectory>`` when one is set. The rev is
+        excluded on purpose — it can float without changing *which* directory
+        this is."""
+        return self.normalised_url + (f"#{self.subdirectory}" if self.subdirectory else "")

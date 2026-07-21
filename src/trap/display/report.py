@@ -1,6 +1,10 @@
+"""Report renderers: turn a ReportData into terminal output (rich table or JSON)."""
+
 from __future__ import annotations
 
+import enum
 import json
+import sys
 
 from rich import box
 from rich.console import Console
@@ -10,7 +14,21 @@ from rich.table import Table
 from rich.text import Text
 
 from trap.models import INFRA_ERROR_KEY, CaseResult, ReportData
-from trap.report.base import BaseRenderer
+
+
+class OutputFormat(enum.StrEnum):
+    rich = "rich"
+    json = "json"
+
+
+class BaseRenderer:
+    def render(self, data: ReportData) -> None:
+        raise NotImplementedError
+
+
+class JsonRenderer(BaseRenderer):
+    def render(self, data: ReportData) -> None:
+        sys.stdout.write(data.model_dump_json(indent=2) + "\n")
 
 
 class RichRenderer(BaseRenderer):
@@ -122,3 +140,7 @@ class RichRenderer(BaseRenderer):
     def render(self, data: ReportData) -> None:
         self.console.print(self._build_summary(data))
         self.console.print(self._build_table(data))
+
+
+def renderer_factory(fmt: OutputFormat) -> BaseRenderer:
+    return {OutputFormat.rich: RichRenderer, OutputFormat.json: JsonRenderer}[fmt]()

@@ -37,7 +37,7 @@ tasks:                         # task bindings, keyed by alias
 
 ## `tasks` block
 
-A map of **alias → binding**. The alias is your handle (`tp run <alias>`), the local
+A map of **alias → binding**. The alias is your handle (`tp run --task <alias>`), the local
 run-dir name, and the trapstreet task id on submit; with one task, `tp run` uses it
 automatically. Each binding:
 

@@ -68,7 +68,7 @@ class TrapLoader:
         The solution's `setup_cmd` (in its trap.yaml, so it travels with the
         solution) prepares the checkout. It auto-runs when a remote pull brought
         new code, and otherwise only when `setup` is set (`tp run --setup-solution`).
-        Mirrors `TraptaskLoader.from_task`.
+        Mirrors `TraptaskLoader.from_task_binding`.
         """
         from trap.git_ops import GitOpsError, ParsedGitUrl, RemoteRepo
 

@@ -16,8 +16,8 @@ from trap.cost.proxy import CostProxy
 from trap.git_ops import LocalRepo, ParsedGitUrl, RemoteRepo
 from trap.loader import TrapLoader, TraptaskLoader
 from trap.models.cost import CaseCost, ModelCost
-from trap.report import ReportHandle
 from trap.runner import TaskRunner
+from trap.workspace import Workspace
 
 from .conftest import GRADER_PASS, JUDGE_SCORE
 
@@ -144,8 +144,8 @@ def _passing(make_project, **kw):
 def test_submit_no_run(make_project, runner, monkeypatch):
     make_project(cmd="sh -c 'echo hi'", cases=["c1"])
     monkeypatch.setenv("TRAPSTREET_API_KEY", "k")
-    res = runner.invoke(app, ["submit", "t"])
-    assert res.exit_code == 2 and "no report" in res.output
+    res = runner.invoke(app, ["submit", "--task", "t"])
+    assert res.exit_code == 2 and "no completed runs" in res.output
 
 
 def test_submit_api_error(make_project, runner, monkeypatch):
@@ -157,7 +157,7 @@ def test_submit_api_error(make_project, runner, monkeypatch):
         raise ApiError("server exploded")
 
     monkeypatch.setattr("trap.auth.client.ApiClient.submit", boom)
-    res = runner.invoke(app, ["submit", "t"])
+    res = runner.invoke(app, ["submit", "--task", "t"])
     assert res.exit_code == 2 and "server exploded" in res.output
 
 
@@ -167,7 +167,7 @@ def test_submit_uses_stored_credentials(make_project, runner, monkeypatch, tmp_p
     monkeypatch.delenv("TRAPSTREET_API_KEY", raising=False)
     monkeypatch.delenv("TRAPSTREET_URL", raising=False)
     monkeypatch.setattr("trap.auth.store.AuthStore.PATH", tmp_path / "auth.json")
-    # legacy single-object file: migrated on read, then read as the default-server profile
+    # v2 keyed store: submit resolves the default-server profile
     (tmp_path / "auth.json").write_text(
         json.dumps({"version": 2, "profiles": {"https://trapstreet.run": {"api_key": "stored-key"}}})
     )
@@ -178,26 +178,31 @@ def test_submit_uses_stored_credentials(make_project, runner, monkeypatch, tmp_p
         return {"run": {"passed": True}}
 
     monkeypatch.setattr("trap.auth.client.ApiClient.submit", fake_submit)
-    assert runner.invoke(app, ["submit", "t"]).exit_code == 0
+    assert runner.invoke(app, ["submit", "--task", "t"]).exit_code == 0
     assert captured == {"server": "https://trapstreet.run", "key": "stored-key"}
 
 
-# -- TaskRunner: no callbacks, latest symlink healing -------------------------
+# -- TaskRunner: no callbacks; fail-fast ---------------------------------------
+
+
+def _run_dir(make_project, run_name: str, cmd: str = "sh -c 'echo hi'", cases=("c1",)):
+    sol = make_project(cmd=cmd, cases=list(cases))
+    run_dir = Workspace((sol / ".trap").resolve(), "sol-key", "t").run_dir(run_name)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
 
 
 def _task_runner(make_project, run_name: str):
-    sol = make_project(cmd="sh -c 'echo hi'", cases=["c1"])
+    run_dir = _run_dir(make_project, run_name)
     tl = TrapLoader.from_solution(None)
     task = tl.resolve_task(None)
-    ttl = TraptaskLoader.from_task(task, tl.trap_dir)
-    handle = ReportHandle((sol / ".trap").resolve(), task.alias, run_name)
-    handle.run_dir.mkdir(parents=True, exist_ok=True)
+    ttl = TraptaskLoader.from_task_binding(task, tl.trap_dir)
     return TaskRunner(
         trap_config=tl.config,
         trap_dir=tl.trap_dir,
         traptask_config=ttl.traptask,
         traptask_dir=ttl.traptask_dir,
-        run_dir=handle.run_dir,
+        run_dir=run_dir,
         cost_enabled=False,
     )
 
@@ -208,32 +213,14 @@ def test_taskrunner_without_callbacks(make_project):
     assert len(results) == 1
 
 
-def test_taskrunner_relinks_latest(make_project, tmp_path):
-    tr1 = _task_runner(make_project, "ts1")
-    tr1.run(tr1.traptask_config.cases)  # creates `latest` symlink
-    tr2 = _task_runner(make_project, "ts2")
-    tr2.run(tr2.traptask_config.cases)  # `latest` already a symlink → relinked
-    latest = tr2.run_dir.parent / "latest"
-    assert latest.is_symlink() and latest.resolve().name == "ts2"
-
-
-def test_taskrunner_heals_broken_latest(make_project):
-    tr = _task_runner(make_project, "ts1")
-    broken = tr.run_dir.parent / "latest"
-    broken.mkdir()  # a real dir where a symlink belongs
-    tr.run(tr.traptask_config.cases)
-    assert (tr.run_dir.parent / "latest").is_symlink()
-    assert any(p.name.startswith("latest.broken.") for p in tr.run_dir.parent.iterdir())
-
-
 def test_taskrunner_fail_fast(make_project):
     sol = make_project(cmd="sh -c 'exit 1'", cases=["c1", "c2"])
     tl = TrapLoader.from_solution(None)
     task = tl.resolve_task(None)
-    ttl = TraptaskLoader.from_task(task, tl.trap_dir)
-    handle = ReportHandle((sol / ".trap").resolve(), task.alias, "ff")
-    handle.run_dir.mkdir(parents=True)
-    tr = TaskRunner(tl.config, tl.trap_dir, ttl.traptask_dir, ttl.traptask, handle.run_dir, False)
+    ttl = TraptaskLoader.from_task_binding(task, tl.trap_dir)
+    run_dir = Workspace((sol / ".trap").resolve(), "sol-key", task.alias).run_dir("ff")
+    run_dir.mkdir(parents=True)
+    tr = TaskRunner(tl.config, tl.trap_dir, ttl.traptask_dir, ttl.traptask, run_dir, False)
     results, _ = tr.run(ttl.traptask.cases, fail_fast=True)
     assert len(results) == 1  # stopped after the first non-zero exit
 
@@ -328,10 +315,21 @@ def test_from_task_remote_clones(tmp_path):
     src = _git_solution(tmp_path / "remote-task")
     from trap.models import TaskBinding
 
-    loader = TraptaskLoader.from_task(
-        TaskBinding(alias="t", source=f"git+file://{src}#subdirectory=task"), tmp_path / "trapdir"
+    loader = TraptaskLoader.from_task_binding(
+        TaskBinding(alias="t", source=f"git+file://{src}#subdirectory=task"),
+        tmp_path / "trapdir",
+        workspace_root=tmp_path / "ws",
     )
     assert loader.traptask.cases[0].id == "c1"
+    # the clone cache lives inside the workspace root, beside runs/
+    assert (tmp_path / "ws" / "repos" / "remote-task").is_dir()
+    # clone_to is solution-author config: it anchors to the trap.yaml dir instead
+    with_clone_to = TraptaskLoader.from_task_binding(
+        TaskBinding(alias="t", source=f"git+file://{src}#subdirectory=task", clone_to=Path("vendored")),
+        tmp_path / "trapdir",
+        workspace_root=tmp_path / "ws",
+    )
+    assert with_clone_to.traptask_dir == tmp_path / "trapdir" / "vendored" / "task"
 
 
 # -- git_ops stragglers -------------------------------------------------------
