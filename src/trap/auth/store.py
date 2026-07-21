@@ -4,7 +4,7 @@ import json as _json
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ValidationError
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError
 
 DEFAULT_SERVER = "https://trapstreet.run"
 
@@ -14,9 +14,19 @@ def _normalize(server: str) -> str:
 
 
 class AuthData(BaseModel):
+    """A stored credential: the api_key paired with the server it was issued for,
+    plus the account name the server echoed back at pairing time (display only —
+    the server derives identity from the token, never from this).
+
+    `account` was called `solution` in the v1 era, when api_keys belonged to a
+    leaderboard solution rather than a user. Old files and callback params still
+    say `solution`; accepted on read, rewritten as `account` on save."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
     server: str
     api_key: str
-    solution: str | None = None
+    account: str | None = Field(default=None, validation_alias=AliasChoices("account", "solution"))
 
 
 class AuthStore:

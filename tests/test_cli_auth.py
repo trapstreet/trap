@@ -103,8 +103,8 @@ def test_auth_status_verify(runner, tmp_path, monkeypatch):
 
 def test_auth_status_server_flag_selects_profile(runner, tmp_path, monkeypatch):
     _store_at(monkeypatch, tmp_path)
-    AuthStore().save(AuthData(server=DEFAULT_SERVER, api_key="p", solution="prod-sol"))
-    AuthStore().save(AuthData(server=UAT, api_key="u", solution="uat-sol"))
+    AuthStore().save(AuthData(server=DEFAULT_SERVER, api_key="p", account="prod-sol"))
+    AuthStore().save(AuthData(server=UAT, api_key="u", account="uat-sol"))
     res = runner.invoke(app, ["auth", "status", "--no-verify", "--server", UAT])
     assert res.exit_code == 0, res.output
     assert "uat-sol" in res.output and "uat.trapstreet.run" in res.output

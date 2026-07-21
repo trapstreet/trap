@@ -62,7 +62,7 @@ def auth_login(
     path = AuthStore().save(auth_data)
     console.print(
         f"[green]✓ logged in[/green] to {auth_data.server}"
-        + (f" · solution [bold]{auth_data.solution}[/bold]" if auth_data.solution else "")
+        + (f" · account [bold]{auth_data.account}[/bold]" if auth_data.account else "")
         + f" · token saved to {path}"
     )
 
@@ -112,8 +112,8 @@ def auth_status(
 
     console.print(f"  server    {resolved.server} [dim]({resolved.server_source})[/dim]")
     console.print(f"  token     [dim]({resolved.api_key_source})[/dim]")
-    if stored and stored.solution and resolved.api_key_source == "stored":
-        console.print(f"  solution  [bold]{stored.solution}[/bold]")
+    if stored and stored.account and resolved.api_key_source == "stored":
+        console.print(f"  account   [bold]{stored.account}[/bold]")
     others = [s for s in auth_store.servers() if s != resolved.server.rstrip("/")]
     if others:
         console.print(f"  profiles  [dim]{', '.join(others)} — select with --server[/dim]")

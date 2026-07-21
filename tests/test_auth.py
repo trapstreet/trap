@@ -24,10 +24,10 @@ def store(tmp_path, monkeypatch) -> AuthStore:
 
 def test_store_roundtrip_default_server(store):
     assert store.load() is None
-    path = store.save(AuthData(server=DEFAULT_SERVER, api_key="k", solution="sol"))
+    path = store.save(AuthData(server=DEFAULT_SERVER, api_key="k", account="sol"))
     assert oct(path.stat().st_mode)[-3:] == "600"
     loaded = store.load()  # no arg → DEFAULT_SERVER profile
-    assert loaded is not None and loaded.api_key == "k" and loaded.solution == "sol"
+    assert loaded is not None and loaded.api_key == "k" and loaded.account == "sol"
     assert loaded.server == DEFAULT_SERVER
 
 
@@ -68,7 +68,7 @@ def test_store_migrates_legacy_single_object_file(store, tmp_path):
     (tmp_path / "auth.json").write_text(json.dumps({"server": UAT, "api_key": "legacy", "solution": "sol"}))
     assert store.load() is None  # legacy profile was uat, not prod
     loaded = store.load(UAT)
-    assert loaded is not None and loaded.api_key == "legacy" and loaded.solution == "sol"
+    assert loaded is not None and loaded.api_key == "legacy" and loaded.account == "sol"
     migrated = json.loads((tmp_path / "auth.json").read_text())
     assert UAT in migrated["profiles"]  # file rewritten in the keyed format
     assert oct((tmp_path / "auth.json").stat().st_mode)[-3:] == "600"
@@ -296,7 +296,7 @@ def test_oauth_callback_success(monkeypatch):
     monkeypatch.setattr("trap.auth.oauth.webbrowser.open", fake_open)
     assert "/cli/authorize" in srv.auth_url
     assert srv.run(timeout=5) is True
-    assert srv.auth_data is not None and srv.auth_data.api_key == "K" and srv.auth_data.solution == "S"
+    assert srv.auth_data is not None and srv.auth_data.api_key == "K" and srv.auth_data.account == "S"
 
 
 def test_oauth_missing_api_key_and_timeout(monkeypatch):
@@ -318,3 +318,25 @@ def test_oauth_rejects_missing_key(monkeypatch):
 
     monkeypatch.setattr("trap.auth.oauth.webbrowser.open", fake_open)
     assert srv.run(timeout=1) is False
+
+
+def test_store_saves_account_key_never_solution(store, tmp_path):
+    # the rename is complete on write: new files say "account"; "solution" is
+    # only ever accepted on read (legacy files / old servers)
+    store.save(AuthData(server=DEFAULT_SERVER, api_key="k", account="me"))
+    raw = json.loads((tmp_path / "auth.json").read_text())
+    profile = raw["profiles"][DEFAULT_SERVER]
+    assert profile["account"] == "me"
+    assert "solution" not in profile
+
+
+def test_oauth_callback_prefers_account_over_legacy_solution(monkeypatch):
+    # web #95 dual-emits account+solution during the transition; account wins
+    srv = OAuthCallbackServer("https://trapstreet.run/")
+
+    def fake_open(url):
+        httpx.get(f"http://127.0.0.1:{srv.port}/callback?api_key=K&account=A&solution=S")
+
+    monkeypatch.setattr("trap.auth.oauth.webbrowser.open", fake_open)
+    assert srv.run(timeout=5) is True
+    assert srv.auth_data is not None and srv.auth_data.account == "A"
