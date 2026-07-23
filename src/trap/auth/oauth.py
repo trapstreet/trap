@@ -7,7 +7,7 @@ import urllib.parse
 import webbrowser
 from typing import Any
 
-from trap.auth.store import AuthData
+from trap.auth.store import Credential
 
 
 class _CallbackHandler(http.server.BaseHTTPRequestHandler):
@@ -38,9 +38,9 @@ class _CallbackHandler(http.server.BaseHTTPRequestHandler):
             self._respond(400, "text/plain", b"missing api_key in query string")
             return
 
-        solution = (params.get("solution") or [None])[0]
+        account = (params.get("account") or [None])[0]
         srv: OAuthCallbackServer = self.server  # type: ignore[assignment]
-        srv._receive(AuthData(server=srv._server_url, api_key=api_key, solution=solution))
+        srv._receive(Credential(server=srv._server_url, api_key=api_key, account=account))
         self._respond(200, "text/html; charset=utf-8", self._SUCCESS_HTML)
 
 
@@ -50,15 +50,15 @@ class OAuthCallbackServer(socketserver.TCPServer):
     def __init__(self, server_url: str) -> None:
         super().__init__(("127.0.0.1", 0), _CallbackHandler)
         self._server_url = server_url.rstrip("/")
-        self._auth_data: AuthData | None = None
+        self._auth_data: Credential | None = None
         self._received = threading.Event()
 
-    def _receive(self, data: AuthData) -> None:
+    def _receive(self, data: Credential) -> None:
         self._auth_data = data
         self._received.set()
 
     @property
-    def auth_data(self) -> AuthData | None:
+    def auth_data(self) -> Credential | None:
         return self._auth_data
 
     @property

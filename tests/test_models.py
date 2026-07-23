@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from trap.models import (
     CaseCost,
     CaseResult,
+    Diagnosis,
     GraderConfig,
     JudgeConfig,
     ModelCost,
@@ -79,3 +80,84 @@ def test_traptask_minimal():
     t = TraptaskConfig(cases=({"id": "a"},))
     assert t.cases[0].id == "a"
     assert t.judge is None and t.grader is None
+
+
+# -- Diagnosis (post-run measurement health) ----------------------------------
+
+# (metrics, judge_exit_code) — pass/fail is the exit code alone; metrics never decides.
+SCORED = ({"score": 1.0}, 0)  # exit 0 → passed
+NULL_OK = (None, 0)  # exit 0, judge printed `null` → still passed
+NON_JSON = (None, 125)  # exit 0 but output wasn't JSON → failed (sentinel)
+CRASHED = (None, 3)  # non-zero exit → failed
+NO_JUDGE = (None, None)  # no judge ran for this case
+
+
+def _report(cases, *, grader_metrics=None, grader_exit_code=None):
+    return ReportData(
+        cases_results=tuple(
+            CaseResult(case_id=f"c{i}", metrics=m, judge_exit_code=code) for i, (m, code) in enumerate(cases)
+        ),
+        grader_metrics=grader_metrics,
+        grader_exit_code=grader_exit_code,
+        started_at_utc="t0",
+        finished_at_utc="t1",
+    )
+
+
+def test_diagnosis_pass_fail_is_the_exit_code_not_the_output():
+    # exit 0 passes with no metrics (a `null` verdict); a non-zero exit fails even with
+    # metrics present — the output never enters the decision.
+    d = Diagnosis.from_report_data(_report([NULL_OK, ({"score": 1.0}, 3)]))
+    assert d.partial_judge_failure and d.exit_code == 0
+    assert len(d.judge_failures) == 1 and d.judge_failures[0].judge_exit_code == 3
+
+
+def test_diagnosis_judge_broken_when_all_cases_fail():
+    d = Diagnosis.from_report_data(_report([NON_JSON, CRASHED]))
+    assert d.judge_broken and d.measurement_broken and d.exit_code == 3
+    assert d.total_cases == 2 and len(d.judge_failures) == 2 and not d.partial_judge_failure
+
+
+def test_diagnosis_partial_judge_failure_exits_0():
+    d = Diagnosis.from_report_data(_report([CRASHED, SCORED]))
+    assert not d.judge_broken and d.partial_judge_failure
+    assert not d.measurement_broken and d.exit_code == 0
+
+
+def test_diagnosis_clean_run():
+    d = Diagnosis.from_report_data(_report([SCORED, NULL_OK], grader_exit_code=0))
+    assert not d.measurement_broken and d.exit_code == 0
+    assert not d.judge_failures and not d.partial_judge_failure
+
+
+def test_diagnosis_no_judge_never_broken():
+    # no judge ran (exit code None) → nothing to fail
+    d = Diagnosis.from_report_data(_report([NO_JUDGE, NO_JUDGE]))
+    assert not d.judge_broken and d.exit_code == 0
+
+
+def test_diagnosis_empty_run_is_not_broken():
+    d = Diagnosis.from_report_data(_report([]))
+    assert not d.judge_broken and d.total_cases == 0
+
+
+def test_diagnosis_grader_broken_on_nonzero_exit():
+    d = Diagnosis.from_report_data(_report([SCORED], grader_exit_code=7))
+    assert d.grader_broken and d.measurement_broken and d.exit_code == 3
+
+
+def test_diagnosis_grader_broken_on_non_json():
+    # grader exited 0 but its output wasn't JSON → the 125 sentinel → broke
+    d = Diagnosis.from_report_data(_report([SCORED], grader_exit_code=125))
+    assert d.grader_broken and d.exit_code == 3
+
+
+def test_diagnosis_grader_pass_ignores_output():
+    # grader exited 0 → passed, even with metrics None (it printed `null`)
+    d = Diagnosis.from_report_data(_report([SCORED], grader_metrics=None, grader_exit_code=0))
+    assert not d.grader_broken and d.exit_code == 0
+
+
+def test_diagnosis_grader_not_run_is_not_broken():
+    d = Diagnosis.from_report_data(_report([SCORED], grader_exit_code=None))
+    assert not d.grader_broken and d.exit_code == 0

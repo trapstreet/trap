@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -10,14 +9,21 @@ from typing import Annotated
 import typer
 
 from trap import __version__
-from trap.auth import DEFAULT_SERVER, ApiClient, ApiError, AuthStore
+from trap.auth import (
+    DEFAULT_SERVER,
+    ApiClient,
+    ApiError,
+    CredentialStore,
+    CredentialStoreError,
+    ResolvedAuth,
+)
 from trap.cli._auth import auth_app
 from trap.cli._console import _die, _env_truthy, console, err_console
 from trap.display import CaseProgress, OutputFormat, render_submit_result, renderer_factory
 from trap.environment import EnvironmentDetector
 from trap.git_ops import GitOpsError, LocalRepo, ParsedGitUrl
 from trap.loader import ConfigError, TrapLoader, TraptaskLoader
-from trap.models import Provenance, ReportData
+from trap.models import Diagnosis, Provenance, ReportData
 from trap.runner import TaskRunner
 from trap.workspace import SolutionIdentity, Workspace
 
@@ -44,6 +50,37 @@ def _main(
     ] = False,
 ) -> None:
     """AI prompt / agent / workflow / testing framework."""
+
+
+def _failure_reason(exit_code: int | None) -> str:
+    """A human reason for a broken judge/grader, read from its exit code alone. 124 and
+    125 are trap sentinels (see CapturedSubprocess): 124 = killed for timing out, 125 =
+    exited 0 but its stdout wasn't JSON. Any other non-zero value is the actor's own exit."""
+    if exit_code == 124:
+        return "timed out"
+    if exit_code == 125:
+        return "exited 0 but its output wasn't JSON"
+    return f"exited with status {exit_code}"
+
+
+def _legacy_task_hint(stderr_path: Path) -> str:
+    """A one-line explanation when a broken actor's stderr shows the legacy-task signature.
+
+    Task versions written for the old trapstreet-cli read a ``TRAPTASK_PAYLOAD`` env var,
+    not ``TRAPTASK_MANIFEST``; under this CLI their judge/grader crash with a bare
+    ``KeyError``. Naming the cause spares the user from decoding it. Empty when the stderr
+    shows no such signature or can't be read."""
+    try:
+        stderr = stderr_path.read_text()
+    except OSError:
+        return ""
+    if "TRAPTASK_PAYLOAD" not in stderr:
+        return ""
+    return (
+        "\n  this task was written for the legacy trapstreet-cli (it reads TRAPTASK_PAYLOAD, "
+        "not TRAPTASK_MANIFEST) — use the task's latest version, or run it with "
+        "`uvx --from trapstreet-cli tp run`"
+    )
 
 
 def _no_report(workspace: Workspace, error: FileNotFoundError) -> typer.Exit:
@@ -235,7 +272,7 @@ def run(
     )
     prog_console = console if output == OutputFormat.rich else None
     with CaseProgress(active_cases, console=prog_console) as prog:
-        case_results, grader_metrics = runner.run(
+        case_results, grader_metrics, grader_exit_code = runner.run(
             active_cases,
             fail_fast=fail_fast,
             on_case_start=prog.on_case_start,
@@ -258,6 +295,7 @@ def run(
         started_at_utc=started_at_local.astimezone(UTC),
         finished_at_utc=finished_at_utc,
         grader_metrics=grader_metrics,
+        grader_exit_code=grader_exit_code,
         provenance=provenance,
         environment=environment_info,
     )
@@ -266,9 +304,38 @@ def run(
     if output == OutputFormat.rich:
         # Where the artifacts landed — the run id doubles as the `--run` handle.
         console.print(f"[dim]run {ts} → {ws.report_json_path(ts)}[/dim]")
-    # trap reports facts, not a verdict: a completed run exits 0 regardless of per-case
-    # exit codes or scores (read the grader / report.json to gate CI). trap-level
-    # failures (bad config, git errors) still exit non-zero via _die.
+
+    # trap reports facts, not a verdict: per-case exit codes and scores never set the exit
+    # code (read the grader / report.json to gate CI); trap-level failures (bad config, git
+    # errors) exit 2 via _die. But a broken measuring apparatus is not a fact about the
+    # solution — when the judge errored on *every* case, or the grader errored, the scores
+    # are missing, not zero, so exit 3 to keep scripts from reading an unscored run as one
+    # that completed.
+    diagnosis = Diagnosis.from_report_data(report_data)
+    if diagnosis.judge_broken:
+        first = diagnosis.judge_failures[0]
+        stderr_path = ws.run_dir(ts) / first.case_id / "judge" / "stderr"
+        err_console.print(
+            f"[red]error[/red]: judge failed on all {diagnosis.total_cases} cases — scores are "
+            f"missing, not zero (first: {first.case_id} {_failure_reason(first.judge_exit_code)}).\n"
+            f"  judge stderr: {stderr_path}{_legacy_task_hint(stderr_path)}"
+        )
+    elif diagnosis.partial_judge_failure:
+        failed = diagnosis.judge_failures
+        err_console.print(
+            f"[yellow]warning[/yellow]: judge failed on {len(failed)} of "
+            f"{diagnosis.total_cases} cases ({', '.join(r.case_id for r in failed[:5])}"
+            f"{', …' if len(failed) > 5 else ''}) — their scores are missing, not zero."
+        )
+    if diagnosis.grader_broken:
+        stderr_path = ws.run_dir(ts) / "grader" / "stderr"
+        err_console.print(
+            f"[red]error[/red]: grader failed ({_failure_reason(report_data.grader_exit_code)}) — "
+            f"the run has no aggregate score.\n"
+            f"  grader stderr: {stderr_path}{_legacy_task_hint(stderr_path)}"
+        )
+    if diagnosis.exit_code != 0:
+        raise typer.Exit(code=diagnosis.exit_code)
 
 
 @app.command()
@@ -328,15 +395,16 @@ def submit(
     Reads from the .trap/runs/<solution>/<task>/<run>/report.json workspace
     that `tp run` populated.
     """
-    stored = AuthStore().load()
-    # priority: TRAPSTREET_URL env > stored > default
-    resolved_server = (
-        os.environ.get("TRAPSTREET_URL") or (stored.server if stored else None) or DEFAULT_SERVER
-    )
-    # priority: TRAPSTREET_API_KEY env > stored
-    resolved_key = os.environ.get("TRAPSTREET_API_KEY") or (stored.api_key if stored else None)
-    if not resolved_key:
-        raise _die("not logged in. Run [bold]tp auth login[/bold] or set [bold]TRAPSTREET_API_KEY[/bold].")
+    try:
+        resolved = ResolvedAuth.resolve(CredentialStore())
+    except CredentialStoreError as e:
+        raise _die(e) from None
+    if resolved.api_key is None:
+        hint = "" if resolved.server == DEFAULT_SERVER else f" --server {resolved.server}"
+        raise _die(
+            f"not logged in to {resolved.server}. Run [bold]tp auth login{hint}[/bold] "
+            "or set [bold]TRAPSTREET_API_KEY[/bold]."
+        )
 
     try:
         task_alias = TrapLoader.from_solution(solution).resolve_task(task).alias
@@ -354,7 +422,7 @@ def submit(
     )
     report_path = ws.report_json_path(run)
 
-    client = ApiClient(resolved_server, resolved_key)
+    client = ApiClient(resolved.server, resolved.api_key)
     try:
         resp_data = client.submit(report_path)
     except ApiError as e:
@@ -365,5 +433,11 @@ def submit(
 # Hidden until the scaffold is implemented — registered but not advertised in `--help`.
 @app.command(hidden=True)
 def init() -> None:
-    """Generate annotated trap.yaml + traptask.yaml scaffold."""
-    console.print("not yet")
+    """Not implemented yet — write trap.yaml by hand (see the trap.yaml reference)."""
+    # Exit non-zero: a stub that exits 0 reads as success, so `tp init && tp run` would
+    # march on as if a config had been scaffolded.
+    console.print(
+        "[yellow]tp init isn't implemented yet.[/yellow] Write trap.yaml by hand — see "
+        "https://github.com/trapstreet/trap/blob/main/docs/reference/trap-yaml.md"
+    )
+    raise typer.Exit(code=2)

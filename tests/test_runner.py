@@ -42,25 +42,32 @@ def _json_emitter(tmp_path, payload: str) -> str:
 
 def test_run_metrics_ok(tmp_path):
     cmd = _json_emitter(tmp_path, '{"score": 1.0}')
-    out = _proc(cmd, tmp_path, tmp_path / "cap").run_metrics_or_error(runner_name="judge")
-    assert out == {"score": 1.0}
+    metrics, code = _proc(cmd, tmp_path, tmp_path / "cap").run_for_metrics()
+    assert metrics == {"score": 1.0} and code == 0
 
 
 def test_run_metrics_nonzero(tmp_path):
-    out = _proc("sh -c 'exit 2'", tmp_path, tmp_path / "cap").run_metrics_or_error(runner_name="judge")
-    assert "judge exited with status 2" in out["error"]
+    # broke → no verdict (None), and the exit code is recorded as provenance
+    metrics, code = _proc("sh -c 'exit 2'", tmp_path, tmp_path / "cap").run_for_metrics()
+    assert metrics is None and code == 2
 
 
-def test_run_metrics_bad_json(tmp_path):
-    out = _proc("sh -c 'echo notjson'", tmp_path, tmp_path / "cap").run_metrics_or_error(runner_name="grader")
-    assert "grader produced invalid JSON" in out["error"]
+def test_run_metrics_non_json_gets_sentinel_code(tmp_path):
+    # exit 0 but its output wasn't JSON → the 125 sentinel keeps the failure in exit-code
+    # space (pass/fail never looks at the output)
+    metrics, code = _proc("sh -c 'echo notjson'", tmp_path, tmp_path / "cap").run_for_metrics()
+    assert metrics is None and code == 125
+
+
+def test_run_metrics_null_is_a_valid_verdict(tmp_path):
+    # bare `null` is valid JSON → parses to None, exit stays 0: a pass, not a failure
+    metrics, code = _proc("sh -c 'echo null'", tmp_path, tmp_path / "cap").run_for_metrics()
+    assert metrics is None and code == 0
 
 
 def test_run_metrics_timeout(tmp_path):
-    out = _proc("sh -c 'sleep 5'", tmp_path, tmp_path / "cap", timeout=1).run_metrics_or_error(
-        runner_name="judge"
-    )
-    assert "judge timed out" in out["error"]
+    metrics, code = _proc("sh -c 'sleep 5'", tmp_path, tmp_path / "cap", timeout=1).run_for_metrics()
+    assert metrics is None and code == 124
 
 
 def test_as_text_normalises():

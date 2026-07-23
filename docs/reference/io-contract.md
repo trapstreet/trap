@@ -8,6 +8,12 @@ Every value is a directory or file path — not a pre-scanned `{name → path}` 
 keeps the contract lossless for nested input trees and lets each consumer read exactly the
 files it authored.
 
+> **Legacy tasks.** Task versions written for the old trapstreet-cli read a
+> `TRAPTASK_PAYLOAD` env var instead of `TRAPTASK_MANIFEST`, so their judge/grader crash
+> under this CLI (a bare `KeyError`). `tp run` recognises the signature and says so; the
+> fix is task-side — publish a task version that reads `TRAPTASK_MANIFEST`, or run the old
+> one with `uvx --from trapstreet-cli tp run`.
+
 ## Solution — `TRAP_MANIFEST`
 
 ```json
@@ -55,9 +61,13 @@ A JSON list of per-case results:
 
 ```json
 [{"case_id": "c1", "exit_code": 0, "duration": 0.12,
-  "metrics": {"score": 1.0}, "cost": null}]
+  "metrics": {"score": 1.0}, "cost": null, "judge_exit_code": 0}]
 ```
 
-`metrics` is whatever the judge printed (`null` if no judge ran). The grader prints
-free-form JSON; trap stores and displays it but never interprets it or lets it affect
-the exit code.
+`metrics` is whatever JSON the judge printed — any value it emits, or `null`. It never
+signals pass/fail. `judge_exit_code` is the sole pass/fail signal: `0` = passed (it printed
+valid JSON, whatever the shape — even `null`), `124` = timed out, `125` = exited 0 but its
+stdout wasn't JSON, any other non-zero = the judge's own exit, `null` = no judge ran. The
+grader works the same way via `grader_exit_code`. A grader's *verdict* never affects trap's
+exit code; a grader that fails (by its exit code) does — `tp run` exits `3` (see the CLI
+reference, exit codes).

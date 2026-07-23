@@ -23,8 +23,14 @@ class ReportData(BaseModel):
     provenance: Provenance = Field(default_factory=Provenance)
 
     cases_results: tuple[CaseResult, ...]
-    # Raw run-level grader output; None when no grader is configured.
+    # Raw run-level grader output — any valid JSON the grader printed, or None. It never
+    # affects pass/fail; that is grader_exit_code alone.
     grader_metrics: Any
+    # The grader subprocess's exit code — the sole pass/fail signal for aggregation, or
+    # None when no grader ran. Parallels CaseResult.judge_exit_code: 0 = passed, 124 =
+    # timed out, 125 = exited 0 but its output wasn't JSON, other non-zero = the grader's
+    # own exit.
+    grader_exit_code: int | None = None
     started_at_utc: str
     finished_at_utc: str
 
@@ -51,12 +57,14 @@ class ReportData(BaseModel):
         started_at_utc: datetime,
         finished_at_utc: datetime,
         provenance: Provenance,
+        grader_exit_code: int | None = None,
         environment: Environment | None = None,
     ) -> ReportData:
         return cls(
             provenance=provenance,
             cases_results=cases_results,
             grader_metrics=grader_metrics,
+            grader_exit_code=grader_exit_code,
             started_at_utc=started_at_utc.isoformat(timespec="seconds"),
             finished_at_utc=finished_at_utc.isoformat(timespec="seconds"),
             solution_name=trap_config.name,

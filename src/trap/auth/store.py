@@ -1,39 +1,140 @@
 from __future__ import annotations
 
-import json as _json
+import json
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
 DEFAULT_SERVER = "https://trapstreet.run"
 
 
-class AuthData(BaseModel):
+class Credential(BaseModel):
+    """A credential: the api_key paired with the server it was issued for. ``account`` is
+    the account name the server echoes at login — shown once in the login message, never
+    persisted (identity lives on the server; ``tp auth status`` fetches it fresh)."""
+
     server: str
     api_key: str
-    solution: str | None = None
+    account: str | None = None
 
 
-class AuthStore:
+class CredentialStoreError(Exception):
+    """The credential file exists but can't be read or parsed — distinct from an absent
+    file, which simply means logged out."""
+
+
+class CredentialStore:
+    """One JSON file holding one credential per server URL, so logging in to one
+    server never displaces another's pairing.
+
+    On disk, keyed by server URL (pretty-printed, ``indent=2``)::
+
+        {
+          "version": 2,
+          "credentials": {
+            "https://trapstreet.run": {"api_key": "tp_live_a1b2c3d4"},
+            "https://abc.def": {"api_key": "tp_live_e5f6g7h8"}
+          }
+        }
+
+    Only ``api_key`` is persisted per server — the account name is never written to disk.
+    A legacy flat file (a single unkeyed Credential object) is migrated to the keyed shape
+    on first read. Every write re-applies mode 0600.
+    """
+
     PATH = Path.home() / ".config" / "trapstreet" / "auth.json"
+    _SCHEMA_VERSION = 2
 
-    def load(self) -> AuthData | None:
-        if not self.exists:
+    def load(self, server: str = DEFAULT_SERVER) -> Credential | None:
+        """The credential stored for ``server``, or None when none is stored for it. A
+        credential is never borrowed across servers — asking for a server you never paired
+        returns None, not some other server's token. Raises ``CredentialStoreError`` if the
+        file exists but can't be parsed."""
+        credential = self._credentials().get(self._server_key(server))
+        if credential is None:
             return None
         try:
-            return AuthData.model_validate(_json.loads(self.PATH.read_text()))
-        except (OSError, _json.JSONDecodeError, ValidationError):
+            return Credential(server=self._server_key(server), **credential)
+        except ValidationError:
             return None
 
-    def save(self, data: AuthData) -> Path:
+    def servers(self) -> list[str]:
+        """Every server with a stored credential, sorted."""
+        return sorted(self._credentials().keys())
+
+    def save(self, data: Credential) -> Path:
+        """Store ``data`` under its server, leaving every other server's credential intact."""
+        credentials = self._credentials()
+        credentials[self._server_key(data.server)] = self._to_stored(data)
+        return self._write(credentials)
+
+    def delete(self, server: str = DEFAULT_SERVER) -> bool:
+        """Remove ``server``'s credential; return whether it existed. Removing the last
+        credential removes the file."""
+        credentials = self._credentials()
+        if credentials.pop(self._server_key(server), None) is None:
+            return False
+        if credentials:
+            self._write(credentials)
+        else:
+            self.PATH.unlink(missing_ok=True)
+        return True
+
+    def _credentials(self) -> dict[str, dict[str, Any]]:
+        """The keyed credentials on disk. An absent file reads as empty — simply logged
+        out — but a file that exists yet can't be read or parsed raises
+        ``CredentialStoreError`` instead of masquerading as logged-out. A legacy flat
+        file is migrated in place on first read."""
+        try:
+            raw_text = self.PATH.read_text()
+        except FileNotFoundError:
+            return {}
+        except OSError as e:
+            raise CredentialStoreError(f"cannot read the credential store at {self.PATH}: {e}") from e
+        try:
+            raw = json.loads(raw_text)
+        except json.JSONDecodeError as e:
+            raise CredentialStoreError(
+                f"the credential store at {self.PATH} is not valid JSON ({e}); delete it and log in again."
+            ) from e
+        if isinstance(raw, dict) and isinstance(raw.get("credentials"), dict):
+            return raw["credentials"]
+        return self._migrate_legacy(raw)
+
+    def _migrate_legacy(self, raw: Any) -> dict[str, dict[str, Any]]:
+        """Migrate a legacy flat Credential file to the keyed shape, or raise
+        ``CredentialStoreError`` when ``raw`` is neither the keyed shape nor a legacy
+        Credential. The rewrite is best-effort — a read-only location still serves the
+        parsed credential for this run."""
+        try:
+            legacy = Credential.model_validate(raw)
+        except ValidationError as e:
+            raise CredentialStoreError(
+                f"the credential store at {self.PATH} has an unrecognised format; delete it and log in again."
+            ) from e
+        credentials = {self._server_key(legacy.server): self._to_stored(legacy)}
+        try:
+            self._write(credentials)
+        except OSError:
+            pass
+        return credentials
+
+    def _write(self, credentials: dict[str, dict[str, Any]]) -> Path:
         self.PATH.parent.mkdir(parents=True, exist_ok=True)
-        self.PATH.write_text(data.model_dump_json(exclude_none=True, indent=2) + "\n")
+        payload = {"version": self._SCHEMA_VERSION, "credentials": credentials}
+        self.PATH.write_text(json.dumps(payload, indent=2) + "\n")
         self.PATH.chmod(0o600)
         return self.PATH
 
-    @property
-    def exists(self) -> bool:
-        return self.PATH.exists()
+    @staticmethod
+    def _server_key(server: str) -> str:
+        """Canonical key for a server URL, so a trailing slash never splits one server
+        into two credentials."""
+        return server.rstrip("/")
 
-    def delete(self) -> None:
-        self.PATH.unlink()
+    @staticmethod
+    def _to_stored(credential: Credential) -> dict[str, Any]:
+        """The on-disk projection of a credential: everything except the server (it is the
+        dict key) and the account name (shown once at login, never persisted)."""
+        return credential.model_dump(exclude={"server", "account"}, exclude_none=True)
