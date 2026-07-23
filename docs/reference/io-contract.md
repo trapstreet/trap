@@ -8,6 +8,12 @@ Every value is a directory or file path — not a pre-scanned `{name → path}` 
 keeps the contract lossless for nested input trees and lets each consumer read exactly the
 files it authored.
 
+> **Legacy tasks.** Task versions written for the old trapstreet-cli read a
+> `TRAPTASK_PAYLOAD` env var instead of `TRAPTASK_MANIFEST`, so their judge/grader crash
+> under this CLI (a bare `KeyError`). `tp run` recognises the signature and says so; the
+> fix is task-side — publish a task version that reads `TRAPTASK_MANIFEST`, or run the old
+> one with `uvx --from trapstreet-cli tp run`.
+
 ## Solution — `TRAP_MANIFEST`
 
 ```json

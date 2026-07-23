@@ -63,6 +63,26 @@ def _failure_reason(exit_code: int | None) -> str:
     return f"exited with status {exit_code}"
 
 
+def _legacy_task_hint(stderr_path: Path) -> str:
+    """A one-line explanation when a broken actor's stderr shows the legacy-task signature.
+
+    Task versions written for the old trapstreet-cli read a ``TRAPTASK_PAYLOAD`` env var,
+    not ``TRAPTASK_MANIFEST``; under this CLI their judge/grader crash with a bare
+    ``KeyError``. Naming the cause spares the user from decoding it. Empty when the stderr
+    shows no such signature or can't be read."""
+    try:
+        stderr = stderr_path.read_text()
+    except OSError:
+        return ""
+    if "TRAPTASK_PAYLOAD" not in stderr:
+        return ""
+    return (
+        "\n  this task was written for the legacy trapstreet-cli (it reads TRAPTASK_PAYLOAD, "
+        "not TRAPTASK_MANIFEST) — use the task's latest version, or run it with "
+        "`uvx --from trapstreet-cli tp run`"
+    )
+
+
 def _no_report(workspace: Workspace, error: FileNotFoundError) -> typer.Exit:
     """Exit for a report miss, with advice matching the likely cause: an empty
     workspace means the user never ran; existing runs under *other* solution keys
@@ -294,10 +314,11 @@ def run(
     diagnosis = Diagnosis.from_report_data(report_data)
     if diagnosis.judge_broken:
         first = diagnosis.judge_failures[0]
+        stderr_path = ws.run_dir(ts) / first.case_id / "judge" / "stderr"
         err_console.print(
             f"[red]error[/red]: judge failed on all {diagnosis.total_cases} cases — scores are "
             f"missing, not zero (first: {first.case_id} {_failure_reason(first.judge_exit_code)}).\n"
-            f"  judge stderr: {ws.run_dir(ts) / first.case_id / 'judge' / 'stderr'}"
+            f"  judge stderr: {stderr_path}{_legacy_task_hint(stderr_path)}"
         )
     elif diagnosis.partial_judge_failure:
         failed = diagnosis.judge_failures
@@ -307,10 +328,11 @@ def run(
             f"{', …' if len(failed) > 5 else ''}) — their scores are missing, not zero."
         )
     if diagnosis.grader_broken:
+        stderr_path = ws.run_dir(ts) / "grader" / "stderr"
         err_console.print(
             f"[red]error[/red]: grader failed ({_failure_reason(report_data.grader_exit_code)}) — "
             f"the run has no aggregate score.\n"
-            f"  grader stderr: {ws.run_dir(ts) / 'grader' / 'stderr'}"
+            f"  grader stderr: {stderr_path}{_legacy_task_hint(stderr_path)}"
         )
     if diagnosis.exit_code != 0:
         raise typer.Exit(code=diagnosis.exit_code)

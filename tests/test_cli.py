@@ -186,6 +186,30 @@ def test_failure_reason_reads_the_exit_code():
     assert "status 3" in climod._failure_reason(3)
 
 
+def test_run_legacy_task_payload_hint(make_project, runner):
+    # a judge that crashes referencing TRAPTASK_PAYLOAD (the legacy env var) → tp names the
+    # old-generation-task cause instead of leaving a bare exit code.
+    make_project(
+        cmd="sh -c 'echo hi'",
+        cases=["c1"],
+        judge={"cmd": "sh -c 'echo KeyError: TRAPTASK_PAYLOAD >&2; exit 1'"},
+    )
+    res = runner.invoke(app, ["run", "--no-environment"])
+    assert res.exit_code == 3, res.output
+    assert "legacy trapstreet-cli" in res.stderr and "uvx --from trapstreet-cli" in res.stderr
+
+
+def test_legacy_task_hint(tmp_path):
+    import trap.cli as climod
+
+    stderr = tmp_path / "stderr"
+    stderr.write_text("Traceback (most recent call last): KeyError: 'TRAPTASK_PAYLOAD'")
+    assert "trapstreet-cli" in climod._legacy_task_hint(stderr)
+    stderr.write_text("some unrelated failure")
+    assert climod._legacy_task_hint(stderr) == ""  # no signature → no hint
+    assert climod._legacy_task_hint(tmp_path / "missing") == ""  # unreadable → no hint
+
+
 def test_run_fail_fast(make_project, runner):
     make_project(cmd="sh -c 'exit 1'", cases=["c1", "c2"])
     res = runner.invoke(app, ["run", "--fail-fast", "--no-environment"])
