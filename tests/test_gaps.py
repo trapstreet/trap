@@ -361,7 +361,7 @@ def test_auth_login_browser_default(runner, tmp_path, monkeypatch):
 
     monkeypatch.setattr(
         "trap.cli._auth.BrowserProvider.acquire",
-        lambda self: Credential(server=DEFAULT_SERVER, api_key="k", solution="s"),
+        lambda self: Credential(server=DEFAULT_SERVER, api_key="k", account="a"),
     )
     res = runner.invoke(app, ["auth", "login"])
     assert res.exit_code == 0 and "logged in" in res.output

@@ -65,7 +65,7 @@ def auth_login(
         raise _die(e) from None
     console.print(
         f"[green]✓ logged in[/green] to {auth_data.server}"
-        + (f" · solution [bold]{auth_data.solution}[/bold]" if auth_data.solution else "")
+        + (f" · account [bold]{auth_data.account}[/bold]" if auth_data.account else "")
         + f" · token saved to {path}"
     )
 
@@ -119,9 +119,6 @@ def auth_status(
 
     console.print(f"  server    {resolved.server} [dim]({resolved.server_source})[/dim]")
     console.print(f"  token     [dim]({resolved.api_key_source})[/dim]")
-    stored = store.load(resolved.server)
-    if resolved.api_key_source == "stored" and stored and stored.solution:
-        console.print(f"  solution  [bold]{stored.solution}[/bold]")
 
     if not verify:
         return

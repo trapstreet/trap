@@ -10,12 +10,13 @@ DEFAULT_SERVER = "https://trapstreet.run"
 
 
 class Credential(BaseModel):
-    """A stored credential: the api_key paired with the server it was issued for, plus
-    the account name the server echoed back at login (display only)."""
+    """A credential: the api_key paired with the server it was issued for. ``account`` is
+    the account name the server echoes at login — shown once in the login message, never
+    persisted (identity lives on the server; ``tp auth status`` fetches it fresh)."""
 
     server: str
     api_key: str
-    solution: str | None = None
+    account: str | None = None
 
 
 class CredentialStoreError(Exception):
@@ -32,19 +33,14 @@ class CredentialStore:
         {
           "version": 2,
           "credentials": {
-            "https://trapstreet.run": {
-              "api_key": "tp_live_a1b2c3d4",
-              "solution": "alice"
-            },
-            "https://abc.def": {
-              "api_key": "tp_live_e5f6g7h8"
-            }
+            "https://trapstreet.run": {"api_key": "tp_live_a1b2c3d4"},
+            "https://abc.def": {"api_key": "tp_live_e5f6g7h8"}
           }
         }
 
-    ``solution`` is optional (the account name the server echoes at login). A legacy
-    flat file (a single unkeyed Credential object) is migrated to the keyed shape on
-    first read. Every write re-applies mode 0600.
+    Only ``api_key`` is persisted per server — the account name is never written to disk.
+    A legacy flat file (a single unkeyed Credential object) is migrated to the keyed shape
+    on first read. Every write re-applies mode 0600.
     """
 
     PATH = Path.home() / ".config" / "trapstreet" / "auth.json"
@@ -70,7 +66,7 @@ class CredentialStore:
     def save(self, data: Credential) -> Path:
         """Store ``data`` under its server, leaving every other server's credential intact."""
         credentials = self._credentials()
-        credentials[self._server_key(data.server)] = data.model_dump(exclude={"server"}, exclude_none=True)
+        credentials[self._server_key(data.server)] = self._to_stored(data)
         return self._write(credentials)
 
     def delete(self, server: str = DEFAULT_SERVER) -> bool:
@@ -117,8 +113,7 @@ class CredentialStore:
             raise CredentialStoreError(
                 f"the credential store at {self.PATH} has an unrecognised format; delete it and log in again."
             ) from e
-        stored = legacy.model_dump(exclude={"server"}, exclude_none=True)
-        credentials = {self._server_key(legacy.server): stored}
+        credentials = {self._server_key(legacy.server): self._to_stored(legacy)}
         try:
             self._write(credentials)
         except OSError:
@@ -137,3 +132,9 @@ class CredentialStore:
         """Canonical key for a server URL, so a trailing slash never splits one server
         into two credentials."""
         return server.rstrip("/")
+
+    @staticmethod
+    def _to_stored(credential: Credential) -> dict[str, Any]:
+        """The on-disk projection of a credential: everything except the server (it is the
+        dict key) and the account name (shown once at login, never persisted)."""
+        return credential.model_dump(exclude={"server", "account"}, exclude_none=True)

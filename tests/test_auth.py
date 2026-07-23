@@ -24,11 +24,12 @@ def store(tmp_path, monkeypatch) -> CredentialStore:
 
 def test_store_roundtrip_default_server(store):
     assert store.load() is None
-    path = store.save(Credential(server=DEFAULT_SERVER, api_key="k", solution="sol"))
+    path = store.save(Credential(server=DEFAULT_SERVER, api_key="k", account="alice"))
     assert oct(path.stat().st_mode)[-3:] == "600"
     loaded = store.load()  # no arg → the default-server credential
-    assert loaded is not None and loaded.api_key == "k" and loaded.solution == "sol"
-    assert loaded.server == DEFAULT_SERVER
+    assert loaded is not None and loaded.api_key == "k" and loaded.server == DEFAULT_SERVER
+    assert loaded.account is None  # the account name is never persisted
+    assert "alice" not in path.read_text()  # …and never written to disk
 
 
 def test_store_credentials_are_independent(store):
@@ -65,12 +66,13 @@ def test_store_delete_is_per_server(store, tmp_path):
 
 
 def test_store_migrates_legacy_single_object_file(store, tmp_path):
-    (tmp_path / "auth.json").write_text(json.dumps({"server": UAT, "api_key": "legacy", "solution": "sol"}))
+    (tmp_path / "auth.json").write_text(json.dumps({"server": UAT, "api_key": "legacy", "account": "a"}))
     assert store.load() is None  # the legacy credential was uat, not the default server
     loaded = store.load(UAT)
-    assert loaded is not None and loaded.api_key == "legacy" and loaded.solution == "sol"
+    assert loaded is not None and loaded.api_key == "legacy"
+    assert loaded.account is None  # migration drops the un-persisted account name
     migrated = json.loads((tmp_path / "auth.json").read_text())
-    assert UAT in migrated["credentials"]  # rewritten in the keyed format
+    assert migrated["credentials"][UAT] == {"api_key": "legacy"}  # keyed, api_key only
     assert oct((tmp_path / "auth.json").stat().st_mode)[-3:] == "600"
 
 
@@ -123,7 +125,7 @@ def test_store_invalid_credential_returns_none(store, tmp_path):
     # keyed shape, but this one credential is missing api_key: the file is fine (other
     # servers still load), only this entry is unusable — so load(), not the file, is None.
     (tmp_path / "auth.json").write_text(
-        json.dumps({"version": 2, "credentials": {DEFAULT_SERVER: {"solution": "sol"}}})
+        json.dumps({"version": 2, "credentials": {DEFAULT_SERVER: {"account": "a"}}})
     )
     assert store.load() is None
     assert store.servers() == [DEFAULT_SERVER]  # listed, just not loadable
@@ -315,12 +317,12 @@ def test_oauth_callback_success(monkeypatch):
     srv = OAuthCallbackServer("https://trapstreet.run/")
 
     def fake_open(url):
-        httpx.get(f"http://127.0.0.1:{srv.port}/callback?api_key=K&solution=S")
+        httpx.get(f"http://127.0.0.1:{srv.port}/callback?api_key=K&account=A")
 
     monkeypatch.setattr("trap.auth.oauth.webbrowser.open", fake_open)
     assert "/cli/authorize" in srv.auth_url
     assert srv.run(timeout=5) is True
-    assert srv.auth_data is not None and srv.auth_data.api_key == "K" and srv.auth_data.solution == "S"
+    assert srv.auth_data is not None and srv.auth_data.api_key == "K" and srv.auth_data.account == "A"
 
 
 def test_oauth_missing_api_key_and_timeout(monkeypatch):

@@ -93,14 +93,12 @@ def test_auth_status_not_logged_in(runner, tmp_path, monkeypatch):
 
 
 def test_auth_status_no_verify(runner, tmp_path, monkeypatch):
-    """Reads the default-server credential — including from a legacy-format file."""
+    """--no-verify shows the resolved server + token source with no network call."""
     _store_at(monkeypatch, tmp_path)
-    (tmp_path / "auth.json").write_text(
-        json.dumps({"server": DEFAULT_SERVER, "api_key": "k", "solution": "sol"})
-    )
+    (tmp_path / "auth.json").write_text(json.dumps({"server": DEFAULT_SERVER, "api_key": "k"}))
     res = runner.invoke(app, ["auth", "status", "--no-verify"])
     assert res.exit_code == 0
-    assert "sol" in res.output and "(stored)" in res.output
+    assert "(stored)" in res.output and DEFAULT_SERVER in res.output
 
 
 def test_auth_status_verify(runner, tmp_path, monkeypatch):
@@ -114,12 +112,12 @@ def test_auth_status_verify(runner, tmp_path, monkeypatch):
 
 def test_auth_status_server_flag_selects_credential(runner, tmp_path, monkeypatch):
     _store_at(monkeypatch, tmp_path)
-    CredentialStore().save(Credential(server=DEFAULT_SERVER, api_key="p", solution="prod-sol"))
-    CredentialStore().save(Credential(server=UAT, api_key="u", solution="uat-sol"))
+    CredentialStore().save(Credential(server=DEFAULT_SERVER, api_key="p"))
+    CredentialStore().save(Credential(server=UAT, api_key="u"))
     res = runner.invoke(app, ["auth", "status", "--no-verify", "--server", UAT])
     assert res.exit_code == 0, res.output
-    assert "uat-sol" in res.output and "uat.trapstreet.run" in res.output
-    assert "prod-sol" not in res.output
+    # --server picked the uat credential (its server + a stored token)
+    assert "https://uat.trapstreet.run" in res.output and "(stored)" in res.output
 
 
 def test_auth_status_env_server_without_credential_says_login(runner, tmp_path, monkeypatch):
