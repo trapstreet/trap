@@ -44,9 +44,10 @@ setup_cmd: uv sync            # optional: prepare the checkout (e.g. install jud
 ## judge / grader timeout
 
 Per-subprocess wall-clock ceiling (seconds) — a **safety net against a hung/runaway
-actor**, not a budget. On timeout trap kills it and records `{"error": ...}` on that
-case's `metrics` (or `grader_metrics`), exactly as for a non-zero exit or non-JSON output,
-so one stuck actor never crashes the run; its `meta.json` shows exit `124`. Defaults
+actor**, not a budget. On timeout trap kills it (exit `124`, recorded in `judge_exit_code`
+/ `grader_exit_code`), so one stuck actor never crashes the run. Whether an actor failed is
+its exit code alone: non-zero, `124` (timeout), or `125` (exited 0 but its stdout wasn't
+JSON); exit `0` passes whatever it printed. Defaults
 differ by role — `judge` `300` (per case, may call an LLM), `grader` `120` (aggregation
 only). Both are task-author owned, identical for every solution on this task version.
 Raise `judge.timeout` for a slow LLM-as-judge.

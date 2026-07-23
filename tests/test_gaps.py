@@ -209,7 +209,7 @@ def _task_runner(make_project, run_name: str):
 
 def test_taskrunner_without_callbacks(make_project):
     tr = _task_runner(make_project, "ts1")
-    results, _ = tr.run(tr.traptask_config.cases)
+    results, _, _ = tr.run(tr.traptask_config.cases)
     assert len(results) == 1
 
 
@@ -221,7 +221,7 @@ def test_taskrunner_fail_fast(make_project):
     run_dir = Workspace((sol / ".trap").resolve(), "sol-key", task.alias).run_dir("ff")
     run_dir.mkdir(parents=True)
     tr = TaskRunner(tl.config, tl.trap_dir, ttl.traptask_dir, ttl.traptask, run_dir, False)
-    results, _ = tr.run(ttl.traptask.cases, fail_fast=True)
+    results, _, _ = tr.run(ttl.traptask.cases, fail_fast=True)
     assert len(results) == 1  # stopped after the first non-zero exit
 
 

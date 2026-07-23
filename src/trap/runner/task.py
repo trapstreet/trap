@@ -54,10 +54,12 @@ class TaskRunner:
             layout = CaseLayout.for_case(self.run_dir, case.id)
             case_result = SolutionRunner(self, case.id, layout).run()
             if self.traptask_config.judge is not None:
-                # A broken judge is folded into an error metric by the runner (never
-                # crashes the run); we just attach whatever it returns.
-                metrics = JudgeRunner(self, case.id, layout).run()
-                case_result = case_result.model_copy(update={"metrics": metrics})
+                # The judge never crashes the run: a broken one returns None metrics and
+                # its exit code, both attached to the case for the report to record.
+                metrics, judge_exit_code = JudgeRunner(self, case.id, layout).run()
+                case_result = case_result.model_copy(
+                    update={"metrics": metrics, "judge_exit_code": judge_exit_code}
+                )
             if on_case_done is not None:
                 on_case_done(case_result)
             yield case_result
@@ -71,7 +73,7 @@ class TaskRunner:
         fail_fast: bool = False,
         on_case_start: Callable[[str], None] | None = None,
         on_case_done: Callable[[CaseResult], None] | None = None,
-    ) -> tuple[tuple[CaseResult, ...], Any]:
+    ) -> tuple[tuple[CaseResult, ...], Any, int | None]:
 
         case_results = tuple(
             self._iter_cases(
@@ -80,9 +82,10 @@ class TaskRunner:
         )
 
         grader_metrics = None
+        grader_exit_code = None
         if self.traptask_config.grader is not None:
-            # A broken grader is folded into an error metric by the runner (the run
-            # still completes and the report still saves).
-            grader_metrics = GraderRunner(self, case_results).run()
+            # The grader never crashes the run: a broken one returns None metrics and its
+            # exit code (the run still completes and the report still saves).
+            grader_metrics, grader_exit_code = GraderRunner(self, case_results).run()
 
-        return case_results, grader_metrics
+        return case_results, grader_metrics, grader_exit_code

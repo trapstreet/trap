@@ -25,7 +25,9 @@ class GraderRunner:
     def _manifest(self) -> str:
         return json.dumps([c.model_dump() for c in self.cases])
 
-    def run(self) -> Any:
+    def run(self) -> tuple[Any, int]:
+        """Return ``(verdict, exit_code)`` — the grader's parsed metrics (None if it broke)
+        and its exit code."""
         return CapturedSubprocess(
             self.grader.cmd,
             manifest_envvar=self.grader.manifest_envvar,
@@ -33,4 +35,4 @@ class GraderRunner:
             cwd=self.runner.traptask_dir,
             manifest=self._manifest,
             capture=self.capture,
-        ).run_metrics_or_error(runner_name="grader")
+        ).run_for_metrics()

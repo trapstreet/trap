@@ -41,7 +41,13 @@ refuse.
 
 **Exit codes.** trap reports facts, not a verdict — a completed run exits `0` regardless
 of per-case exit codes or scores (gate CI on the grader output / `report.json`). `2`
-means a trap-level failure: bad/missing config, git error, declined remote, etc.
+means a trap-level failure: bad/missing config, git error, declined remote, etc. `3`
+means the measuring apparatus broke: the judge failed on **every** case, or the grader
+failed — the scores are missing, not zero. An actor fails purely by its exit code
+(recorded as `judge_exit_code` per case, `grader_exit_code` at the top level): non-zero, a
+timeout (`124`), or a clean exit `0` whose stdout wasn't JSON (`125`). Exit `0` is a pass
+whatever it printed — the output never decides. A judge failure on only *some* cases stays
+exit `0`.
 
 ## tp report
 

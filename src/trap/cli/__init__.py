@@ -23,7 +23,7 @@ from trap.display import CaseProgress, OutputFormat, render_submit_result, rende
 from trap.environment import EnvironmentDetector
 from trap.git_ops import GitOpsError, LocalRepo, ParsedGitUrl
 from trap.loader import ConfigError, TrapLoader, TraptaskLoader
-from trap.models import Provenance, ReportData
+from trap.models import Diagnosis, Provenance, ReportData
 from trap.runner import TaskRunner
 from trap.workspace import SolutionIdentity, Workspace
 
@@ -50,6 +50,17 @@ def _main(
     ] = False,
 ) -> None:
     """AI prompt / agent / workflow / testing framework."""
+
+
+def _failure_reason(exit_code: int | None) -> str:
+    """A human reason for a broken judge/grader, read from its exit code alone. 124 and
+    125 are trap sentinels (see CapturedSubprocess): 124 = killed for timing out, 125 =
+    exited 0 but its stdout wasn't JSON. Any other non-zero value is the actor's own exit."""
+    if exit_code == 124:
+        return "timed out"
+    if exit_code == 125:
+        return "exited 0 but its output wasn't JSON"
+    return f"exited with status {exit_code}"
 
 
 def _no_report(workspace: Workspace, error: FileNotFoundError) -> typer.Exit:
@@ -241,7 +252,7 @@ def run(
     )
     prog_console = console if output == OutputFormat.rich else None
     with CaseProgress(active_cases, console=prog_console) as prog:
-        case_results, grader_metrics = runner.run(
+        case_results, grader_metrics, grader_exit_code = runner.run(
             active_cases,
             fail_fast=fail_fast,
             on_case_start=prog.on_case_start,
@@ -264,6 +275,7 @@ def run(
         started_at_utc=started_at_local.astimezone(UTC),
         finished_at_utc=finished_at_utc,
         grader_metrics=grader_metrics,
+        grader_exit_code=grader_exit_code,
         provenance=provenance,
         environment=environment_info,
     )
@@ -272,9 +284,36 @@ def run(
     if output == OutputFormat.rich:
         # Where the artifacts landed — the run id doubles as the `--run` handle.
         console.print(f"[dim]run {ts} → {ws.report_json_path(ts)}[/dim]")
-    # trap reports facts, not a verdict: a completed run exits 0 regardless of per-case
-    # exit codes or scores (read the grader / report.json to gate CI). trap-level
-    # failures (bad config, git errors) still exit non-zero via _die.
+
+    # trap reports facts, not a verdict: per-case exit codes and scores never set the exit
+    # code (read the grader / report.json to gate CI); trap-level failures (bad config, git
+    # errors) exit 2 via _die. But a broken measuring apparatus is not a fact about the
+    # solution — when the judge errored on *every* case, or the grader errored, the scores
+    # are missing, not zero, so exit 3 to keep scripts from reading an unscored run as one
+    # that completed.
+    diagnosis = Diagnosis.from_report_data(report_data)
+    if diagnosis.judge_broken:
+        first = diagnosis.judge_failures[0]
+        err_console.print(
+            f"[red]error[/red]: judge failed on all {diagnosis.total_cases} cases — scores are "
+            f"missing, not zero (first: {first.case_id} {_failure_reason(first.judge_exit_code)}).\n"
+            f"  judge stderr: {ws.run_dir(ts) / first.case_id / 'judge' / 'stderr'}"
+        )
+    elif diagnosis.partial_judge_failure:
+        failed = diagnosis.judge_failures
+        err_console.print(
+            f"[yellow]warning[/yellow]: judge failed on {len(failed)} of "
+            f"{diagnosis.total_cases} cases ({', '.join(r.case_id for r in failed[:5])}"
+            f"{', …' if len(failed) > 5 else ''}) — their scores are missing, not zero."
+        )
+    if diagnosis.grader_broken:
+        err_console.print(
+            f"[red]error[/red]: grader failed ({_failure_reason(report_data.grader_exit_code)}) — "
+            f"the run has no aggregate score.\n"
+            f"  grader stderr: {ws.run_dir(ts) / 'grader' / 'stderr'}"
+        )
+    if diagnosis.exit_code != 0:
+        raise typer.Exit(code=diagnosis.exit_code)
 
 
 @app.command()

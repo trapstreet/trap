@@ -55,9 +55,13 @@ A JSON list of per-case results:
 
 ```json
 [{"case_id": "c1", "exit_code": 0, "duration": 0.12,
-  "metrics": {"score": 1.0}, "cost": null}]
+  "metrics": {"score": 1.0}, "cost": null, "judge_exit_code": 0}]
 ```
 
-`metrics` is whatever the judge printed (`null` if no judge ran). The grader prints
-free-form JSON; trap stores and displays it but never interprets it or lets it affect
-the exit code.
+`metrics` is whatever JSON the judge printed — any value it emits, or `null`. It never
+signals pass/fail. `judge_exit_code` is the sole pass/fail signal: `0` = passed (it printed
+valid JSON, whatever the shape — even `null`), `124` = timed out, `125` = exited 0 but its
+stdout wasn't JSON, any other non-zero = the judge's own exit, `null` = no judge ran. The
+grader works the same way via `grader_exit_code`. A grader's *verdict* never affects trap's
+exit code; a grader that fails (by its exit code) does — `tp run` exits `3` (see the CLI
+reference, exit codes).

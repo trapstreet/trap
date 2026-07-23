@@ -39,7 +39,9 @@ class JudgeRunner:
             }
         )
 
-    def run(self) -> Any:
+    def run(self) -> tuple[Any, int]:
+        """Return ``(verdict, exit_code)`` — the judge's parsed metrics (None if it broke)
+        and its exit code."""
         return CapturedSubprocess(
             self.judge.cmd,
             manifest_envvar=self.judge.manifest_envvar,
@@ -47,4 +49,4 @@ class JudgeRunner:
             cwd=self.runner.traptask_dir,
             manifest=self._manifest,
             capture=self.layout.judge_capture,
-        ).run_metrics_or_error(runner_name="judge")
+        ).run_for_metrics()

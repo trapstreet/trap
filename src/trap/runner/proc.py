@@ -38,15 +38,20 @@ class CapturedSubprocess:
         under test*, so a non-zero exit or a timeout is a legitimate outcome to measure
         (a case may even expect exit 1) — not an error. It is handed back verbatim as
         data for the judge to evaluate.
-      - ``run_metrics_or_error()`` (judge/grader) returns the actor's parsed JSON
-        metrics. A judge/grader is the *measuring apparatus*: if it times out, exits
-        non-zero, or emits non-JSON it produced no verdict at all, so that is folded
-        into an ``{"error": ...}`` metric (isolated, so one broken judge or grader never
-        crashes the run or loses the report).
+      - ``run_for_metrics()`` (judge/grader) returns ``(verdict, exit_code)``. A
+        judge/grader is the *measuring apparatus*: if it times out, exits non-zero, or
+        emits non-JSON it produced no verdict at all, so the verdict is None and the exit
+        code is recorded (isolated, so one broken judge or grader never crashes the run or
+        loses the report).
     """
 
     # conventional exit code for "a subprocess was killed for exceeding its timeout"
     TIMEOUT_EXIT_CODE = 124
+    # trap sentinel (sits next to 124): the actor exited 0 but its stdout wasn't JSON, so
+    # there is no verdict. 125 rather than 0 keeps the failure in exit-code space — pass/
+    # fail is the exit code alone. A judge that deliberately exits 125 collides, but that
+    # is vanishingly rare (accepted trade-off of encoding this in the 0-255 exit space).
+    NO_JSON_EXIT_CODE = 125
 
     def __init__(
         self,
@@ -95,21 +100,26 @@ class CapturedSubprocess:
         self.capture.write(stdout, stderr, {"exit_code": exit_code, "duration": duration})
         return ProcResult(stdout, stderr, exit_code, duration)
 
-    def run_metrics_or_error(self, *, runner_name: str) -> Any:
-        """Run the actor and return its parsed JSON metrics. A broken actor — timeout,
-        non-zero exit, or non-JSON output — is folded into an ``{"error": ...}`` metric
-        rather than raised, so one bad judge/grader never crashes the run or loses the
-        report (full detail is in the actor's stderr capture). ``runner_name`` ("judge" /
-        "grader") just labels the error."""
+    def run_for_metrics(self) -> tuple[Any, int]:
+        """Run the actor and return ``(verdict, exit_code)``. The exit code is the sole
+        pass/fail signal — the verdict is never consulted for it:
+
+          - exit non-zero → ``(None, that code)``: the actor failed (a crash, or a
+            timeout at ``TIMEOUT_EXIT_CODE``).
+          - exit 0 with parseable JSON → ``(that value, 0)``: passed. Any valid JSON is
+            accepted verbatim, even ``null`` — trap does not judge the verdict's shape.
+          - exit 0 with non-JSON output → ``(None, NO_JSON_EXIT_CODE)``: failed. The code
+            keeps the failure in exit-code space so downstream never inspects the output.
+
+        A broken actor is never raised, so one bad judge/grader can't crash the run or
+        lose the report (full detail is in the actor's stderr capture)."""
         result = self.run()
-        if result.exit_code == self.TIMEOUT_EXIT_CODE:
-            return {"error": f"{runner_name} timed out after {self.timeout}s"}
         if result.exit_code != 0:
-            return {"error": f"{runner_name} exited with status {result.exit_code}"}
+            return None, result.exit_code
         try:
-            return json.loads(result.stdout)
-        except json.JSONDecodeError as e:
-            return {"error": f"{runner_name} produced invalid JSON: {e}"}
+            return json.loads(result.stdout), 0
+        except json.JSONDecodeError:
+            return None, self.NO_JSON_EXIT_CODE
 
     @staticmethod
     def _as_text(out: object) -> str:
