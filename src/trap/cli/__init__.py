@@ -433,5 +433,11 @@ def submit(
 # Hidden until the scaffold is implemented — registered but not advertised in `--help`.
 @app.command(hidden=True)
 def init() -> None:
-    """Generate annotated trap.yaml + traptask.yaml scaffold."""
-    console.print("not yet")
+    """Not implemented yet — write trap.yaml by hand (see the trap.yaml reference)."""
+    # Exit non-zero: a stub that exits 0 reads as success, so `tp init && tp run` would
+    # march on as if a config had been scaffolded.
+    console.print(
+        "[yellow]tp init isn't implemented yet.[/yellow] Write trap.yaml by hand — see "
+        "https://github.com/trapstreet/trap/blob/main/docs/reference/trap-yaml.md"
+    )
+    raise typer.Exit(code=2)

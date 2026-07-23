@@ -333,9 +333,13 @@ def test_submit_not_logged_in(make_project, runner, monkeypatch):
     assert "not logged in" in res.output
 
 
-def test_init_stub(runner):
+def test_init_stub_is_honest(runner):
+    # Not implemented yet: must not exit 0 (scripts would read that as success) and must
+    # point at the hand-written path instead of a bare "not yet".
     res = runner.invoke(app, ["init"])
-    assert res.exit_code == 0
+    assert res.exit_code == 2
+    out = res.output.replace("\n", "")  # rich wraps long lines mid-URL
+    assert "isn't implemented yet" in out and "trap-yaml" in out
 
 
 # --- unanchored-provenance gate (leaderboard hides such runs) ------------------
