@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -16,10 +15,10 @@ ANTH = _ProtocolStyle.ANTHROPIC_COMPATIBLE
 OAI = _ProtocolStyle.OPENAI_COMPATIBLE
 
 
-def test_calculator_unknown_is_nan():
-    # unknown cost is not zero cost — unpriced models report NaN (JSON null)
-    assert math.isnan(calculate_call_cost(100, 50, "totally-unknown-model-xyz"))
-    assert math.isnan(calculate_call_cost(100, 50, None))
+def test_calculator_unknown_is_none():
+    # unknown cost is not zero cost — unpriced models report None (JSON null)
+    assert calculate_call_cost(100, 50, "totally-unknown-model-xyz") is None
+    assert calculate_call_cost(100, 50, None) is None
 
 
 def test_calculator_prices():
@@ -131,3 +130,25 @@ def test_proxy_forwards_and_accounts(monkeypatch):
         srv.shutdown()
     openai = next(m for m in cost.by_model if m.provider == "openai")
     assert (openai.prompt_tokens, openai.completion_tokens, openai.calls) == (11, 7, 1)
+
+
+def test_accumulate_unknown_model_stays_unknown():
+    # Regression: an unpriced model's None call cost lands as None (unknown) in
+    # the bucket and stays None across calls — never 0, never a partial sum.
+    proxy = CostProxy()
+    proxy._accumulate("openai", 60, 39, "gpt-3.5-turbo")  # absent from the table
+    proxy._accumulate("openai", 10, 5, "gpt-3.5-turbo")
+    (entry,) = proxy._cost_buckets.values()
+    assert entry.cost_usd is None
+    assert (entry.calls, entry.prompt_tokens) == (2, 70)
+
+
+def test_accumulate_priced_model_sums():
+    # a priced model is unaffected: known + known accumulates arithmetically
+    proxy = CostProxy()
+    proxy._accumulate("openai", 100, 50, "gpt-5.4-nano")
+    priced = proxy._cost_buckets[("openai", "gpt-5.4-nano")]
+    assert priced.cost_usd is not None and priced.cost_usd > 0
+    single = priced.cost_usd
+    proxy._accumulate("openai", 100, 50, "gpt-5.4-nano")
+    assert priced.cost_usd == pytest.approx(single * 2)

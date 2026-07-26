@@ -39,13 +39,13 @@ class SolutionRunner:
     def run(self) -> CaseResult:
         self.layout.outputs_dir.mkdir(parents=True, exist_ok=True)
 
-        proxy: CostProxy | None = None
+        cost_proxy: CostProxy | None = None
         proxy_env: dict[str, str] = {}
         if self.runner.cost_enabled:
             try:
-                proxy = CostProxy()
-                proxy.start()
-                proxy_env = proxy.env_overrides
+                cost_proxy = CostProxy()
+                cost_proxy.start()
+                proxy_env = cost_proxy.env_overrides
             except Exception:
                 pass
 
@@ -66,8 +66,8 @@ class SolutionRunner:
         try:
             result = proc.run()
         finally:
-            if proxy is not None:
-                partial = proxy.stop()
+            if cost_proxy is not None:
+                partial = cost_proxy.stop()
                 if partial.calls > 0:
                     case_cost = partial
 

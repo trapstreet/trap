@@ -48,7 +48,7 @@ def test_casecost_aggregates_and_empty():
         ]
     )
     assert (c.prompt_tokens, c.completion_tokens, c.calls) == (12, 6, 2)
-    assert round(c.cost_usd, 2) == 0.3
+    assert c.cost_usd == pytest.approx(0.3)
     empty = CaseCost()
     assert empty.prompt_tokens == 0 and empty.cost_usd == 0.0
 
@@ -80,6 +80,36 @@ def test_traptask_minimal():
     t = TraptaskConfig(cases=({"id": "a"},))
     assert t.cases[0].id == "a"
     assert t.judge is None and t.grader is None
+
+
+def test_modelcost_unknown_cost_roundtrips():
+    # Regression: an unpriced model has cost_usd None, which serialises to JSON
+    # null and loads straight back — the round-trip `tp submit` relies on to
+    # re-read a report `tp run` just wrote (a bare float field couldn't parse null).
+    mc = ModelCost(provider="openai", model="gpt-3.5-turbo", cost_usd=None)
+    reloaded = ModelCost.model_validate_json(mc.model_dump_json())
+    assert reloaded.cost_usd is None
+
+
+def test_casecost_unknown_is_contagious():
+    # one unknown component makes the case total unknown — never a partial sum
+    mixed = CaseCost(
+        by_model=[
+            ModelCost(provider="openai", model="priced", cost_usd=0.1, calls=1),
+            ModelCost(provider="openai", model="unpriced", cost_usd=None, calls=1),
+        ]
+    )
+    assert mixed.cost_usd is None
+    # all-known still sums arithmetically
+    known = CaseCost(
+        by_model=[
+            ModelCost(provider="openai", cost_usd=0.1),
+            ModelCost(provider="openai", cost_usd=0.2),
+        ]
+    )
+    assert known.cost_usd == pytest.approx(0.3)
+    # an empty run cost nothing, not an unknown amount
+    assert CaseCost().cost_usd == 0.0
 
 
 # -- Diagnosis (post-run measurement health) ----------------------------------

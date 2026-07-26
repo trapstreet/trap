@@ -10,7 +10,7 @@ import httpx
 
 from trap.cost.calculator import calculate_call_cost as _calc_cost
 from trap.cost.providers import active_provider_configs
-from trap.models.cost import CaseCost, ModelCost
+from trap.models.cost import CaseCost, ModelCost, combine_costs
 
 if TYPE_CHECKING:
     from trap.cost.providers import _ProviderConfig
@@ -81,7 +81,9 @@ class CostProxy:
             else:
                 entry.prompt_tokens += prompt_tokens
                 entry.completion_tokens += completion_tokens
-                entry.cost_usd += call_cost
+                # unknown is contagious: once a bucket sees an unpriced call its
+                # total is unknown, not a partial sum that understates real spend.
+                entry.cost_usd = combine_costs(entry.cost_usd, call_cost)
                 entry.calls += 1
 
 

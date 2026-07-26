@@ -5,13 +5,11 @@ The only public symbol is :func:`calculate_call_cost`.
 
 Prices are maintained here rather than pulled from a third-party table: the previous
 dependency (tokencost) lagged behind provider releases, silently pricing current models
-at 0 or at a stale predecessor's rate. An explicit table with a NaN fallback keeps the
-failure mode honest — an unknown cost is reported as unknown, never as a wrong number.
+at 0 or at a stale predecessor's rate. An explicit table with a ``None`` fallback keeps
+the failure mode honest — an unknown cost is reported as unknown, never as a wrong number.
 """
 
 from __future__ import annotations
-
-import math
 
 # USD per million tokens (input, output), keyed by model-id prefix so one entry covers
 # both a version alias ("claude-haiku-4-5") and the dated full id the API reports
@@ -44,15 +42,14 @@ _PRICES_PER_MTOK: list[tuple[str, float, float]] = [
 ]
 
 
-def calculate_call_cost(prompt_tokens: int, completion_tokens: int, model: str | None) -> float:
-    """Return the USD cost for one API call.
-
-    Returns NaN when the model is unknown or absent from the pricing table — an
-    unknown cost is not a zero cost (pydantic serialises the NaN as JSON null)."""
+def calculate_call_cost(prompt_tokens: int, completion_tokens: int, model: str | None) -> float | None:
+    """Return the USD cost for one API call, or ``None`` when the model is
+    unknown or absent from the pricing table — an unknown cost is not a zero
+    cost, and reports it as JSON null rather than a misleading number."""
     if model is None:
-        return math.nan
+        return None
     name = model.lower()
     for prefix, input_per_mtok, output_per_mtok in _PRICES_PER_MTOK:
         if name.startswith(prefix):
             return (prompt_tokens * input_per_mtok + completion_tokens * output_per_mtok) / 1_000_000
-    return math.nan
+    return None
