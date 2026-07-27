@@ -7,7 +7,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import httpx
 import pytest
 
-from trap.cost.calculator import calculate_call_cost
+from trap.cost.pricing import PriceCatalogue
 from trap.cost.providers import _ProtocolStyle, active_provider_configs
 from trap.cost.proxy import CostProxy
 
@@ -17,8 +17,8 @@ OAI = _ProtocolStyle.OPENAI_COMPATIBLE
 
 def test_calculator_unknown_is_none():
     # unknown cost is not zero cost — unpriced models report None (JSON null)
-    assert calculate_call_cost(100, 50, "totally-unknown-model-xyz") is None
-    assert calculate_call_cost(100, 50, None) is None
+    assert PriceCatalogue.resolve().cost_of(100, 50, "totally-unknown-model-xyz") is None
+    assert PriceCatalogue.resolve().cost_of(100, 50, None) is None
 
 
 def test_calculator_prices():
@@ -36,7 +36,7 @@ def test_calculator_prices():
         ("gpt-5.5-pro", 210.0),  # longer prefix wins over its parent "gpt-5.5"
         ("gpt-5.4-mini", 5.25),
     ]:
-        assert calculate_call_cost(1_000_000, 1_000_000, model) == pytest.approx(expected), model
+        assert PriceCatalogue.resolve().cost_of(1_000_000, 1_000_000, model) == pytest.approx(expected), model
 
 
 def test_style_parse_json():
@@ -136,8 +136,8 @@ def test_accumulate_unknown_model_stays_unknown():
     # Regression: an unpriced model's None call cost lands as None (unknown) in
     # the bucket and stays None across calls — never 0, never a partial sum.
     proxy = CostProxy()
-    proxy._accumulate("openai", 60, 39, "gpt-3.5-turbo")  # absent from the table
-    proxy._accumulate("openai", 10, 5, "gpt-3.5-turbo")
+    proxy._accumulate("openai", 60, 39, "unpriced-model-xyz")  # absent from the table
+    proxy._accumulate("openai", 10, 5, "unpriced-model-xyz")
     (entry,) = proxy._cost_buckets.values()
     assert entry.cost_usd is None
     assert (entry.calls, entry.prompt_tokens) == (2, 70)

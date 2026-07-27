@@ -41,8 +41,8 @@ The terminal table shows per-case aggregates; per-model detail lives in `report.
 
 ## Pricing
 
-USD is computed from an explicit per-model price table maintained in
-`src/trap/cost/calculator.py` (prefix-matched against the model id the API reports).
+USD is computed from a per-model price table resolved by
+`src/trap/cost/pricing.py` (prefix-matched against the model id the API reports).
 Models absent from the table (or local servers like Ollama/vLLM) still get token
 counts, but `cost_usd` is `null` — an unknown cost, deliberately distinct from `0.0`.
 

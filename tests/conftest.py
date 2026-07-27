@@ -43,6 +43,20 @@ def _isolate_auth(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr("trap.auth.store.CredentialStore.PATH", tmp_path / "auth.json")
 
 
+@pytest.fixture(autouse=True)
+def hermetic_pricing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the price-table source chain off the network and off the real user cache:
+    point the cache at a per-test path and stub the fetch seam (never the shared httpx
+    module — other tests drive loopback servers through it) so every test silently gets
+    the default prices. No cache reset needed — PriceCatalogue is stateless and each call
+    to resolve() re-reads the (per-test) cache. Pricing tests restore the real fetch and
+    mock httpx.get themselves."""
+    from trap.cost import pricing
+
+    monkeypatch.setenv("TRAP_PRICING_CACHE", str(tmp_path / "pricing-cache.json"))
+    monkeypatch.setattr(pricing.PriceCatalogue, "_fetch", classmethod(lambda cls: None))
+
+
 @pytest.fixture
 def runner() -> CliRunner:
     return CliRunner()

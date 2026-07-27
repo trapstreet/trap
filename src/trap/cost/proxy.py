@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
-from trap.cost.calculator import calculate_call_cost as _calc_cost
+from trap.cost.pricing import PriceCatalogue
 from trap.cost.providers import active_provider_configs
 from trap.models.cost import CaseCost, ModelCost, combine_costs
 
@@ -34,6 +34,7 @@ class CostProxy:
     def __init__(self) -> None:
         self._cost_buckets: dict[tuple[str, str | None], ModelCost] = {}
         self._lock = threading.Lock()
+        self._price_table = PriceCatalogue.resolve()  # resolve the price table once for this run
         # Servers are created here to bind ports immediately; threads start in start().
         self._servers: dict[str, _ProxyServer] = {
             name: _ProxyServer(self, name, cfg) for name, cfg in active_provider_configs().items()
@@ -65,7 +66,7 @@ class CostProxy:
     ) -> None:
         if not (prompt_tokens or completion_tokens):
             return
-        call_cost = _calc_cost(prompt_tokens, completion_tokens, model)
+        call_cost = self._price_table.cost_of(prompt_tokens, completion_tokens, model)
         with self._lock:
             key = (provider, model)
             entry = self._cost_buckets.get(key)
