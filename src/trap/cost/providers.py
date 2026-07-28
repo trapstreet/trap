@@ -116,6 +116,14 @@ _CONFIGS: dict[str, _ProviderConfig] = {
         "https://api.mistral.ai",
         style=_ProtocolStyle.OPENAI_COMPATIBLE,
     ),
+    "moonshot": _ProviderConfig(
+        "MOONSHOT_API_KEY",
+        "MOONSHOT_BASE_URL",
+        # Called through the OpenAI SDK, which drops /v1 → upstream carries it. A .cn
+        # account overrides MOONSHOT_BASE_URL to https://api.moonshot.cn/v1.
+        "https://api.moonshot.ai/v1",
+        style=_ProtocolStyle.OPENAI_COMPATIBLE,
+    ),
 }
 
 
