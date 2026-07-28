@@ -42,11 +42,16 @@ class CostProxy:
 
     @cached_property
     def env_overrides(self) -> dict[str, str]:
-        """Env vars pointing each provider SDK at its proxy port."""
-        return {
-            server.base_env: f"http://127.0.0.1:{server.server_address[1]}"
-            for server in self._servers.values()
-        }
+        """Env vars pointing each provider SDK at its proxy port. Includes each
+        provider's alias base-URL env vars (extra_base_envs) alongside the canonical
+        one, so every calling convention for that provider gets redirected."""
+        overrides: dict[str, str] = {}
+        for server in self._servers.values():
+            proxy_url = f"http://127.0.0.1:{server.server_address[1]}"
+            overrides[server.base_env] = proxy_url
+            for alias in server.extra_base_envs:
+                overrides[alias] = proxy_url
+        return overrides
 
     def start(self) -> None:
         """Start serving threads for all provider proxy servers."""
@@ -97,6 +102,7 @@ class _ProxyServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self.proxy = proxy
         self.provider = provider
         self.base_env = cfg.base_env
+        self.extra_base_envs = cfg.extra_base_envs
         self.style = cfg.style
         # Capture upstream before env_overrides() redirects base_env to the proxy itself.
         self.upstream = cfg.resolve_upstream()

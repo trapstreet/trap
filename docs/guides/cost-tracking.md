@@ -19,6 +19,7 @@ Activates when a provider's key env var is set:
 | Anthropic | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
 | OpenAI | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
 | Mistral | `MISTRAL_API_KEY` | `MISTRAL_BASE_URL` |
+| Moonshot (Kimi) | `MOONSHOT_API_KEY` | `MOONSHOT_BASE_URL` and `MOONSHOT_API_BASE` |
 
 **Claude Code** (`claude -p`) is always intercepted (OAuth, no key env var). With no key
 set and no always-intercept provider, cost tracking is a no-op.
@@ -31,6 +32,11 @@ set and no always-intercept provider, cost tracking is a no-op.
   client = Mistral(api_key=os.environ.get("MISTRAL_API_KEY"),
                    server_url=os.environ.get("MISTRAL_BASE_URL"))   # only set under trap
   ```
+- **Moonshot (Kimi)** — a solution calling the OpenAI SDK directly against Moonshot reads
+  `MOONSHOT_BASE_URL` and works out of the box. A solution going through **litellm**
+  instead (e.g. any framework built on it, like Aider) needs no code change either — trap
+  redirects `MOONSHOT_API_BASE` too, since that's the env var litellm's own Moonshot
+  integration reads for this override.
 - **AWS Bedrock / Google Vertex** — unsupported (SDK-level auth, no redirectable base URL); the run still works, cost is just absent.
 
 ## In report.json
