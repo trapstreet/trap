@@ -321,8 +321,13 @@ def test_from_task_remote_clones(tmp_path):
         workspace_root=tmp_path / "ws",
     )
     assert loader.traptask.cases[0].id == "c1"
-    # the clone cache lives inside the workspace root, beside runs/
-    assert (tmp_path / "ws" / "repos" / "remote-task").is_dir()
+    # the clone cache lives inside the workspace root, beside runs/ — keyed on
+    # repo URL + rev (not the bare basename), so it is <basename>-<hash8>
+    from trap.git_ops import ParsedGitUrl
+
+    cache_name = ParsedGitUrl.from_full_url(f"git+file://{src}#subdirectory=task").clone_cache_dirname
+    assert cache_name.startswith("remote-task-")
+    assert (tmp_path / "ws" / "repos" / cache_name).is_dir()
     # clone_to is solution-author config: it anchors to the trap.yaml dir instead
     with_clone_to = TraptaskLoader.from_task_binding(
         TaskBinding(alias="t", source=f"git+file://{src}#subdirectory=task", clone_to=Path("vendored")),

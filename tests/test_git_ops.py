@@ -74,6 +74,28 @@ def test_from_full_url_rejects_local():
         ParsedGitUrl.from_full_url("./local")
 
 
+def test_clone_cache_dirname_disambiguates_repo_and_rev():
+    name = lambda s: ParsedGitUrl.from_full_url(s).clone_cache_dirname  # noqa: E731
+
+    # readable basename is preserved, then a hash8 suffix
+    assert name("git+https://github.com/org/bench.git").startswith("bench-")
+
+    # (a) different repos sharing a basename get distinct cache dirs
+    assert name("git+https://x/orgA/bench.git") != name("git+https://x/orgB/bench.git")
+
+    # (b) same repo pinned at different revs get distinct cache dirs
+    assert name("git+https://x/bench.git@v1.0") != name("git+https://x/bench.git@v2.0")
+
+    # a floating ref keeps one dir across runs (stable spec-based key)
+    assert name("git+https://x/bench.git@main") == name("git+https://x/bench.git@main")
+
+    # subdirectory is excluded: siblings of one repo share a clone
+    assert name("git+https://x/bench.git#subdirectory=a") == name("git+https://x/bench.git#subdirectory=b")
+
+    # equivalent URL spellings normalise to the same key
+    assert name("git@github.com:org/r.git") == name("https://github.com/org/r")
+
+
 def test_for_rev_classification():
     assert isinstance(RevStrategy.for_rev(None), DefaultBranch)
     assert isinstance(RevStrategy.for_rev("a1b2c3d"), PinnedSha)

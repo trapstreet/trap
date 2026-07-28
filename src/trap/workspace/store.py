@@ -31,11 +31,16 @@ class Workspace:
         self.task_alias = task_alias
 
     @classmethod
-    def clone_cache_dir(cls, root: Path, repo_basename: str) -> Path:
+    def clone_cache_dir(cls, root: Path, cache_dirname: str) -> Path:
         """Where a remote task clones when no ``clone_to`` is given: the hidden
         ``repos/`` cache inside the workspace at ``root`` — the same root that
-        holds ``runs/``, so the whole store lives in one place."""
-        return root / cls.REPOS_DIR / repo_basename
+        holds ``runs/``, so the whole store lives in one place.
+
+        ``cache_dirname`` must be ``ParsedGitUrl.clone_cache_dirname`` (repo +
+        rev, hashed), never the bare basename — a clone dir is bound to one rev,
+        so two revs of one repo (or two repos sharing a basename) would collide
+        on a basename-only key."""
+        return root / cls.REPOS_DIR / cache_dirname
 
     @property
     def runs_root(self) -> Path:

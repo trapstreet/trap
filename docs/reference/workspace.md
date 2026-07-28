@@ -15,6 +15,7 @@ solution's `outputs/` clean.
 ```
 .trap/
 ├── repos/                                    # task clone cache (remote task sources)
+│   └── {basename}-{hash8}/                   # keyed on repo URL + rev, so revs don't collide
 └── runs/
     └── {solution-key}/                       # e.g. claude-haiku-4-5-3f2a1b0c
         └── {alias}/                          # the tasks: key from trap.yaml

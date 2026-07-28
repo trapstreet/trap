@@ -42,4 +42,4 @@ run-dir name, and the trapstreet task id on submit; with one task, `tp run` uses
 automatically. Each binding:
 
 - **`source`** (required) — where the task lives, relative to `trap.yaml`: a local path **or** a git+ URL (cloned).
-- **`clone_to`** — clone target for a git+ `source` (default: hidden cache `.trap/repos/<repo>`). Only valid for a URL.
+- **`clone_to`** — clone target for a git+ `source` (default: hidden cache `.trap/repos/<repo>-<hash>`, keyed on repo URL + rev). Only valid for a URL.

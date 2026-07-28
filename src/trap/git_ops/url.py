@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
 from trap.git_ops.base import GitOpsError
+
+_UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
 @dataclass(frozen=True)
@@ -111,3 +114,37 @@ class ParsedGitUrl:
         excluded on purpose — it can float without changing *which* directory
         this is."""
         return self.normalised_url + (f"#{self.subdirectory}" if self.subdirectory else "")
+
+    @property
+    def clone_cache_dirname(self) -> str:
+        """Directory name for caching this repo's clone under ``repos/``:
+        ``<basename>-<hash8>``.
+
+        A clone directory is permanently bound to the rev it was first cloned at
+        — ``reconcile`` fast-forwards or verifies but never *switches* rev — so
+        the name has to distinguish both *which repo* and *which rev*, which the
+        bare basename does not. Hashing ``normalised_url`` + rev fixes two
+        collisions on ``repos/<basename>``:
+
+        - different repos sharing a basename (``orgA/bench`` vs ``orgB/bench``),
+          which otherwise clash and fail origin validation; and
+        - one repo pinned at different revs (``…@v1`` vs ``…@v2``), which
+          otherwise clash and fail rev reconciliation — so two legitimate task
+          versions can coexist in one workspace.
+
+        The rev *spec* is hashed (``rev``: a branch/tag/SHA string or None), not
+        a resolved commit SHA: naming happens before the clone, so nothing is
+        resolved yet, and a floating ref like ``@main`` must keep one directory
+        across runs so ``reconcile`` can fast-forward it — hashing a resolved SHA
+        would re-clone on every move and defeat that. The subdirectory is
+        excluded on purpose: the whole repo is cloned once and ``local_dir``
+        descends into the sub-path afterwards, so sibling subdirectories of one
+        repo share a single clone.
+        """
+        digest = hashlib.sha256(f"{self.normalised_url}@{self.rev or ''}".encode()).hexdigest()[:8]
+        # A human-readable prefix only — uniqueness is carried entirely by the
+        # hash, so this is purely for eyeballing the cache dir. The basename is
+        # untrusted (it comes from a user-written URL), so strip it to
+        # path-safe characters before it touches a real directory name.
+        safe_human_readable = _UNSAFE.sub("-", string=self.basename).strip("-.") or "repo"
+        return f"{safe_human_readable}-{digest}"
