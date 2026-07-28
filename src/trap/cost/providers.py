@@ -118,9 +118,13 @@ _CONFIGS: dict[str, _ProviderConfig] = {
     ),
     "moonshot": _ProviderConfig(
         "MOONSHOT_API_KEY",
-        "MOONSHOT_BASE_URL",
-        # Called through the OpenAI SDK, which drops /v1 → upstream carries it. A .cn
-        # account overrides MOONSHOT_BASE_URL to https://api.moonshot.cn/v1.
+        # MOONSHOT_API_BASE is the var litellm (what Aider and similar frameworks call under
+        # the hood) auto-reads -- confirmed in litellm/llms/moonshot/chat/transformation.py's
+        # _get_openai_compatible_provider_info(). No standard SDK auto-reads a Moonshot
+        # base-URL var, so a direct OpenAI-SDK caller must read this one explicitly. A .cn
+        # account overrides it to https://api.moonshot.cn/v1.
+        "MOONSHOT_API_BASE",
+        # OpenAI SDK drops /v1 when the base URL is overridden → upstream carries it.
         "https://api.moonshot.ai/v1",
         style=_ProtocolStyle.OPENAI_COMPATIBLE,
     ),

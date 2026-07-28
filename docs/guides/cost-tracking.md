@@ -19,6 +19,7 @@ Activates when a provider's key env var is set:
 | Anthropic | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
 | OpenAI | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
 | Mistral | `MISTRAL_API_KEY` | `MISTRAL_BASE_URL` |
+| Moonshot (Kimi) | `MOONSHOT_API_KEY` | `MOONSHOT_API_BASE` |
 
 **Claude Code** (`claude -p`) is always intercepted (OAuth, no key env var). With no key
 set and no always-intercept provider, cost tracking is a no-op.
@@ -31,6 +32,11 @@ set and no always-intercept provider, cost tracking is a no-op.
   client = Mistral(api_key=os.environ.get("MISTRAL_API_KEY"),
                    server_url=os.environ.get("MISTRAL_BASE_URL"))   # only set under trap
   ```
+- **Moonshot (Kimi)** — trap redirects `MOONSHOT_API_BASE`, the var litellm (used internally
+  by frameworks like Aider) auto-reads, so a litellm-based solution works out of the box.
+  No standard SDK auto-reads a Moonshot base-URL var, so a solution calling the OpenAI SDK
+  directly should read the same var explicitly
+  (`base_url=os.environ.get("MOONSHOT_API_BASE")`).
 - **AWS Bedrock / Google Vertex** — unsupported (SDK-level auth, no redirectable base URL); the run still works, cost is just absent.
 
 ## In report.json
@@ -76,4 +82,4 @@ counts, but `cost_usd` is `null` — an unknown cost, deliberately distinct from
   - OpenAI SDK drops `/v1` → upstream `https://api.openai.com/v1`
   - Mistral SDK keeps `/v1` → upstream `https://api.mistral.ai` (no suffix)
   - Moonshot (Kimi), via the OpenAI SDK, drops `/v1` → upstream `https://api.moonshot.ai/v1`
-    (a `.cn` account sets `MOONSHOT_BASE_URL=https://api.moonshot.cn/v1`)
+    (a `.cn` account sets `MOONSHOT_API_BASE=https://api.moonshot.cn/v1`)

@@ -142,10 +142,10 @@ def test_proxy_intercepts_and_prices_moonshot(monkeypatch):
     srv, upstream = _fake_upstream(body)
     try:
         monkeypatch.setenv("MOONSHOT_API_KEY", "k")
-        monkeypatch.setenv("MOONSHOT_BASE_URL", upstream)  # proxy captures this as upstream
+        monkeypatch.setenv("MOONSHOT_API_BASE", upstream)  # proxy captures this as upstream
         proxy = CostProxy()
         proxy.start()
-        url = proxy.env_overrides["MOONSHOT_BASE_URL"]
+        url = proxy.env_overrides["MOONSHOT_API_BASE"]
         resp = httpx.post(
             f"{url}/chat/completions", content=b"{}", headers={"content-type": "application/json"}
         )
