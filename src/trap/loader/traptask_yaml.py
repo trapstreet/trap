@@ -54,7 +54,8 @@ class TraptaskLoader:
         Mirrors `TrapLoader.from_solution`: `source` is a local path or a git+ URL.
         A URL clones into `clone_to` (resolved against `trap_dir`, since it is the
         solution author's config) or, when omitted, the workspace's hidden
-        `<workspace_root>/repos/<repo>` cache — the same root that holds run
+        `<workspace_root>/repos/<repo>-<hash>` cache (keyed on repo URL + rev, so
+        two revs of one repo don't collide) — the same root that holds run
         artifacts; a local path uses it in place and rejects `clone_to`.
         Raises GitOpsError on a bad spec (caller maps it to a CLI error).
 
@@ -70,7 +71,7 @@ class TraptaskLoader:
             if task_binding.clone_to is not None:
                 dest = trap_dir / task_binding.clone_to
             else:
-                dest = Workspace.clone_cache_dir(workspace_root, parsed.basename)
+                dest = Workspace.clone_cache_dir(workspace_root, parsed.clone_cache_dirname)
             remote_repo = RemoteRepo(parsed, dest.resolve())
             is_local_changed = remote_repo.ensure()
             traptask_dir = remote_repo.local_dir
