@@ -86,10 +86,13 @@ def test_anthropic_sse_other_event_type():
 
 def test_registry_active(monkeypatch):
     monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+    monkeypatch.delenv("MOONSHOT_API_KEY", raising=False)
     assert "mistral" not in active_provider_configs()
+    assert "moonshot" not in active_provider_configs()
     monkeypatch.setenv("MISTRAL_API_KEY", "k")
+    monkeypatch.setenv("MOONSHOT_API_KEY", "k")
     active = active_provider_configs()
-    assert "mistral" in active  # key set
+    assert "mistral" in active and "moonshot" in active  # key set
     assert "anthropic" in active and "openai" in active  # always_intercept
 
 
@@ -130,6 +133,29 @@ def test_proxy_forwards_and_accounts(monkeypatch):
         srv.shutdown()
     openai = next(m for m in cost.by_model if m.provider == "openai")
     assert (openai.prompt_tokens, openai.completion_tokens, openai.calls) == (11, 7, 1)
+
+
+def test_proxy_intercepts_and_prices_moonshot(monkeypatch):
+    # end to end: a Moonshot (OpenAI-compatible) call is intercepted via its own port,
+    # and kimi-k3 prices from the served table ($3/$15 per Mtok) — no OPENAI_* hijack.
+    body = json.dumps({"model": "kimi-k3", "usage": {"prompt_tokens": 11, "completion_tokens": 7}}).encode()
+    srv, upstream = _fake_upstream(body)
+    try:
+        monkeypatch.setenv("MOONSHOT_API_KEY", "k")
+        monkeypatch.setenv("MOONSHOT_BASE_URL", upstream)  # proxy captures this as upstream
+        proxy = CostProxy()
+        proxy.start()
+        url = proxy.env_overrides["MOONSHOT_BASE_URL"]
+        resp = httpx.post(
+            f"{url}/chat/completions", content=b"{}", headers={"content-type": "application/json"}
+        )
+        assert resp.status_code == 200
+        cost = proxy.stop()
+    finally:
+        srv.shutdown()
+    kimi = next(m for m in cost.by_model if m.provider == "moonshot")
+    assert (kimi.model, kimi.prompt_tokens, kimi.completion_tokens) == ("kimi-k3", 11, 7)
+    assert kimi.cost_usd == pytest.approx((11 * 3 + 7 * 15) / 1_000_000)
 
 
 def test_accumulate_unknown_model_stays_unknown():

@@ -75,3 +75,5 @@ counts, but `cost_usd` is `null` — an unknown cost, deliberately distinct from
   - Anthropic SDK keeps `/v1` → upstream `https://api.anthropic.com` (no suffix)
   - OpenAI SDK drops `/v1` → upstream `https://api.openai.com/v1`
   - Mistral SDK keeps `/v1` → upstream `https://api.mistral.ai` (no suffix)
+  - Moonshot (Kimi), via the OpenAI SDK, drops `/v1` → upstream `https://api.moonshot.ai/v1`
+    (a `.cn` account sets `MOONSHOT_BASE_URL=https://api.moonshot.cn/v1`)
