@@ -80,19 +80,10 @@ class _ProtocolStyle(enum.StrEnum):
 @dataclass(frozen=True)
 class _ProviderConfig:
     key_env: str  # env var name for the API key
-    base_env: str  # canonical env var name for the base URL override
+    base_env: str  # env var name for the base URL override
     upstream: str  # default upstream base URL
     style: _ProtocolStyle  # request/response format used by this provider
     always_intercept: bool = False  # True for OAuth-based tools that set no API key env var
-    extra_base_envs: tuple[str, ...] = ()
-    """Additional env var names some SDKs/frameworks read instead of `base_env` for this
-    same provider's base-URL override. E.g. a solution calling Moonshot directly via the
-    OpenAI SDK reads MOONSHOT_BASE_URL, but litellm (used internally by frameworks like
-    Aider) reads MOONSHOT_API_BASE instead -- without redirecting both, a litellm-based
-    caller silently bypasses the proxy and cost tracking stays null. resolve_upstream()
-    intentionally consults only the canonical `base_env`, so a real user override still
-    has one unambiguous source of truth; the aliases exist purely so every calling
-    convention gets redirected to the same proxy port."""
 
     def resolve_upstream(self) -> str:
         """Return the effective upstream URL, honouring any user-set env override."""
@@ -127,17 +118,15 @@ _CONFIGS: dict[str, _ProviderConfig] = {
     ),
     "moonshot": _ProviderConfig(
         "MOONSHOT_API_KEY",
-        "MOONSHOT_BASE_URL",
-        # Called through the OpenAI SDK, which drops /v1 → upstream carries it. A .cn
-        # account overrides MOONSHOT_BASE_URL to https://api.moonshot.cn/v1.
+        # MOONSHOT_API_BASE is the var litellm (what Aider and similar frameworks call under
+        # the hood) auto-reads -- confirmed in litellm/llms/moonshot/chat/transformation.py's
+        # _get_openai_compatible_provider_info(). No standard SDK auto-reads a Moonshot
+        # base-URL var, so a direct OpenAI-SDK caller must read this one explicitly. A .cn
+        # account overrides it to https://api.moonshot.cn/v1.
+        "MOONSHOT_API_BASE",
+        # OpenAI SDK drops /v1 when the base URL is overridden → upstream carries it.
         "https://api.moonshot.ai/v1",
         style=_ProtocolStyle.OPENAI_COMPATIBLE,
-        # litellm (what Aider and similar frameworks call under the hood, rather than
-        # the OpenAI SDK directly) reads MOONSHOT_API_BASE for this same override, not
-        # MOONSHOT_BASE_URL -- confirmed in litellm/llms/moonshot/chat/transformation.py's
-        # _get_openai_compatible_provider_info(). Redirect both so litellm-based callers
-        # are intercepted too.
-        extra_base_envs=("MOONSHOT_API_BASE",),
     ),
 }
 

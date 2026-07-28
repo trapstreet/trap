@@ -142,10 +142,10 @@ def test_proxy_intercepts_and_prices_moonshot(monkeypatch):
     srv, upstream = _fake_upstream(body)
     try:
         monkeypatch.setenv("MOONSHOT_API_KEY", "k")
-        monkeypatch.setenv("MOONSHOT_BASE_URL", upstream)  # proxy captures this as upstream
+        monkeypatch.setenv("MOONSHOT_API_BASE", upstream)  # proxy captures this as upstream
         proxy = CostProxy()
         proxy.start()
-        url = proxy.env_overrides["MOONSHOT_BASE_URL"]
+        url = proxy.env_overrides["MOONSHOT_API_BASE"]
         resp = httpx.post(
             f"{url}/chat/completions", content=b"{}", headers={"content-type": "application/json"}
         )
@@ -156,48 +156,6 @@ def test_proxy_intercepts_and_prices_moonshot(monkeypatch):
     kimi = next(m for m in cost.by_model if m.provider == "moonshot")
     assert (kimi.model, kimi.prompt_tokens, kimi.completion_tokens) == ("kimi-k3", 11, 7)
     assert kimi.cost_usd == pytest.approx((11 * 3 + 7 * 15) / 1_000_000)
-
-
-def test_proxy_redirects_moonshot_litellm_alias(monkeypatch):
-    # litellm (used internally by frameworks like Aider) reads MOONSHOT_API_BASE for
-    # this override, not MOONSHOT_BASE_URL -- a caller going through litellm must be
-    # redirected to the same proxy port as an OpenAI-SDK-direct caller, or it silently
-    # bypasses the proxy and cost tracking stays null.
-    monkeypatch.setenv("MOONSHOT_API_KEY", "k")
-    proxy = CostProxy()
-    try:
-        overrides = proxy.env_overrides
-        assert overrides["MOONSHOT_BASE_URL"] == overrides["MOONSHOT_API_BASE"]
-    finally:
-        # server.shutdown() blocks forever waiting for serve_forever() to
-        # acknowledge -- which never happens unless start() ran first. This
-        # test only needs the bound ports from __init__, so close them
-        # directly rather than going through the start()/stop() lifecycle.
-        for server in proxy._servers.values():
-            server.server_close()
-
-
-def test_proxy_intercepts_moonshot_via_litellm_alias(monkeypatch):
-    # end to end, using ONLY the litellm-style env var: a kimi-k3 call is still
-    # intercepted and priced, proving the alias -- not just its presence in
-    # env_overrides -- actually redirects real traffic.
-    body = json.dumps({"model": "kimi-k3", "usage": {"prompt_tokens": 11, "completion_tokens": 7}}).encode()
-    srv, upstream = _fake_upstream(body)
-    try:
-        monkeypatch.setenv("MOONSHOT_API_KEY", "k")
-        monkeypatch.setenv("MOONSHOT_BASE_URL", upstream)  # proxy captures this as upstream
-        proxy = CostProxy()
-        proxy.start()
-        url = proxy.env_overrides["MOONSHOT_API_BASE"]  # the litellm-read alias, not the canonical name
-        resp = httpx.post(
-            f"{url}/chat/completions", content=b"{}", headers={"content-type": "application/json"}
-        )
-        assert resp.status_code == 200
-        cost = proxy.stop()
-    finally:
-        srv.shutdown()
-    kimi = next(m for m in cost.by_model if m.provider == "moonshot")
-    assert (kimi.model, kimi.prompt_tokens, kimi.completion_tokens) == ("kimi-k3", 11, 7)
 
 
 def test_accumulate_unknown_model_stays_unknown():
