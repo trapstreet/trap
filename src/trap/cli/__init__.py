@@ -19,7 +19,7 @@ from trap.auth import (
 )
 from trap.cli._auth import auth_app
 from trap.cli._console import _die, _env_truthy, console, err_console
-from trap.display import CaseProgress, OutputFormat, render_submit_result, renderer_factory
+from trap.display import CaseProgress, OutputFormat, SubmitRenderer, renderer_factory
 from trap.environment import EnvironmentDetector
 from trap.git_ops import GitOpsError, LocalRepo, ParsedGitUrl
 from trap.loader import ConfigError, TrapLoader, TraptaskLoader
@@ -121,20 +121,19 @@ def _confirm_remote(url: str, *, trust: bool) -> None:
         raise typer.Exit(code=1)
 
 
-def _confirm_unanchored(provenance: Provenance, *, allow: bool) -> None:
-    """Gate run/submit when a side has no anchored git provenance.
+def _warn_unanchored(provenance: Provenance) -> dict[str, str | None]:
+    """Emit the unanchored-provenance warning to stderr and report which sides are
+    missing.
 
-    trapstreet accepts such uploads but its leaderboard hides runs it cannot pin to
-    a commit — make the user acknowledge that up front instead of discovering it on
-    the site. The reason travels in the provenance's `issue` field, so `tp submit`
-    (which reads the saved report rather than re-probing the checkouts) names it
-    too. `allow` (--allow-unanchored / TRAP_ALLOW_UNANCHORED, for CI) keeps the
-    warning but skips the prompt; with no TTY and no `allow` it refuses.
-    """
+    trapstreet accepts such uploads but its leaderboard hides runs it cannot pin to a
+    commit. The reason travels in the provenance's `issue` field, so `tp submit` (which
+    reads the saved report rather than re-probing the checkouts) names it too. Returns
+    the {side: reason} map of unanchored sides (empty when both are anchored), so the
+    caller decides whether to gate; prints nothing when nothing is missing."""
     sides = {"solution": provenance.solution, "task": provenance.task}
     missing = {name: side.issue for name, side in sides.items() if not side.repo}
     if not missing:
-        return
+        return {}
     for name, reason in missing.items():
         suffix = f" ({reason})" if reason else ""
         err_console.print(f"[yellow]⚠  {name} has no git provenance{suffix}[/yellow]")
@@ -143,6 +142,16 @@ def _confirm_unanchored(provenance: Provenance, *, allow: bool) -> None:
         "aren't anchored to a commit on a remote — run from a clean, committed checkout "
         "with an origin remote to make it rankable.[/yellow]"
     )
+    return missing
+
+
+def _confirm_unanchored(provenance: Provenance, *, allow: bool) -> None:
+    """Gate `run` when a side has no anchored git provenance — warn, then prompt (or
+    refuse with no TTY) unless `allow` (--allow-unanchored / TRAP_ALLOW_UNANCHORED, for
+    CI) pre-authorises it. `submit` uses `_confirm_submit`, which folds this into its
+    single publish gate."""
+    if not _warn_unanchored(provenance):
+        return
     if allow:
         return
     if not sys.stdin.isatty():
@@ -151,6 +160,30 @@ def _confirm_unanchored(provenance: Provenance, *, allow: bool) -> None:
             "(or set TRAP_ALLOW_UNANCHORED=1) to proceed non-interactively"
         )
     if not typer.confirm("Continue anyway?", default=False):
+        raise typer.Exit(code=1)
+
+
+def _confirm_submit(
+    report_data: ReportData, run_id: str, server: str, *, yes: bool, allow_unanchored: bool
+) -> None:
+    """Gate `submit` — the irreversible publish. Echo what is about to be uploaded
+    (solution / run / result / anchor, all from the local report), then confirm once.
+
+    The intent table always prints, even on the skip path, so a CI log records the
+    payload. Any of --yes, --allow-unanchored, or TRAP_ALLOW_UNANCHORED skips the prompt
+    (the last two are retained CI escapes that also acknowledge the unanchored caveat);
+    with no TTY and no such flag it refuses. The unanchored warning is folded in here —
+    the old separate `_confirm_unanchored` prompt is not run for submit."""
+    SubmitRenderer().intent(report_data, run_id, server)
+    _warn_unanchored(report_data.provenance)
+    if yes or allow_unanchored or _env_truthy("TRAP_ALLOW_UNANCHORED"):
+        return
+    if not sys.stdin.isatty():
+        raise _die(
+            "submit needs confirmation; pass --yes (or --allow-unanchored / "
+            "TRAP_ALLOW_UNANCHORED=1 for CI) to publish non-interactively"
+        )
+    if not typer.confirm(f"Submit to {server}?", default=False):
         raise typer.Exit(code=1)
 
 
@@ -381,12 +414,21 @@ def submit(
     ] = None,
     run: Annotated[str, typer.Option("--run", "-r", help="Which run to upload.")] = "latest",
     workspace: Annotated[Path, typer.Option("--workspace", "-w")] = Path(Workspace.DEFAULT_DIRNAME),
+    yes: Annotated[
+        bool,
+        typer.Option(
+            "--yes",
+            "-y",
+            help="Skip the pre-submit confirmation and publish. For CI / scripts.",
+        ),
+    ] = False,
     allow_unanchored: Annotated[
         bool,
         typer.Option(
             "--allow-unanchored",
-            help="Skip the confirmation when the run has no git provenance (the "
-            "leaderboard hides such runs). Also settable via TRAP_ALLOW_UNANCHORED=1.",
+            help="Skip the pre-submit confirmation (like --yes) and acknowledge that a "
+            "run with no git provenance is hidden from the leaderboard. Also settable "
+            "via TRAP_ALLOW_UNANCHORED=1.",
         ),
     ] = False,
 ) -> None:
@@ -415,11 +457,11 @@ def submit(
         report_data = ws.load(run)
     except FileNotFoundError as e:
         raise _no_report(ws, e) from None
-    # Repeat the unanchored-provenance gate at upload time — the report records
-    # what `tp run` saw, so the checkouts aren't re-probed here.
-    _confirm_unanchored(
-        report_data.provenance, allow=allow_unanchored or _env_truthy("TRAP_ALLOW_UNANCHORED")
-    )
+    # Echo the payload and gate the publish at upload time — the report records what
+    # `tp run` saw, so the checkouts aren't re-probed here. `run` is resolved to a
+    # concrete id ("latest" → the newest run) so the intent table names what ships.
+    run_id = ws.resolved_run(run)
+    _confirm_submit(report_data, run_id, resolved.server, yes=yes, allow_unanchored=allow_unanchored)
     report_path = ws.report_json_path(run)
 
     client = ApiClient(resolved.server, resolved.api_key)
@@ -427,7 +469,7 @@ def submit(
         resp_data = client.submit(report_path)
     except ApiError as e:
         raise _die(e) from None
-    render_submit_result(resp_data)
+    SubmitRenderer().result(resp_data, report_data=report_data, run_id=run_id)
 
 
 # Hidden until the scaffold is implemented — registered but not advertised in `--help`.

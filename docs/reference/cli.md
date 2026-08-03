@@ -34,10 +34,10 @@ refuses rather than running silently. Local sources are never gated.
 **Unanchored runs.** trap records the git provenance (`{repo, commit}`) of the solution and
 task checkouts. When either side can't be anchored — not a git repo, no origin remote, no
 commit yet, or uncommitted changes — trapstreet still accepts the upload, but the
-leaderboard **hides** the run. `tp run` and `tp submit` therefore warn and ask for
-confirmation `[y/N]` first; pre-authorise with `--allow-unanchored` or
-`TRAP_ALLOW_UNANCHORED=1` (the warning still prints). With no TTY and no authorisation they
-refuse.
+leaderboard **hides** the run. `tp run` therefore warns and asks for confirmation `[y/N]`
+first; pre-authorise with `--allow-unanchored` or `TRAP_ALLOW_UNANCHORED=1` (the warning
+still prints). With no TTY and no authorisation it refuses. `tp submit` folds this warning
+into its own pre-submit confirmation (see below).
 
 **Exit codes.** trap reports facts, not a verdict — a completed run exits `0` regardless
 of per-case exit codes or scores (gate CI on the grader output / `report.json`). `2`
@@ -80,7 +80,16 @@ tp submit [SOLUTION] [OPTIONS]
 | `--task` | first task | task alias (also the trapstreet task id) |
 | `--run / -r` | `latest` | which run to upload |
 | `--workspace / -w` | `.trap` | directory containing run artifacts |
-| `--allow-unanchored` | `false` | skip the confirmation for a run with no git provenance (see `tp run`) |
+| `--yes / -y` | `false` | skip the pre-submit confirmation and publish (for CI / scripts) |
+| `--allow-unanchored` | `false` | skip the pre-submit confirmation (like `--yes`) and acknowledge that a run with no git provenance is hidden from the leaderboard; also `TRAP_ALLOW_UNANCHORED=1` |
+
+**Pre-submit confirmation.** A submit is an irreversible external publish, so trap echoes
+what it is about to upload — solution, run id → server, a neutral result tally, and the
+anchor status of each checkout, all read from the local `report.json` — then asks `Submit
+to <server>? [y/N]`. The intent table prints even when the prompt is skipped, so a CI log
+still records the payload. Any of `--yes`, `--allow-unanchored`, or
+`TRAP_ALLOW_UNANCHORED=1` skips the prompt; with no TTY and none of them, submit refuses.
+When a checkout is unanchored the leaderboard warning (see `tp run`) prints here too.
 
 **Server/token resolution.** The target server is `TRAPSTREET_URL` env >
 `https://trapstreet.run`. The token is `TRAPSTREET_API_KEY` env > the stored credential *for

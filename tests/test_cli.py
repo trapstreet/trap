@@ -399,6 +399,40 @@ def test_submit_unanchored_refused_without_tty(make_project, runner, monkeypatch
     assert "needs confirmation" in res.output
 
 
+def test_submit_yes_skips_confirmation(make_project, runner, monkeypatch):
+    _passing(make_project)
+    assert runner.invoke(app, ["run", "--no-environment"]).exit_code == 0
+    monkeypatch.setenv("TRAPSTREET_API_KEY", "k")
+    monkeypatch.delenv("TRAP_ALLOW_UNANCHORED", raising=False)
+    monkeypatch.setattr("trap.auth.client.ApiClient.submit", lambda self, path: {"run": {"id": "r1"}})
+    res = runner.invoke(app, ["submit", "--task", "t", "--yes"])
+    assert res.exit_code == 0, res.output
+    assert "about to submit" in res.output and "submitted" in res.output
+
+
+def test_submit_anchored_still_confirms_without_tty(make_project, runner, monkeypatch):
+    # the publish gate is no longer unanchored-only: an anchored run in no-TTY still
+    # needs --yes. Rewrite the saved report to anchored provenance to prove it.
+    from trap.models import GitProvenance, Provenance, ReportData
+
+    sol = _passing(make_project)
+    assert runner.invoke(app, ["run", "--no-environment"]).exit_code == 0
+    report = next((sol / ".trap").rglob("report.json"))
+    data = ReportData.model_validate_json(report.read_text())
+    anchored = GitProvenance(repo="https://x/r", commit="a" * 40)
+    report.write_text(
+        data.model_copy(update={"provenance": Provenance(solution=anchored, task=anchored)}).model_dump_json(
+            indent=2
+        )
+    )
+    monkeypatch.setenv("TRAPSTREET_API_KEY", "k")
+    monkeypatch.delenv("TRAP_ALLOW_UNANCHORED", raising=False)
+    res = runner.invoke(app, ["submit", "--task", "t"])  # no --yes, no TTY
+    assert res.exit_code == 2
+    assert "needs confirmation" in res.output
+    assert "unanchored" not in res.stderr  # anchored → no leaderboard warning
+
+
 def test_confirm_unanchored_silent_when_anchored(capsys):
     import trap.cli as climod
     from trap.models import GitProvenance, Provenance
@@ -438,6 +472,76 @@ def test_confirm_unanchored_accepted_returns(monkeypatch):
     monkeypatch.setattr(climod.sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(climod.typer, "confirm", lambda *a, **k: True)
     climod._confirm_unanchored(Provenance(), allow=False)  # returns, no raise
+
+
+# --- submit publish gate (_confirm_submit) -----------------------------------
+
+
+def _mini_report(provenance=None):
+    from trap.models import Provenance, ReportData
+
+    return ReportData(
+        provenance=provenance or Provenance(),
+        cases_results=(),
+        grader_metrics=None,
+        started_at_utc="2026-01-01T00:00:00",
+        finished_at_utc="2026-01-01T00:00:01",
+    )
+
+
+def test_confirm_submit_echoes_intent_even_when_skipped(capsys):
+    import trap.cli as climod
+
+    climod._confirm_submit(_mini_report(), "ts-1", "http://s", yes=True, allow_unanchored=False)
+    assert "about to submit" in capsys.readouterr().out  # payload echoed even on the skip path
+
+
+def test_confirm_submit_skipped_by_allow_unanchored(monkeypatch):
+    import trap.cli as climod
+
+    monkeypatch.delenv("TRAP_ALLOW_UNANCHORED", raising=False)
+    climod._confirm_submit(_mini_report(), "ts-1", "http://s", yes=False, allow_unanchored=True)
+
+
+def test_confirm_submit_skipped_by_env(monkeypatch):
+    import trap.cli as climod
+
+    monkeypatch.setenv("TRAP_ALLOW_UNANCHORED", "1")
+    climod._confirm_submit(_mini_report(), "ts-1", "http://s", yes=False, allow_unanchored=False)
+
+
+def test_confirm_submit_refused_without_tty(monkeypatch):
+    import pytest
+
+    import trap.cli as climod
+
+    monkeypatch.delenv("TRAP_ALLOW_UNANCHORED", raising=False)
+    monkeypatch.setattr(climod.sys.stdin, "isatty", lambda: False)
+    with pytest.raises(climod.typer.Exit) as e:
+        climod._confirm_submit(_mini_report(), "ts-1", "http://s", yes=False, allow_unanchored=False)
+    assert e.value.exit_code == 2
+
+
+def test_confirm_submit_declined_raises(monkeypatch):
+    import pytest
+
+    import trap.cli as climod
+
+    monkeypatch.delenv("TRAP_ALLOW_UNANCHORED", raising=False)
+    monkeypatch.setattr(climod.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(climod.typer, "confirm", lambda *a, **k: False)
+    with pytest.raises(climod.typer.Exit) as e:
+        climod._confirm_submit(_mini_report(), "ts-1", "http://s", yes=False, allow_unanchored=False)
+    assert e.value.exit_code == 1
+
+
+def test_confirm_submit_accepted_returns(monkeypatch):
+    import trap.cli as climod
+
+    monkeypatch.delenv("TRAP_ALLOW_UNANCHORED", raising=False)
+    monkeypatch.setattr(climod.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(climod.typer, "confirm", lambda *a, **k: True)
+    climod._confirm_submit(_mini_report(), "ts-1", "http://s", yes=False, allow_unanchored=False)
 
 
 def test_python_interpreter_available():

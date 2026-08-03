@@ -6,7 +6,7 @@ from trap.display.report import (
     RichRenderer,
     renderer_factory,
 )
-from trap.display.submit import render_submit_result
+from trap.display.submit import SubmitRenderer
 
 __all__ = [
     "BaseRenderer",
@@ -14,6 +14,6 @@ __all__ = [
     "JsonRenderer",
     "OutputFormat",
     "RichRenderer",
-    "render_submit_result",
+    "SubmitRenderer",
     "renderer_factory",
 ]
