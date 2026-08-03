@@ -39,6 +39,15 @@ def test_render_submit_result_echoes_local_recap(capsys):
     assert "uploaded" in out and "my-sol" in out and "ts-1" in out and "1 case" in out
 
 
+def test_render_submit_result_recap_without_run_id(capsys):
+    # report but no run_id → recap still echoes solution + tally, omitting the run segment
+    data = _report(solution_name="my-sol")
+    SubmitRenderer().result({}, report_data=data, run_id=None)
+    out = capsys.readouterr().out
+    assert "uploaded" in out and "my-sol" in out and "0 cases" in out
+    assert "· run" not in out  # no run segment when run_id is None
+
+
 def test_render_submit_intent_anchored(capsys):
     anchored = GitProvenance(repo="https://x/r", commit="a" * 40, subdirectory="sub")
     data = _report(
