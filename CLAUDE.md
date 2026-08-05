@@ -62,5 +62,5 @@ cross-solution comparability. The two setups are independent; `--setup-solution`
 | `.trap/` workspace layout | `docs/reference/workspace.md` |
 | CLI commands & flags | `docs/reference/cli.md` |
 | Cost tracking (proxy, providers, pricing, internals) | `docs/guides/cost-tracking.md` |
-| Package graph & core data models | `docs/code-map.md` |
+| Package graph & core data models | `CODE_MAP.md` |
 | Writing a solution / a task | `docs/guides/writing-solution.md` · `docs/guides/writing-task.md` |
