@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "cli_version": "0.0.14",
+  "sections": [
+    {
+      "title": "Getting started",
+      "items": [
+        { "slug": "", "path": "docs/index.md", "title": "Overview" },
+        { "slug": "quickstart", "path": "docs/quickstart.md", "title": "Quickstart" }
+      ]
+    },
+    {
+      "title": "Guides",
+      "items": [
+        { "slug": "guides/running", "path": "docs/guides/running.md", "title": "Running" },
+        { "slug": "guides/writing-solution", "path": "docs/guides/writing-solution.md", "title": "Writing a solution" },
+        { "slug": "guides/writing-task", "path": "docs/guides/writing-task.md", "title": "Writing a task" },
+        { "slug": "guides/cost-tracking", "path": "docs/guides/cost-tracking.md", "title": "Cost tracking" }
+      ]
+    },
+    {
+      "title": "Reference",
+      "items": [
+        { "slug": "reference/cli", "path": "docs/reference/cli.md", "title": "CLI" },
+        { "slug": "reference/io-contract", "path": "docs/reference/io-contract.md", "title": "IO contract" },
+        { "slug": "reference/trap-yaml", "path": "docs/reference/trap-yaml.md", "title": "trap.yaml" },
+        { "slug": "reference/traptask-yaml", "path": "docs/reference/traptask-yaml.md", "title": "traptask.yaml" },
+        { "slug": "reference/workspace", "path": "docs/reference/workspace.md", "title": "Workspace" }
+      ]
+    }
+  ]
+}

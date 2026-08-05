@@ -96,7 +96,7 @@ class PriceCatalogue:
     onto (the proxy resolves once per run, then prices every call against that table)."""
 
     # Kept local rather than imported from ``trap.auth``: the package graph runs
-    # cost → models only, never cost → auth (see docs/code-map.md).
+    # cost → models only, never cost → auth (see CODE_MAP.md).
     DEFAULT_SERVER = "https://trapstreet.run"
     CACHE_TTL_SECONDS = 24 * 3600
     FETCH_TIMEOUT_SECONDS = 3.0
