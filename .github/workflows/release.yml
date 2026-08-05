@@ -11,6 +11,8 @@ jobs:
     permissions:
       # Required for PyPI trusted publishing (OIDC) — no API token needed.
       id-token: write
+      # Required to create the GitHub Release below.
+      contents: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -25,3 +27,31 @@ jobs:
 
       - name: Publish to PyPI
         run: uv publish --trusted-publishing always
+
+      # The site pins its docs to this repo's latest RELEASE (not main, which
+      # describes unreleased flags). We only ever pushed tags, so
+      # /releases/latest returned 404 and the site silently served a hardcoded
+      # fallback version — publishing a Release object is what makes
+      # "docs follow the CLI" actually true. Also gives us changelogs.
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" --generate-notes --verify-tag
+
+      # Docs are rendered live from this repo, so a release is also a docs
+      # release: this drops the site's docs caches within seconds instead of
+      # waiting out its hourly revalidation. Deliberately NOT a Vercel deploy
+      # hook — the site is CLI-deployed with a manual-only production deploy,
+      # and this refreshes content without triggering a build.
+      # Non-fatal: a failed refresh must never fail a successful publish.
+      - name: Refresh docs on trapstreet.run
+        continue-on-error: true
+        env:
+          TOKEN: ${{ secrets.DOCS_REFRESH_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "DOCS_REFRESH_TOKEN not set — skipping docs refresh."
+            exit 0
+          fi
+          curl -fsS -X POST -H "Authorization: Bearer $TOKEN" \
+            https://trapstreet.run/api/revalidate-docs
