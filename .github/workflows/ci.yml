@@ -25,6 +25,12 @@ jobs:
       - name: Format check
         run: uv run ruff format --check
 
+      - name: Docs lint (manifest + links)
+        # Keeps docs/manifest.json and cross-doc links valid — the docs site renders
+        # docs/ live from each release tag (see issue #19). Version match is asserted
+        # in the release workflow only (no tag on a PR).
+        run: uv run --no-project python scripts/lint_docs.py
+
       - name: Type check
         run: uv run --with pyright pyright src/
 
