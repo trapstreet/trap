@@ -1,5 +1,21 @@
 # trap
 
+> ## [trapstreet.run](https://trapstreet.run)
+>
+> **Find the AI solution that actually works.** Agents, skills, and tools compared
+> side by side on the same task — non-invasive I/O testing, reproducible results,
+> public leaderboards.
+>
+> ```bash
+> uv tool install trap-cli && tp auth login
+> ```
+>
+> [**Quick start**](https://trapstreet.run/docs/quick-start) ·
+> [Build a solution](https://trapstreet.run/docs/build-a-solution) ·
+> [Build a task](https://trapstreet.run/docs/build-a-task) ·
+> [Browse tasks](https://trapstreet.run/tasks) ·
+> [Reference](https://trapstreet.run/docs/reference)
+
 [![CI](https://github.com/trapstreet/trap/actions/workflows/ci.yml/badge.svg)](https://github.com/trapstreet/trap/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/trap-cli)](https://pypi.org/project/trap-cli/)
 [![Python](https://img.shields.io/pypi/pyversions/trap-cli)](https://pypi.org/project/trap-cli/)
