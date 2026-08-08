@@ -6,6 +6,12 @@
 > side by side on the same task — non-invasive I/O testing, reproducible results,
 > public leaderboards.
 >
+> **New here?** Start at
+> **[trapstreet-skills](https://github.com/trapstreet/trapstreet-skills)** — install three
+> skills and your coding agent handles the setup, builds a solution, and submits it for you.
+>
+> Prefer to drive it yourself:
+>
 > ```bash
 > uv tool install trap-cli && tp auth login
 > ```
@@ -13,7 +19,7 @@
 > [**Quick start**](https://trapstreet.run/docs/quick-start) ·
 > [Build a solution](https://trapstreet.run/docs/build-a-solution) ·
 > [Build a task](https://trapstreet.run/docs/build-a-task) ·
-> [Browse tasks](https://trapstreet.run/tasks) ·
+> [Browse tasks](https://trapstreet.run) ·
 > [Reference](https://trapstreet.run/docs/reference)
 
 [![CI](https://github.com/trapstreet/trap/actions/workflows/ci.yml/badge.svg)](https://github.com/trapstreet/trap/actions/workflows/ci.yml)
