@@ -18,6 +18,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from trap.auth.store import CredentialStoreError
 from trap.live.client import LiveApiError, LiveClient
 from trap.live.identity import LiveSession, new_client_run_id
 from trap.live.outbox import Outbox, OutboxError
@@ -622,6 +623,7 @@ class _FakeTracker:
 
     def __init__(self, notice: str | None = None) -> None:
         self.run_url = "https://srv/runs/r-1"
+        self.client_run_id = "r-1"
         self.notice = notice
         self.calls: list[str] = []
         self.finished: dict[str, object] | None = None
@@ -899,3 +901,628 @@ def test_a_response_without_an_ack_is_ignored(tmp_path: Path):
     tracker = _tracker(tmp_path, _Silent())
     tracker._send([{"client_seq": 1}])
     assert tracker._session.acked_seq == 0
+
+
+# -- the outbox across producer generations ----------------------------------
+
+
+def test_pending_can_be_scoped_to_one_generation(tmp_path: Path):
+    outbox = _outbox(tmp_path)
+    outbox.append(event_id="e1", type="heartbeat", payload={}, producer_generation=1)
+    outbox.append(event_id="e2", type="heartbeat", payload={}, producer_generation=2)
+    # A retired generation is refused by the server for good, so it is not
+    # "pending" — counting it would mean retrying it for ever.
+    assert [e.event_id for e in outbox.pending(0, generation=2)] == ["e2"]
+    assert [e.event_id for e in outbox.pending(0)] == ["e1", "e2"]
+
+
+def test_prepare_numbers_within_the_generation_it_is_given(tmp_path: Path):
+    outbox = _outbox(tmp_path)
+    for seq in range(3):
+        outbox.append(event_id=f"e{seq}", type="heartbeat", payload={}, producer_generation=1)
+    resumed = Outbox(tmp_path)
+    resumed.prepare(2)
+    # Generation 2 starts its own numbering at 1; the old numbers belong to a
+    # generation the server no longer accepts.
+    assert resumed.append(event_id="new", type="heartbeat", payload={}).client_seq == 1
+
+
+# -- the checkpoint endpoint -------------------------------------------------
+
+
+def test_checkpoint_posts_the_compare_and_swap():
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"producer_generation": 2, "ack_seq": 0})
+
+    result = _live_client(handler).checkpoint(
+        "rs_1",
+        checkpoint_id="cp-1",
+        expected_producer_generation=1,
+        snapshot={"exec_status": "completed", "cases_done": 2, "cases_total": 2},
+    )
+    assert result == {"producer_generation": 2, "ack_seq": 0}
+    assert seen["path"] == "/api/v2/local-runs/rs_1/checkpoint"
+    assert seen["body"] == {
+        "checkpoint_id": "cp-1",
+        "expected_producer_generation": 1,
+        "snapshot": {"exec_status": "completed", "cases_done": 2, "cases_total": 2},
+    }
+
+
+def test_a_conflict_carries_the_generation_the_server_holds():
+    handler = lambda _r: httpx.Response(409, json={"producer_generation": 5})  # noqa: E731
+    with pytest.raises(LiveApiError) as excinfo:
+        _live_client(handler).checkpoint(
+            "rs_1", checkpoint_id="cp-1", expected_producer_generation=1, snapshot={}
+        )
+    assert excinfo.value.payload == {"producer_generation": 5}
+
+
+@pytest.mark.parametrize("response", [httpx.Response(409, text="<html>"), httpx.Response(409, json=[1])])
+def test_an_error_body_that_is_not_an_object_reads_as_empty(response):
+    # A server that answers a conflict with HTML must not turn a recoverable
+    # conflict into a crash.
+    with pytest.raises(LiveApiError) as excinfo:
+        _live_client(lambda _r: response).whoami()
+    assert excinfo.value.payload == {}
+
+
+# -- tp sync -----------------------------------------------------------------
+
+
+def _write_outbox(run_dir: Path, entries: list[tuple[int, str, dict, int]]) -> None:
+    """Write an outbox line by line, so a test can create the gap it needs."""
+    path = run_dir / "live" / "outbox.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "event_id": f"e{seq}",
+                    "client_seq": seq,
+                    "producer_generation": generation,
+                    "type": type_,
+                    "payload": payload,
+                    "client_occurred_at": "2026-09-07T00:00:00+00:00",
+                }
+            )
+            + "\n"
+            for seq, type_, payload, generation in entries
+        )
+    )
+
+
+def _queued(
+    run_dir: Path,
+    entries: list[tuple[int, str, dict, int]] | None = None,
+    *,
+    acked_seq: int = 0,
+    user_id: str | None = "usr_a",
+    generation: int = 1,
+    run_id: str | None = None,
+    server: str = "https://srv",
+) -> LiveSession:
+    """A run directory as `tp run` would leave it: a sidecar and a queue."""
+    if entries is None:
+        entries = [(1, "run_started", {"cases_total": 2}, 1), (2, "case_started", {"ordinal": 1}, 1)]
+    _write_outbox(run_dir, entries)
+    session = LiveSession(
+        client_run_id="r-1",
+        server=server,
+        user_id=user_id,
+        run_id=run_id,
+        acked_seq=acked_seq,
+        producer_generation=generation,
+    )
+    session.save(run_dir)
+    return session
+
+
+class _SyncClient:
+    """A LiveClient stand-in for `tp sync`: scripted answers, recorded calls."""
+
+    def __init__(
+        self,
+        *,
+        user_id: str | None = "usr_a",
+        whoami_error: LiveApiError | None = None,
+        sends: list[object] | None = None,
+        checkpoints: list[object] | None = None,
+    ) -> None:
+        self.server = "https://srv"
+        self._user_id = user_id
+        self._whoami_error = whoami_error
+        self._sends = list(sends or [])
+        self._checkpoints = list(checkpoints or [])
+        self.batches: list[list[dict]] = []
+        self.refs: list[str] = []
+        self.checkpoints_sent: list[dict] = []
+        self.closed = False
+
+    def whoami(self) -> str | None:
+        if self._whoami_error is not None:
+            raise self._whoami_error
+        return self._user_id
+
+    def send_events(self, run_ref: str, events: list[dict]):
+        self.batches.append(events)
+        self.refs.append(run_ref)
+        answer = self._sends.pop(0) if self._sends else {"ack_seq": max(e["client_seq"] for e in events)}
+        if isinstance(answer, LiveApiError):
+            raise answer
+        return answer
+
+    def checkpoint(self, run_ref: str, **kwargs):
+        self.checkpoints_sent.append({"run_ref": run_ref, **kwargs})
+        answer = self._checkpoints.pop(0)
+        if isinstance(answer, LiveApiError):
+            raise answer
+        return answer
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _run_sync(tmp_path, monkeypatch, client=None, *, key="k", server_override=None, store=None):
+    from trap.live.sync import sync_run
+
+    monkeypatch.setattr("trap.live.sync.CredentialStore", lambda: store or _StoreStub(key=key))
+    monkeypatch.setattr("trap.live.sync.LiveClient", lambda *_a, **_k: client or _SyncClient())
+    return sync_run(tmp_path, server_override=server_override)
+
+
+def test_an_untracked_run_is_said_plainly_and_is_not_an_error(tmp_path: Path, monkeypatch):
+    outcome = _run_sync(tmp_path, monkeypatch)
+    assert outcome.status == "untracked"
+    assert outcome.refused is False
+    assert "never tracked" in outcome.message
+
+
+def test_a_queue_cannot_be_redirected_to_another_server(tmp_path: Path, monkeypatch):
+    _queued(tmp_path)
+    outcome = _run_sync(tmp_path, monkeypatch, server_override="https://elsewhere")
+    assert outcome.status == "refused"
+    assert "cannot move servers" in outcome.message
+
+
+def test_naming_the_same_server_a_different_way_is_not_a_disagreement(tmp_path: Path, monkeypatch):
+    _queued(tmp_path)
+    client = _SyncClient()
+    outcome = _run_sync(tmp_path, monkeypatch, client, server_override="https://srv/")
+    assert outcome.status == "delivered"
+
+
+def test_an_unreadable_credential_store_refuses(tmp_path: Path, monkeypatch):
+    _queued(tmp_path)
+
+    class _Broken:
+        def load(self, _server):
+            raise CredentialStoreError("auth.json is not JSON")
+
+    outcome = _run_sync(tmp_path, monkeypatch, store=_Broken())
+    assert outcome.status == "refused"
+    assert "auth.json is not JSON" in outcome.message
+
+
+def test_syncing_without_a_credential_for_that_server_says_where_to_log_in(tmp_path: Path, monkeypatch):
+    _queued(tmp_path)
+    outcome = _run_sync(tmp_path, monkeypatch, key=None)
+    assert outcome.status == "refused"
+    assert "tp auth login --server https://srv" in outcome.message
+
+
+def test_an_empty_queue_needs_no_network(tmp_path: Path, monkeypatch):
+    _queued(tmp_path, acked_seq=2)
+    client = _SyncClient()
+    outcome = _run_sync(tmp_path, monkeypatch, client)
+    assert outcome.status == "up_to_date"
+    assert client.batches == []
+
+
+def test_events_from_a_retired_generation_are_not_pending(tmp_path: Path, monkeypatch):
+    _queued(tmp_path, [(1, "run_started", {}, 1)], generation=2)
+    outcome = _run_sync(tmp_path, monkeypatch, _SyncClient())
+    assert outcome.status == "up_to_date"
+
+
+def test_being_offline_leaves_the_queue_and_is_not_an_error(tmp_path: Path, monkeypatch):
+    _queued(tmp_path)
+    outcome = _run_sync(tmp_path, monkeypatch, _SyncClient(whoami_error=LiveApiError("unreachable")))
+    assert (outcome.status, outcome.remaining, outcome.refused) == ("offline", 2, False)
+    assert "unreachable" in outcome.message
+
+
+def test_a_rejected_token_stops_there_and_tries_nothing_else(tmp_path: Path, monkeypatch):
+    _queued(tmp_path)
+    client = _SyncClient(whoami_error=LiveApiError("http 401", status=401))
+    outcome = _run_sync(tmp_path, monkeypatch, client)
+    assert outcome.status == "refused"
+    assert client.batches == []
+    assert "no other credential was tried" in outcome.message
+
+
+def test_a_queue_is_never_handed_to_another_account(tmp_path: Path, monkeypatch):
+    session = _queued(tmp_path, user_id="usr_a")
+    client = _SyncClient(user_id="usr_b")
+    outcome = _run_sync(tmp_path, monkeypatch, client)
+    assert outcome.status == "refused"
+    assert client.batches == []
+    # And the queue is still on disk, for its owner.
+    assert len(Outbox(tmp_path).pending(session.acked_seq)) == 2
+
+
+def test_a_rotated_token_for_the_same_person_still_delivers(tmp_path: Path, monkeypatch):
+    _queued(tmp_path, user_id="usr_a")
+    outcome = _run_sync(tmp_path, monkeypatch, _SyncClient(user_id="usr_a"))
+    assert outcome.status == "delivered"
+
+
+def test_a_run_tracked_entirely_offline_freezes_its_account_on_first_contact(tmp_path: Path, monkeypatch):
+    _queued(tmp_path, user_id=None)
+    outcome = _run_sync(tmp_path, monkeypatch, _SyncClient(user_id="usr_a"))
+    assert outcome.status == "delivered"
+    reloaded = LiveSession.load(tmp_path)
+    assert reloaded is not None and reloaded.user_id == "usr_a"
+
+
+def test_a_server_that_will_not_say_who_we_are_leaves_the_account_unfrozen(tmp_path: Path, monkeypatch):
+    _queued(tmp_path, user_id=None)
+    outcome = _run_sync(tmp_path, monkeypatch, _SyncClient(user_id=None))
+    assert outcome.status == "delivered"
+    reloaded = LiveSession.load(tmp_path)
+    assert reloaded is not None and reloaded.user_id is None
+
+
+def test_delivering_the_queue_records_the_acknowledgement(tmp_path: Path, monkeypatch):
+    _queued(tmp_path, run_id="rs_1")
+    client = _SyncClient()
+    outcome = _run_sync(tmp_path, monkeypatch, client)
+    assert (outcome.status, outcome.delivered, outcome.remaining) == ("delivered", 2, 0)
+    assert client.refs == ["rs_1"]  # the server's own id once it is known
+    reloaded = LiveSession.load(tmp_path)
+    assert reloaded is not None and reloaded.acked_seq == 2
+    # Nothing to do the second time round.
+    assert _run_sync(tmp_path, monkeypatch, _SyncClient()).status == "up_to_date"
+
+
+def test_a_long_queue_goes_in_batches(tmp_path: Path, monkeypatch):
+    entries = [(seq, "heartbeat", {}, 1) for seq in range(1, 251)]
+    _queued(tmp_path, entries)
+    client = _SyncClient()
+    outcome = _run_sync(tmp_path, monkeypatch, client)
+    assert [len(batch) for batch in client.batches] == [100, 100, 50]
+    assert (outcome.status, outcome.delivered) == ("delivered", 250)
+
+
+def test_losing_the_network_midway_delivers_what_it_can(tmp_path: Path, monkeypatch):
+    entries = [(seq, "heartbeat", {}, 1) for seq in range(1, 151)]
+    _queued(tmp_path, entries)
+    client = _SyncClient(sends=[{"ack_seq": 100}, LiveApiError("unreachable")])
+    outcome = _run_sync(tmp_path, monkeypatch, client)
+    assert (outcome.status, outcome.delivered, outcome.remaining) == ("partial", 100, 50)
+    assert "run tp sync again later" in outcome.message
+    reloaded = LiveSession.load(tmp_path)
+    assert reloaded is not None and reloaded.acked_seq == 100
+
+
+def test_a_server_that_acknowledges_nothing_stops_the_send(tmp_path: Path, monkeypatch):
+    entries = [(seq, "heartbeat", {}, 1) for seq in range(1, 151)]
+    _queued(tmp_path, entries)
+    # A conflict: the request was taken, the window did not move. Pushing the
+    # next batch would only repeat that.
+    conflict = {"ack_seq": 0, "conflicts": [{"event_id": "e1", "reason": "EVENT_CONFLICT"}]}
+    client = _SyncClient(sends=[conflict])
+    outcome = _run_sync(tmp_path, monkeypatch, client)
+    assert (outcome.status, outcome.remaining) == ("stalled", 150)
+    assert len(client.batches) == 1
+
+
+def test_a_partly_acknowledged_queue_reports_what_remains(tmp_path: Path, monkeypatch):
+    entries = [(seq, "heartbeat", {}, 1) for seq in range(1, 151)]
+    _queued(tmp_path, entries)
+    # The first batch lands; the second is taken but acknowledges nothing new.
+    client = _SyncClient(sends=[{"ack_seq": 100}, {"ack_seq": 100}])
+    outcome = _run_sync(tmp_path, monkeypatch, client)
+    assert (outcome.status, outcome.delivered, outcome.remaining) == ("partial", 100, 50)
+
+
+def test_a_response_with_no_ack_at_all_stops_the_send(tmp_path: Path, monkeypatch):
+    _queued(tmp_path)
+    outcome = _run_sync(tmp_path, monkeypatch, _SyncClient(sends=[{}]))
+    assert outcome.status == "stalled"
+
+
+def test_a_server_error_keeps_the_queue_without_calling_it_offline(tmp_path: Path, monkeypatch):
+    _queued(tmp_path)
+    outcome = _run_sync(tmp_path, monkeypatch, _SyncClient(sends=[LiveApiError("http 503", status=503)]))
+    assert (outcome.status, outcome.remaining) == ("stalled", 2)
+    assert "stay on disk" in outcome.message
+
+
+def test_a_rejected_token_partway_through_still_refuses(tmp_path: Path, monkeypatch):
+    _queued(tmp_path)
+    outcome = _run_sync(tmp_path, monkeypatch, _SyncClient(sends=[LiveApiError("http 401", status=401)]))
+    assert outcome.status == "refused"
+
+
+# -- gap recovery ------------------------------------------------------------
+
+
+def _gapped(run_dir: Path, **kwargs) -> LiveSession:
+    """A queue whose oldest surviving event is not the next one the server needs."""
+    entries = [
+        (7, "case_finished", {"ordinal": 1}, 1),
+        (8, "run_finished", {"cases_done": 2, "cases_total": 3, "exit_code": 0}, 1),
+    ]
+    return _queued(run_dir, entries, acked_seq=2, **kwargs)
+
+
+def test_a_gap_is_declared_with_a_checkpoint_not_papered_over(tmp_path: Path, monkeypatch):
+    _gapped(tmp_path)
+    client = _SyncClient(checkpoints=[{"producer_generation": 2, "ack_seq": 0}])
+    outcome = _run_sync(tmp_path, monkeypatch, client)
+
+    assert outcome.status == "recovered"
+    assert client.batches == []  # sending into a hole is pointless
+    sent = client.checkpoints_sent[0]
+    assert sent["expected_producer_generation"] == 1
+    assert sent["snapshot"] == {"exec_status": "completed", "cases_done": 2, "cases_total": 3}
+    assert sent["checkpoint_id"].startswith("cp-")
+    # The user is told the history is incomplete, in those words.
+    assert "4 progress event(s) were lost" in outcome.message
+    assert "incomplete" in outcome.message
+    # The new generation is adopted, and its numbering starts fresh.
+    reloaded = LiveSession.load(tmp_path)
+    assert reloaded is not None
+    assert (reloaded.producer_generation, reloaded.acked_seq) == (2, 0)
+    # A second sync has nothing to retry: the old generation is retired.
+    assert _run_sync(tmp_path, monkeypatch, _SyncClient()).status == "up_to_date"
+
+
+def test_a_conflicting_checkpoint_is_retried_once_with_the_server_generation(tmp_path: Path, monkeypatch):
+    _gapped(tmp_path)
+    client = _SyncClient(
+        checkpoints=[
+            LiveApiError("http 409", status=409, payload={"producer_generation": 4}),
+            {"producer_generation": 5, "ack_seq": 0},
+        ]
+    )
+    outcome = _run_sync(tmp_path, monkeypatch, client)
+    assert outcome.status == "recovered"
+    assert [c["expected_producer_generation"] for c in client.checkpoints_sent] == [1, 4]
+    # The same logical checkpoint, so the retry is idempotent server-side.
+    assert len({c["checkpoint_id"] for c in client.checkpoints_sent}) == 1
+    reloaded = LiveSession.load(tmp_path)
+    assert reloaded is not None and reloaded.producer_generation == 5
+
+
+def test_a_conflict_that_names_no_generation_gives_up_cleanly(tmp_path: Path, monkeypatch):
+    _gapped(tmp_path)
+    client = _SyncClient(checkpoints=[LiveApiError("http 409", status=409, payload={})])
+    outcome = _run_sync(tmp_path, monkeypatch, client)
+    assert outcome.status == "stalled"
+    assert len(client.checkpoints_sent) == 1
+    reloaded = LiveSession.load(tmp_path)
+    assert reloaded is not None and reloaded.producer_generation == 1  # nothing changed
+
+
+def test_a_second_conflict_stops_competing(tmp_path: Path, monkeypatch):
+    _gapped(tmp_path)
+    client = _SyncClient(
+        checkpoints=[
+            LiveApiError("http 409", status=409, payload={"producer_generation": 4}),
+            LiveApiError("http 409", status=409, payload={"producer_generation": 6}),
+        ]
+    )
+    outcome = _run_sync(tmp_path, monkeypatch, client)
+    assert (outcome.status, len(client.checkpoints_sent)) == ("stalled", 2)
+
+
+def test_a_checkpoint_that_cannot_be_sent_leaves_everything_alone(tmp_path: Path, monkeypatch):
+    _gapped(tmp_path)
+    client = _SyncClient(checkpoints=[LiveApiError("unreachable")])
+    outcome = _run_sync(tmp_path, monkeypatch, client)
+    assert (outcome.status, outcome.remaining) == ("offline", 2)
+
+
+def test_a_checkpoint_answer_without_a_generation_is_not_adopted(tmp_path: Path, monkeypatch):
+    _gapped(tmp_path)
+    outcome = _run_sync(tmp_path, monkeypatch, _SyncClient(checkpoints=[{"ack_seq": 0}]))
+    assert outcome.status == "stalled"
+    reloaded = LiveSession.load(tmp_path)
+    assert reloaded is not None and reloaded.producer_generation == 1
+
+
+def test_a_checkpoint_ack_is_adopted_when_the_server_sends_one(tmp_path: Path, monkeypatch):
+    _gapped(tmp_path)
+    client = _SyncClient(checkpoints=[{"producer_generation": 2, "ack_seq": 3}])
+    _run_sync(tmp_path, monkeypatch, client)
+    reloaded = LiveSession.load(tmp_path)
+    assert reloaded is not None and reloaded.acked_seq == 3
+
+
+def test_a_checkpoint_without_an_ack_restarts_the_window_at_zero(tmp_path: Path, monkeypatch):
+    _gapped(tmp_path)
+    client = _SyncClient(checkpoints=[{"producer_generation": 2}])
+    _run_sync(tmp_path, monkeypatch, client)
+    reloaded = LiveSession.load(tmp_path)
+    assert reloaded is not None and reloaded.acked_seq == 0
+
+
+# -- what a checkpoint snapshot may claim ------------------------------------
+
+
+def _snapshot_of(tmp_path: Path, monkeypatch, entries: list[tuple[int, str, dict, int]]) -> dict:
+    _queued(tmp_path, entries, acked_seq=1)
+    client = _SyncClient(checkpoints=[{"producer_generation": 2, "ack_seq": 0}])
+    _run_sync(tmp_path, monkeypatch, client)
+    return client.checkpoints_sent[0]["snapshot"]
+
+
+def test_a_snapshot_of_a_run_still_in_flight_says_so(tmp_path: Path, monkeypatch):
+    snapshot = _snapshot_of(tmp_path, monkeypatch, [(5, "case_started", {"ordinal": 2}, 1)])
+    assert snapshot == {"exec_status": "running", "cases_done": 0, "cases_total": 0}
+
+
+@pytest.mark.parametrize(
+    ("event_type", "status"),
+    [("run_finished", "completed"), ("run_failed", "failed"), ("run_cancelled", "cancelled")],
+)
+def test_a_snapshot_reads_the_last_terminal_event(tmp_path: Path, monkeypatch, event_type, status):
+    snapshot = _snapshot_of(tmp_path, monkeypatch, [(5, event_type, {"cases_done": 4}, 1)])
+    assert snapshot["exec_status"] == status
+    # A total below what already ran would be a nonsense to render.
+    assert snapshot == {"exec_status": status, "cases_done": 4, "cases_total": 4}
+
+
+def test_a_snapshot_counts_the_cases_that_survived(tmp_path: Path, monkeypatch):
+    snapshot = _snapshot_of(
+        tmp_path,
+        monkeypatch,
+        [
+            (5, "case_finished", {"ordinal": 2}, 1),
+            (6, "case_finished", {"ordinal": 3}, 1),
+            (7, "case_finished", {"ordinal": 3}, 1),  # a duplicate is one case
+            (8, "case_finished", {}, 1),  # and a malformed one is no case at all
+        ],
+    )
+    assert (snapshot["cases_done"], snapshot["exec_status"]) == (2, "running")
+
+
+def test_a_snapshot_ignores_a_count_that_is_not_a_number(tmp_path: Path, monkeypatch):
+    snapshot = _snapshot_of(
+        tmp_path, monkeypatch, [(5, "run_finished", {"cases_done": "lots", "cases_total": 9}, 1)]
+    )
+    assert (snapshot["cases_done"], snapshot["cases_total"]) == (0, 9)
+
+
+def test_a_snapshot_falls_back_to_the_saved_report(tmp_path: Path, monkeypatch):
+    from trap.models import CaseResult, Provenance, ReportData
+
+    report = ReportData(
+        provenance=Provenance(),
+        cases_results=(
+            CaseResult(case_id="c1", metrics=None),
+            CaseResult(case_id="c2", metrics=None),
+        ),
+        grader_metrics=None,
+        started_at_utc="2026-09-07T00:00:00+00:00",
+        finished_at_utc="2026-09-07T00:00:01+00:00",
+    )
+    (tmp_path / "report.json").write_text(report.model_dump_json())
+    # No terminal event survived, but a report on disk is only ever written by a
+    # run that finished.
+    snapshot = _snapshot_of(tmp_path, monkeypatch, [(5, "case_started", {"ordinal": 1}, 1)])
+    assert snapshot == {"exec_status": "completed", "cases_done": 2, "cases_total": 2}
+
+
+def test_a_corrupt_report_is_read_as_no_report(tmp_path: Path, monkeypatch):
+    (tmp_path / "report.json").write_text("{not json")
+    snapshot = _snapshot_of(tmp_path, monkeypatch, [(5, "case_started", {"ordinal": 1}, 1)])
+    assert snapshot["exec_status"] == "running"
+
+
+# -- the tp sync command -----------------------------------------------------
+
+
+def _run_dir_of(project: Path) -> Path:
+    return next((project / ".trap" / "runs").glob("*/t/*"))
+
+
+def _a_finished_run(make_project, runner, monkeypatch) -> Path:
+    """Run something small with sync off, and return the run directory."""
+    from trap.cli import app
+
+    monkeypatch.setattr("trap.cli.start_tracking", lambda **_kwargs: None)
+    project = make_project(cmd="sh -c 'cat'", cases=["c1"])
+    assert runner.invoke(app, ["run", "--no-environment"]).exit_code == 0
+    return _run_dir_of(project)
+
+
+def test_tp_sync_on_an_untracked_run_says_so_and_exits_zero(make_project, runner, monkeypatch):
+    from trap.cli import app
+
+    _a_finished_run(make_project, runner, monkeypatch)
+    result = runner.invoke(app, ["sync"])
+    assert result.exit_code == 0, result.output
+    assert "never tracked" in result.output
+
+
+def test_tp_sync_delivers_a_queued_run(make_project, runner, monkeypatch):
+    from trap.cli import app
+
+    run_dir = _a_finished_run(make_project, runner, monkeypatch)
+    _queued(run_dir)
+    client = _SyncClient()
+    monkeypatch.setattr("trap.live.sync.CredentialStore", lambda: _StoreStub(key="k"))
+    monkeypatch.setattr("trap.live.sync.LiveClient", lambda *_a, **_k: client)
+
+    result = runner.invoke(app, ["sync"])
+    assert result.exit_code == 0, result.output
+    assert "delivered 2 queued event(s)" in result.output
+    assert client.closed is True
+
+
+def test_tp_sync_exits_two_when_it_refuses(make_project, runner, monkeypatch):
+    from trap.cli import app
+
+    run_dir = _a_finished_run(make_project, runner, monkeypatch)
+    _queued(run_dir, user_id="usr_a")
+    monkeypatch.setattr("trap.live.sync.CredentialStore", lambda: _StoreStub(key="k"))
+    monkeypatch.setattr("trap.live.sync.LiveClient", lambda *_a, **_k: _SyncClient(user_id="usr_b"))
+
+    result = runner.invoke(app, ["sync"])
+    assert result.exit_code == 2
+    assert "different account" in result.output
+
+
+def test_tp_sync_without_any_run_points_at_tp_run(make_project, runner, monkeypatch):
+    from trap.cli import app
+
+    make_project(cmd="sh -c 'cat'", cases=["c1"])
+    result = runner.invoke(app, ["sync"])
+    assert result.exit_code == 2
+    assert "tp run" in result.output
+
+
+def test_tp_sync_names_a_run_that_is_not_there(make_project, runner, monkeypatch):
+    from trap.cli import app
+
+    _a_finished_run(make_project, runner, monkeypatch)
+    result = runner.invoke(app, ["sync", "--run", "2020-01-01T00:00:00"])
+    assert result.exit_code == 2
+    assert "no run 2020-01-01T00:00:00" in result.output
+
+
+def test_tp_sync_needs_a_solution_it_can_read(runner, tmp_path, monkeypatch):
+    from trap.cli import app
+
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["sync"])
+    assert result.exit_code == 2
+
+
+def test_tp_run_records_the_session_in_the_report(make_project, runner, monkeypatch):
+    from trap.cli import app
+
+    tracker = _FakeTracker()
+    _use_fake_tracker(monkeypatch, tracker)
+    project = make_project(cmd="sh -c 'cat'", cases=["c1"])
+    assert runner.invoke(app, ["run", "--no-environment"]).exit_code == 0
+
+    report = json.loads((_run_dir_of(project) / "report.json").read_text())
+    # What lets `tp submit` hand the website the same run the site already watched.
+    assert report["client_run_id"] == "r-1"
+
+
+def test_a_run_with_no_session_reports_none(make_project, runner, monkeypatch):
+    run_dir = _a_finished_run(make_project, runner, monkeypatch)
+    assert json.loads((run_dir / "report.json").read_text())["client_run_id"] is None
+
+
+def test_the_tracker_publishes_the_id_the_report_needs(tmp_path: Path):
+    assert _tracker(tmp_path).client_run_id == "r-1"

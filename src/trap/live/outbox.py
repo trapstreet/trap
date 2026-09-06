@@ -62,20 +62,30 @@ class Outbox:
         self._lock = Lock()
         self._next_seq = 1
 
-    def prepare(self) -> None:
+    def prepare(self, generation: int | None = None) -> None:
         """Create the directory and adopt the highest sequence already on disk.
 
         Called once before the first append. Resuming from an existing file
         continues its numbering rather than restarting at 1, which would make
         two different events share a slot.
+
+        Sequence numbers are only unique *within* a producer generation: a
+        checkpoint opens a new generation and restarts its numbering at 1. So a
+        producer resuming under a known generation passes it and gets that
+        generation's numbering; ``None`` means "every event in the file", which
+        is what a fresh run wants.
         """
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self.path.touch(exist_ok=True)
         except OSError as e:
             raise OutboxError(str(e)) from e
-        highest = max((event.client_seq for event in self.read_all()), default=0)
-        self._next_seq = highest + 1
+        seen = (
+            event.client_seq
+            for event in self.read_all()
+            if generation is None or event.producer_generation == generation
+        )
+        self._next_seq = max(seen, default=0) + 1
 
     def append(
         self,
@@ -113,9 +123,20 @@ class Outbox:
     def read_all(self) -> list[OutboxEvent]:
         return list(self._iter_events())
 
-    def pending(self, acked_seq: int) -> list[OutboxEvent]:
-        """Events the server has not confirmed, oldest first."""
-        return [event for event in self._iter_events() if event.client_seq > acked_seq]
+    def pending(self, acked_seq: int, generation: int | None = None) -> list[OutboxEvent]:
+        """Events the server has not confirmed, oldest first.
+
+        ``generation`` restricts the answer to one producer generation, which is
+        the only correct reading once a checkpoint has opened a new one: events
+        from a retired generation are refused by the server for good, so
+        counting them as pending would mean retrying them for ever.
+        """
+        return [
+            event
+            for event in self._iter_events()
+            if event.client_seq > acked_seq
+            and (generation is None or event.producer_generation == generation)
+        ]
 
     def _iter_events(self) -> Iterator[OutboxEvent]:
         try:

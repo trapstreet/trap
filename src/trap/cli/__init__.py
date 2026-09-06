@@ -24,6 +24,7 @@ from trap.display import CaseProgress, OutputFormat, SubmitRenderer, renderer_fa
 from trap.environment import EnvironmentDetector
 from trap.git_ops import GitOpsError, LocalRepo, ParsedGitUrl
 from trap.live.setup import start_tracking
+from trap.live.sync import sync_run
 from trap.loader import ConfigError, TrapLoader, TraptaskLoader
 from trap.models import Diagnosis, Provenance, ReportData
 from trap.runner import TaskRunner
@@ -405,6 +406,10 @@ def run(
         grader_exit_code=grader_exit_code,
         provenance=provenance,
         environment=environment_info,
+        # Only when a session was actually minted and written: with no durable
+        # id there is nothing to associate, and inventing one at report time
+        # would claim a session the server never saw.
+        client_run_id=tracker.client_run_id if tracker is not None else None,
     )
     ws.save_as_report(ts, report_data)
     renderer_factory(output).render(report_data)
@@ -558,6 +563,57 @@ def submit(
     except ApiError as e:
         raise _die(e) from None
     SubmitRenderer().result(resp_data, report_data=report_data, run_id=run_id)
+
+
+@app.command()
+def sync(
+    solution: Annotated[
+        str | None,
+        typer.Argument(help="Local solution path holding trap.yaml (default: cwd)."),
+    ] = None,
+    task: Annotated[
+        str | None,
+        typer.Option("--task", help="Task alias from trap.yaml (default: the first task)."),
+    ] = None,
+    run: Annotated[str, typer.Option("--run", "-r", help="Which run to sync.")] = "latest",
+    workspace: Annotated[Path, typer.Option("--workspace", "-w")] = Path(Workspace.DEFAULT_DIRNAME),
+    server: Annotated[
+        str | None,
+        typer.Option(
+            "--server",
+            help="The server this run was tracked against. A queue cannot move servers, so "
+            "a value that disagrees with the run's own is refused rather than redirected.",
+        ),
+    ] = None,
+) -> None:
+    """Send a tracked run's queued progress to trapstreet.
+
+    `tp run` mirrors progress as it happens, but the CLI leaves no background
+    service behind: anything the network did not take stays in the run's outbox.
+    This delivers it. It publishes nothing — `tp submit` is still the only way a
+    report reaches the leaderboard.
+    """
+    try:
+        task_alias = TrapLoader.from_solution(solution).resolve_task(task).alias
+    except (GitOpsError, ConfigError) as e:
+        raise _die(e) from None
+    ws = Workspace(workspace.resolve(), SolutionIdentity.from_spec(solution).dirname, task_alias)
+    try:
+        run_dir = ws.run_dir(run)
+    except FileNotFoundError as e:
+        raise _no_report(ws, e) from None
+    # A named run that isn't there is a typo, not an untracked run — say which,
+    # rather than reporting "never tracked" for a directory that never existed.
+    if not run_dir.is_dir():
+        raise _die(f"no run {run} in {ws.solution_task_alias_dir}")
+
+    outcome = sync_run(run_dir, server_override=server)
+    # Sync reports; it never re-grades. Whatever happened here, the run's own
+    # exit code was decided when it ran, and a queue left on disk is not an
+    # error — only a refusal (wrong account, wrong server, rejected token) is.
+    if outcome.refused:
+        raise _die(outcome.message)
+    console.print(outcome.message)
 
 
 # Hidden until the scaffold is implemented — registered but not advertised in `--help`.

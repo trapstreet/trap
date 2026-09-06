@@ -19,9 +19,20 @@ import httpx
 class LiveApiError(Exception):
     """A live-sync call did not succeed. Always caught by the tracker."""
 
-    def __init__(self, message: str, *, status: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(message)
         self.status = status
+        #: The error body, when the server sent a JSON object. A 409 on the
+        #: checkpoint endpoint carries the generation the server actually holds,
+        #: which is the only way a retry can name the right one; every other
+        #: caller can ignore it.
+        self.payload: dict[str, Any] = payload or {}
 
     @property
     def credential_rejected(self) -> bool:
@@ -102,12 +113,41 @@ class LiveClient:
             json={"events": events},
         )
 
+    def checkpoint(
+        self,
+        run_ref: str,
+        *,
+        checkpoint_id: str,
+        expected_producer_generation: int,
+        snapshot: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Recover from a gap the server can never ack past.
+
+        A compare-and-swap on the producer generation: the server accepts only
+        if it still holds ``expected_producer_generation``, and answers with the
+        new one it opened. A 409 means someone else moved it first -- the
+        generation it does hold comes back in the error payload.
+        """
+        return self._request(
+            "POST",
+            f"/api/v2/local-runs/{run_ref}/checkpoint",
+            json={
+                "checkpoint_id": checkpoint_id,
+                "expected_producer_generation": expected_producer_generation,
+                "snapshot": snapshot,
+            },
+        )
+
     def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
         try:
             response = self._client.request(method, path, **kwargs)
             response.raise_for_status()
         except httpx.HTTPStatusError as e:
-            raise LiveApiError(f"http {e.response.status_code}", status=e.response.status_code) from None
+            raise LiveApiError(
+                f"http {e.response.status_code}",
+                status=e.response.status_code,
+                payload=_json_object(e.response),
+            ) from None
         except httpx.RequestError as e:
             raise LiveApiError(f"unreachable: {type(e).__name__}") from None
         try:
@@ -115,3 +155,16 @@ class LiveClient:
         except ValueError:
             raise LiveApiError("response was not JSON") from None
         return body if isinstance(body, dict) else {}
+
+
+def _json_object(response: httpx.Response) -> dict[str, Any]:
+    """The response body when it is a JSON object, else an empty one.
+
+    An error body is advisory: a server that answers a 409 with HTML must not
+    turn a recoverable conflict into a crash.
+    """
+    try:
+        body = response.json()
+    except ValueError:
+        return {}
+    return body if isinstance(body, dict) else {}

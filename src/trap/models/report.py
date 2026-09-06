@@ -47,6 +47,13 @@ class ReportData(BaseModel):
     trap_version: str = __version__
     # Host machine environment captured at run time; None when --no-environment.
     environment: Environment | None = None
+    # The live-sync session this run mirrored its progress to, when it had one — the id
+    # minted by `tp run` and frozen in the run's sidecar. It is what lets the website
+    # attach an uploaded report to the private session that watched the same execution,
+    # instead of guessing from timestamps. None whenever no session was created (sync
+    # off, no CLI token, an unwritable workspace) and absent from reports written by
+    # older CLIs, both of which stay valid and upload unchanged.
+    client_run_id: str | None = None
 
     @classmethod
     def from_run(
@@ -59,6 +66,7 @@ class ReportData(BaseModel):
         provenance: Provenance,
         grader_exit_code: int | None = None,
         environment: Environment | None = None,
+        client_run_id: str | None = None,
     ) -> ReportData:
         return cls(
             provenance=provenance,
@@ -70,4 +78,5 @@ class ReportData(BaseModel):
             solution_name=trap_config.name,
             profile=trap_config.profile,
             environment=environment,
+            client_run_id=client_run_id,
         )

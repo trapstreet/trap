@@ -76,6 +76,49 @@ def test_report_from_run_roundtrip():
     assert back.grader_metrics == {"passed": True}
 
 
+def test_a_report_without_a_client_run_id_still_validates():
+    # Reports written by older CLIs have no such field, and they must keep
+    # loading and uploading unchanged — the association is optional by design,
+    # not a new required part of the upload protocol.
+    legacy = {
+        "cases_results": [],
+        "grader_metrics": None,
+        "started_at_utc": "2026-05-09T14:30:00+00:00",
+        "finished_at_utc": "2026-05-09T14:30:05+00:00",
+    }
+    assert ReportData.model_validate(legacy).client_run_id is None
+
+
+def test_the_client_run_id_survives_the_json_round_trip():
+    # `tp submit` re-reads the report `tp run` wrote, so a field that serialises
+    # but does not parse back would associate nothing.
+    cfg = TrapConfig(cmd="x", tasks={"t": {"source": "y"}})
+    data = ReportData.from_run(
+        trap_config=cfg,
+        cases_results=(),
+        grader_metrics=None,
+        started_at_utc=datetime.now(UTC),
+        finished_at_utc=datetime.now(UTC),
+        provenance=Provenance(),
+        client_run_id="r-abc",
+    )
+    assert '"client_run_id":"r-abc"' in data.model_dump_json().replace(" ", "")
+    assert ReportData.model_validate_json(data.model_dump_json()).client_run_id == "r-abc"
+
+
+def test_a_run_with_no_live_session_reports_no_client_run_id():
+    cfg = TrapConfig(cmd="x", tasks={"t": {"source": "y"}})
+    data = ReportData.from_run(
+        trap_config=cfg,
+        cases_results=(),
+        grader_metrics=None,
+        started_at_utc=datetime.now(UTC),
+        finished_at_utc=datetime.now(UTC),
+        provenance=Provenance(),
+    )
+    assert data.client_run_id is None
+
+
 def test_traptask_minimal():
     t = TraptaskConfig(cases=({"id": "a"},))
     assert t.cases[0].id == "a"

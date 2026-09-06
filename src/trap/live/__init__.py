@@ -17,11 +17,15 @@ Layout inside a run directory::
 
     <run_dir>/live/session.json    identity + how far the server has acked
     <run_dir>/live/outbox.jsonl    every event, in order, durable before sending
+
+A CLI has no daemon, so whatever the network never took when the process exited
+stays in that outbox until ``tp sync`` (see :mod:`trap.live.sync`) picks it up.
 """
 
 from trap.live.client import LiveApiError, LiveClient
 from trap.live.identity import LiveSession, new_client_run_id
 from trap.live.outbox import Outbox, OutboxEvent
+from trap.live.sync import SyncReport, sync_run
 from trap.live.tracker import LiveTracker
 
 __all__ = [
@@ -31,5 +35,7 @@ __all__ = [
     "LiveTracker",
     "Outbox",
     "OutboxEvent",
+    "SyncReport",
     "new_client_run_id",
+    "sync_run",
 ]

@@ -112,6 +112,12 @@ class LiveTracker:
         return f"{self._client.server}/runs/{reference}"
 
     @property
+    def client_run_id(self) -> str:
+        """This run's global id — what the final report carries so the upload and
+        the private session that watched the same execution name one run."""
+        return self._session.client_run_id
+
+    @property
     def notice(self) -> str | None:
         """A single short line to show the user, or None. Never more than one per run."""
         return self._notice
@@ -230,7 +236,9 @@ class LiveTracker:
 
     def _pending_count(self) -> int:
         try:
-            return len(self._outbox.pending(self._session.acked_seq))
+            return len(
+                self._outbox.pending(self._session.acked_seq, generation=self._session.producer_generation)
+            )
         except Exception:  # pragma: no cover - defensive
             return 0
 

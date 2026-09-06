@@ -57,7 +57,7 @@ def start_tracking(
     session = LiveSession(client_run_id=new_client_run_id(), server=auth.server)
     outbox = Outbox(run_dir)
     try:
-        outbox.prepare()
+        outbox.prepare(session.producer_generation)
         # Written before the first case, so that a crash immediately after
         # still leaves a run that can be identified and resumed.
         session.save(run_dir)
