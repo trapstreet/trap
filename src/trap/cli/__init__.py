@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 
@@ -22,6 +23,7 @@ from trap.cli._console import _die, _env_truthy, console, err_console
 from trap.display import CaseProgress, OutputFormat, SubmitRenderer, renderer_factory
 from trap.environment import EnvironmentDetector
 from trap.git_ops import GitOpsError, LocalRepo, ParsedGitUrl
+from trap.live.setup import start_tracking
 from trap.loader import ConfigError, TrapLoader, TraptaskLoader
 from trap.models import Diagnosis, Provenance, ReportData
 from trap.runner import TaskRunner
@@ -187,6 +189,36 @@ def _confirm_submit(
         raise typer.Exit(code=1)
 
 
+def _mirrored(primary: Callable[[Any], None], mirror: Callable[[Any], None] | None) -> Callable[[Any], None]:
+    """Fan one runner callback out to the terminal and to live sync.
+
+    Terminal first, and the mirror is wrapped: progress reporting is not
+    allowed to interrupt a run, so a bug in the mirror surfaces as a missing
+    progress bar on a web page, never as a failed case.
+    """
+    if mirror is None:
+        return primary
+
+    def call(value: Any) -> None:
+        primary(value)
+        try:
+            mirror(value)
+        except Exception:
+            pass
+
+    return call
+
+
+def _grader_score(grader_metrics: Any) -> float | None:
+    """The run's aggregate score, when the grader produced a plain number for it."""
+    if not isinstance(grader_metrics, dict):
+        return None
+    score = grader_metrics.get("score")
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
+        return None
+    return float(score)
+
+
 @app.command()
 def run(
     solution: Annotated[
@@ -249,6 +281,23 @@ def run(
             help="Track LLM token usage and spend via the proxy (auto-detects providers from env).",
         ),
     ] = True,
+    live: Annotated[
+        bool,
+        typer.Option(
+            "--live/--no-live",
+            help="Mirror this run's progress to your paired trapstreet account (private to "
+            "you; publishes nothing). Off automatically when no CLI token is stored. "
+            "Also settable via TRAP_NO_LIVE=1.",
+        ),
+    ] = True,
+    server: Annotated[
+        str | None,
+        typer.Option(
+            "--server",
+            envvar="TRAPSTREET_URL",
+            help="Which trapstreet server to mirror progress to (default: the paired one).",
+        ),
+    ] = None,
 ) -> None:
     """Run a task against a solution.
 
@@ -292,8 +341,10 @@ def run(
     active_cases = traptask_yaml_loader.cases_with_tags(tags or [])
 
     started_at_local = datetime.now()
-    ts = started_at_local.isoformat(timespec="seconds")
     ws = Workspace(workspace.resolve(), SolutionIdentity.from_spec(solution).dirname, task_binding.alias)
+    # Microsecond-precision and collision-checked: two runs of the same
+    # (solution, task) started in the same second used to share a directory.
+    ts = ws.new_run_id(started_at_local)
 
     runner = TaskRunner(
         trap_config=trap_yaml_loader.config,
@@ -303,14 +354,37 @@ def run(
         run_dir=ws.run_dir(ts),
         cost_enabled=cost,
     )
+    # Private progress mirroring. None when sync is off or no CLI token is
+    # stored; from here on every interaction with it is optional and silent.
+    # The terminal renderer and the mirror share one event source -- the
+    # runner's existing callbacks -- so the renderer never learns about the
+    # network and the mirror never learns about the terminal.
+    tracker = start_tracking(
+        run_dir=ws.run_dir(ts),
+        case_ids=[case.id for case in active_cases],
+        server_override=server,
+        enabled=live,
+    )
+    if tracker is not None and output == OutputFormat.rich:
+        console.print(f"[dim]live · {tracker.run_url}[/dim]")
+
     prog_console = console if output == OutputFormat.rich else None
-    with CaseProgress(active_cases, console=prog_console) as prog:
-        case_results, grader_metrics, grader_exit_code = runner.run(
-            active_cases,
-            fail_fast=fail_fast,
-            on_case_start=prog.on_case_start,
-            on_case_done=prog.on_case_done,
-        )
+    try:
+        with CaseProgress(active_cases, console=prog_console) as prog:
+            case_results, grader_metrics, grader_exit_code = runner.run(
+                active_cases,
+                fail_fast=fail_fast,
+                on_case_start=_mirrored(prog.on_case_start, tracker.on_case_start if tracker else None),
+                on_case_done=_mirrored(prog.on_case_done, tracker.on_case_done if tracker else None),
+            )
+    except KeyboardInterrupt:
+        # A cancellation we can confirm. Anything we cannot confirm (SIGKILL)
+        # must read as "lost contact" on the site, never as a run that failed --
+        # so this is the only place a cancelled event is ever sent.
+        if tracker is not None:
+            tracker.on_run_cancelled(cases_done=0)
+            tracker.close()
+        raise
     finished_at_utc = datetime.now(UTC)
 
     # Capture the host machine environment (CPU/RAM/OS/Python) unless disabled.
@@ -345,6 +419,20 @@ def run(
     # are missing, not zero, so exit 3 to keep scripts from reading an unscored run as one
     # that completed.
     diagnosis = Diagnosis.from_report_data(report_data)
+
+    # Mirror the outcome, then stop. Deliberately after the report is on disk
+    # and after the diagnosis is computed, and deliberately unable to change
+    # either: a sync failure never alters the exit code (0 / 2 / 3).
+    if tracker is not None:
+        tracker.on_run_finished(
+            exit_code=diagnosis.exit_code,
+            cases_done=len(case_results),
+            score=_grader_score(grader_metrics),
+        )
+        tracker.close()
+        if tracker.notice and output == OutputFormat.rich:
+            err_console.print(f"[yellow]{tracker.notice}[/yellow]")
+
     if diagnosis.judge_broken:
         first = diagnosis.judge_failures[0]
         stderr_path = ws.run_dir(ts) / first.case_id / "judge" / "stderr"

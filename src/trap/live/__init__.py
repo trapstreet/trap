@@ -1,0 +1,35 @@
+"""Live progress sync — a run's progress mirrored to the paired trapstreet
+account while it happens.
+
+The whole package is built around one rule: **nothing here may change what the
+run does.** A network outage, an expired token, a read-only disk or a bug in
+this code must leave the solution, the judge, the grader, the report on disk
+and the process exit code exactly as they would have been with sync switched
+off. Every entry point is therefore failure-contained, and the sending happens
+on a background thread that the per-case path never waits on.
+
+The second rule is that only whitelisted progress leaves the machine: case
+ordinals rather than case names, error codes rather than messages, and no
+inputs, expected answers, outputs, stdout, paths, environment or command
+lines. A case name can *be* the question; a path can name a private client.
+
+Layout inside a run directory::
+
+    <run_dir>/live/session.json    identity + how far the server has acked
+    <run_dir>/live/outbox.jsonl    every event, in order, durable before sending
+"""
+
+from trap.live.client import LiveApiError, LiveClient
+from trap.live.identity import LiveSession, new_client_run_id
+from trap.live.outbox import Outbox, OutboxEvent
+from trap.live.tracker import LiveTracker
+
+__all__ = [
+    "LiveApiError",
+    "LiveClient",
+    "LiveSession",
+    "LiveTracker",
+    "Outbox",
+    "OutboxEvent",
+    "new_client_run_id",
+]
