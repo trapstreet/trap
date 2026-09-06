@@ -36,13 +36,21 @@ silently. Local sources are never gated.
 
 ### Exit codes
 
-trap reports facts, not a verdict — a completed run exits `0` regardless of per-case
-exit codes or scores. Gate CI on the grader output / `report.json`.
+Solution exit codes and scores do not set `tp run`'s exit code. To gate CI on the
+solution's result, read the grader output / `report.json`. Failures in the judge or
+grader can set exit `3`, because the run is missing scores.
 
 | Code | Condition |
 |---|---|
-| `0` | the run completed |
+| `0` | the run completed; neither every-case judge failure nor grader failure occurred |
 | `2` | trap-level failure — bad config, git error, declined remote, etc. |
+| `3` | the judge failed on every case, or the grader failed |
+
+A judge or grader fails if it exits non-zero, times out (`124`), or exits `0`
+without valid JSON output (`125`). A judge failure on only some cases does not
+by itself change `tp run`'s exit code; those cases have missing scores, not zero scores. The
+report is saved before exit `3`, so it remains available for diagnosis. See the
+[CLI reference](../reference/cli.md#tp-run) for the full contract.
 
 ## tp report
 

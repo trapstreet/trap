@@ -70,6 +70,10 @@ tp report [SOLUTION] [OPTIONS]
 Upload a run's `report.json` to trapstreet. Requires auth (`tp auth login` or
 `TRAPSTREET_API_KEY`).
 
+The current CLI runs the solution, judge, and grader locally with `tp run`.
+`tp submit` uploads that saved report; it does not ask the website to run the
+judge or grader.
+
 ```
 tp submit [SOLUTION] [OPTIONS]
 ```
@@ -77,11 +81,17 @@ tp submit [SOLUTION] [OPTIONS]
 | Flag | Default | Description |
 |---|---|---|
 | `SOLUTION` (positional) | cwd | local solution path holding `trap.yaml` |
-| `--task` | first task | task alias (also the trapstreet task id) |
+| `--task` | first task | task alias (the `tasks:` key in this solution's `trap.yaml`) |
 | `--run / -r` | `latest` | which run to upload |
 | `--workspace / -w` | `.trap` | directory containing run artifacts |
 | `--yes / -y` | `false` | skip the pre-submit confirmation and publish (for CI / scripts) |
 | `--allow-unanchored` | `false` | skip the pre-submit confirmation (like `--yes`) and acknowledge that a run with no git provenance is hidden from the leaderboard; also `TRAP_ALLOW_UNANCHORED=1` |
+
+**Task identity.** `--task` selects the local task binding and saved run. The alias
+is chosen by the solution author and need not match the website's task ID. The
+website identifies the task version from the report's
+`provenance.task.{repo, commit, subdirectory}`, so use the same local alias for
+`tp run`, `tp report`, and `tp submit`.
 
 **Pre-submit confirmation.** A submit is an irreversible external publish, so trap echoes
 what it is about to upload — solution, run id → server, a neutral result tally, and the
