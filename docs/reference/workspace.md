@@ -34,6 +34,9 @@ solution's `outputs/` clean.
                 │   ├── stdout                # the grader's metrics JSON
                 │   ├── stderr
                 │   └── meta.json
+                ├── live/                     # only present if live sync was on
+                │   ├── session.json          # this run's global id, account, server, ack
+                │   └── outbox.jsonl          # progress events, durable before sending
                 └── report.json               # full serialised run report
 ```
 
@@ -63,6 +66,17 @@ stale.
 **`{case_id}/solution/outputs/`** — holds **only** files the solution wrote; trap never writes here, so a judge can list it to see exactly what the solution produced.
 
 **`{case_id}/judge/stdout`** and **`grader/stdout`** — the JSON each actor emits, stored in the report as the case's `metrics` and the run's `grader_metrics`.
+
+**`live/session.json`** — written before the first case when live sync is on: the run's
+`client_run_id` (a global id, since a timestamp directory name is not an identity), the
+server and account it is mirrored to, and how far that server has acknowledged. The frozen
+account is what stops a queue being delivered to whoever logs in next.
+
+**`live/outbox.jsonl`** — one progress event per line, appended before anything is sent, so
+a run that could not reach the network still has its progress on disk. `tp sync` reads this
+file; a truncated final line from a killed process costs one event, not the queue. Deleting
+the `live/` directory only forfeits undelivered progress — the run itself, its artifacts and
+its report are untouched.
 
 **`report.json`** — the full run report in JSON format. Use `tp report --output json` to print it to stdout instead of reading the file directly.
 

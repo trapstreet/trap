@@ -79,6 +79,27 @@ class Workspace:
             raise FileNotFoundError(f"no completed runs in {self.solution_task_alias_dir}")
         return latest
 
+    def new_run_id(self, started_at: datetime) -> str:
+        """A run id for a run starting now, guaranteed not to name an existing directory.
+
+        Second precision used to be enough by inspection and is not: two runs
+        of the same (solution, task) started in the same second shared a
+        directory and overwrote each other's artifacts. Microsecond precision
+        removes that in practice, and the loop removes it in fact.
+
+        Still an ``isoformat`` string, deliberately -- ``latest`` finds runs by
+        parsing these names, and lexicographic order over them stays
+        chronological because a fractional part sorts after the bare second it
+        extends. The cross-machine identity of a run is its client_run_id, not
+        this.
+        """
+        candidate = started_at
+        while True:
+            name = candidate.isoformat(timespec="microseconds")
+            if not (self.solution_task_alias_dir / name).exists():
+                return name
+            candidate = candidate.replace(microsecond=(candidate.microsecond + 1) % 1_000_000)
+
     def run_dir(self, run: str) -> Path:
         """One run's directory; ``run="latest"`` is resolved at every use."""
         return self.solution_task_alias_dir / self.resolved_run(run)

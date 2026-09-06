@@ -60,6 +60,7 @@ graph TD
 | `cost` | Intercept LLM API calls via a local reverse proxy; tally spend | `CostProxy` |
 | `git_ops` | Clone/fetch repos; compute `{repo, commit}` provenance | `LocalRepo`, `RemoteRepo`, `ParsedGitUrl` |
 | `workspace` | `.trap` addressing (solution keys, run layout, derived `latest`) + `report.json` IO | `SolutionIdentity`, `Workspace` |
+| `live` | Mirror a run's progress to the paired account as it happens; `tp sync` sends whatever the network never took. Depends on `auth`/`models`; nothing depends on it, deliberately — sync must never change what a run does | `LiveTracker`, `Outbox`, `LiveSession`, `LiveClient` |
 | `environment` | Best-effort host machine detection | `EnvironmentDetector` |
 | `display` | Live progress bar; report + submit-result rendering | `CaseProgress`, `RichRenderer`, `JsonRenderer` |
 | `auth` | Login (OAuth), token store, upload client | `ApiClient`, `AuthStore` |

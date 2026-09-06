@@ -141,3 +141,23 @@ def test_runs_are_solution_scoped(make_project, runner, tmp_path):
     assert len(keys) == 2  # one namespace per solution, each deriving its own latest
     for key in keys:
         assert Workspace(root, key, "t").latest_run() is not None
+
+
+def test_two_runs_in_the_same_microsecond_get_different_directories(tmp_path):
+    """Second precision let two runs of one (solution, task) share a directory
+    and overwrite each other. Microseconds fix it in practice; this covers the
+    case where even those collide."""
+    from datetime import datetime
+
+    from trap.workspace import Workspace
+
+    ws = Workspace(tmp_path, "sol", "t")
+    started = datetime(2026, 9, 7, 1, 2, 3, 500)
+    first = ws.new_run_id(started)
+    (ws.solution_task_alias_dir / first).mkdir(parents=True)
+    second = ws.new_run_id(started)
+
+    assert first != second
+    # Still an isoformat name, so `latest` can still parse and order it.
+    assert datetime.fromisoformat(second) is not None
+    assert second > first
