@@ -1526,3 +1526,25 @@ def test_a_run_with_no_session_reports_none(make_project, runner, monkeypatch):
 
 def test_the_tracker_publishes_the_id_the_report_needs(tmp_path: Path):
     assert _tracker(tmp_path).client_run_id == "r-1"
+
+
+def test_the_pump_keeps_draining_until_told_to_stop(tmp_path: Path):
+    """The sender loop, driven without a thread.
+
+    Its body is only reached when a drain returns "more to come", which on a
+    real thread depends on whether the stop sentinel happened to land in the
+    same batch. That made the line's coverage a race — green locally, red on
+    CI — so the loop is exercised directly instead.
+    """
+    tracker = _tracker(tmp_path)
+    drains: list[int] = []
+
+    def drain_twice_then_stop() -> bool:
+        drains.append(1)
+        return len(drains) < 3
+
+    tracker._ensure_session = lambda: None  # type: ignore[method-assign]
+    tracker._drain_once = drain_twice_then_stop  # type: ignore[method-assign]
+    tracker._pump()
+
+    assert len(drains) == 3
