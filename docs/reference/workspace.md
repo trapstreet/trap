@@ -67,10 +67,18 @@ stale.
 
 **`{case_id}/judge/stdout`** and **`grader/stdout`** — the JSON each actor emits, stored in the report as the case's `metrics` and the run's `grader_metrics`.
 
-**`live/session.json`** — written before the first case when live sync is on: the run's
-`client_run_id` (a global id, since a timestamp directory name is not an identity), the
-server and account it is mirrored to, and how far that server has acknowledged. The frozen
-account is what stops a queue being delivered to whoever logs in next.
+**`live/session.json`** — written before the first case when live sync is on. Its fields:
+
+| Field | Meaning |
+|---|---|
+| `client_run_id` | the run's global id (a timestamp directory name is not an identity); the key every server call uses until `run_id` is known |
+| `server` | the trapstreet origin the run is mirrored to; a queue never moves servers |
+| `user_id` | the account the run is **frozen** to, copied at start from the id `tp auth login` verified and stored — no network call. `null` when the pairing was never verified: such a run is not adopted by whoever logs in later; `tp sync --claim` adopts it explicitly and fills this in |
+| `run_id` | the server's own id for the session, once a `PUT /api/v2/local-runs/{client_run_id}` has answered; `null` for a run that never reached the server (then `tp sync` opens the session first) |
+| `producer_generation` | the numbering generation the outbox's `client_seq` values belong to; `1` until a checkpoint opens a new one after a gap |
+| `acked_seq` | the highest contiguous `client_seq` the server has confirmed within that generation; everything at or below it is delivered |
+
+The frozen account is what stops a queue being delivered to whoever logs in next.
 
 **`live/outbox.jsonl`** — one progress event per line, appended before anything is sent, so
 a run that could not reach the network still has its progress on disk. `tp sync` reads this
@@ -78,7 +86,7 @@ file; a truncated final line from a killed process costs one event, not the queu
 the `live/` directory only forfeits undelivered progress — the run itself, its artifacts and
 its report are untouched.
 
-**`report.json`** — the full run report in JSON format. Use `tp report --output json` to print it to stdout instead of reading the file directly.
+**`report.json`** — the full run report in JSON format. Use `tp report --output json` to print it to stdout instead of reading the file directly. When the run's answers were also submitted for the site to judge, it carries `site_grading: {run_id, url}` naming the graded run; `client_run_id` names the live session.
 
 ## Re-displaying a run
 

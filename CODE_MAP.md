@@ -22,6 +22,7 @@ graph TD
     environment["environment<br/>host machine detect"]
     display["display<br/>progress / report / submit UI"]
     auth["auth<br/>login + ApiClient"]
+    live["live<br/>progress mirror · tp sync · site grading"]
     workspace["workspace<br/>.trap addressing + report IO"]
     models[("models<br/>pydantic data layer")]
 
@@ -31,8 +32,11 @@ graph TD
     cli --> environment
     cli --> display
     cli --> auth
+    cli --> live
     cli --> workspace
     cli --> models
+    live --> auth
+    live --> models
     loader --> git_ops
     loader --> models
     loader --> workspace
@@ -60,10 +64,10 @@ graph TD
 | `cost` | Intercept LLM API calls via a local reverse proxy; tally spend | `CostProxy` |
 | `git_ops` | Clone/fetch repos; compute `{repo, commit}` provenance | `LocalRepo`, `RemoteRepo`, `ParsedGitUrl` |
 | `workspace` | `.trap` addressing (solution keys, run layout, derived `latest`) + `report.json` IO | `SolutionIdentity`, `Workspace` |
-| `live` | Mirror a run's progress to the paired account as it happens; `tp sync` sends whatever the network never took. Depends on `auth`/`models`; nothing depends on it, deliberately — sync must never change what a run does | `LiveTracker`, `Outbox`, `LiveSession`, `LiveClient` |
+| `live` | Everything that talks to the paired server during and after a run, all of it fail-open. `tracker` mirrors progress (whitelisted events, heartbeats) from a sender thread; `delivery` is the one flow both the sender and `tp sync` use — verify the frozen identity, idempotently ensure the session, drain the outbox, persist the ack; `sync` is `tp sync` plus gap recovery by checkpoint; `grading` submits each case's answer for the site to judge when the task is an admitted evaluation. Depends on `auth`/`models`/`runner.layout`; only `cli` depends on it — nothing here may change what a run does | `LiveTracker`, `Delivery`, `Outbox`, `LiveSession`, `LiveClient`, `SiteGrader` |
 | `environment` | Best-effort host machine detection | `EnvironmentDetector` |
 | `display` | Live progress bar; report + submit-result rendering | `CaseProgress`, `RichRenderer`, `JsonRenderer` |
-| `auth` | Login (OAuth), token store, upload client | `ApiClient`, `AuthStore` |
+| `auth` | Login (OAuth / token) with `/api/me` verification, per-server token store carrying the verified `user_id`, upload client | `ApiClient`, `CredentialStore`, `ResolvedAuth` |
 
 ## 2. `tp run` runtime flow
 
@@ -80,7 +84,14 @@ flowchart TD
     H --> P["LocalRepo.provenance (solution + task git)<br/>EnvironmentDetector.detect (host)"]
     P --> S["Workspace.save_as_report → report.json"]
     S --> R["renderer: rich table / json"]
+    E -. "case / judge / grader stage callbacks" .-> L["LiveTracker → outbox → sender thread"]
+    E -. "on_case_done: solver stdout" .-> SG["SiteGrader → POST submissions"]
 ```
+
+The two dotted edges are observers: the runner calls them, `_mirrored` in `cli` wraps them
+so nothing they raise reaches a case, and neither can change a result, the report or the
+exit code. Provenance is probed *before* the run (it also decides whether site grading is
+possible: an unanchored task cannot be resolved to a revision).
 
 ## 3. Core data models (what lands in the report)
 

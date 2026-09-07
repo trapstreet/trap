@@ -296,7 +296,7 @@ class _Recorder:
         if self._fail:
             raise self._fail
         self.sessions.append(client_run_id)
-        return {"run": {"id": "rs_1"}}
+        return {"run": {"id": "rs_1", "producer_generation": 1}}
 
     def send_events(self, _run_ref, events):
         if self._fail:
@@ -308,7 +308,7 @@ class _Recorder:
         self.closed = True
 
 
-def _tracker(tmp_path: Path, client=None, case_ids=("c1", "c2")) -> LiveTracker:
+def _tracker(tmp_path: Path, client=None, case_ids=("c1", "c2"), **kwargs) -> LiveTracker:
     outbox = Outbox(tmp_path)
     outbox.prepare()
     return LiveTracker(
@@ -317,7 +317,14 @@ def _tracker(tmp_path: Path, client=None, case_ids=("c1", "c2")) -> LiveTracker:
         outbox=outbox,
         run_dir=tmp_path,
         case_ids=list(case_ids),
+        **kwargs,
     )
+
+
+def _ensured(tracker: LiveTracker) -> LiveTracker:
+    """A tracker whose session the server has already named: the fast path."""
+    tracker._ensured = True
+    return tracker
 
 
 def _sent(tracker: LiveTracker, client: _Recorder) -> list[dict]:
@@ -446,8 +453,10 @@ def test_being_offline_keeps_the_events_and_says_so_once(tmp_path: Path):
     tracker.close()
     assert tracker.notice is not None
     assert "kept locally" in tracker.notice
-    # The events are still on disk for a later sync.
+    # The events are still on disk for a later sync, and none was ever posted
+    # at a session that does not exist.
     assert len(Outbox(tmp_path).read_all()) == 2
+    assert client.batches == []
 
 
 def test_an_unwritable_outbox_disables_sync_without_raising(tmp_path: Path, monkeypatch):
@@ -557,15 +566,32 @@ def test_a_paired_cli_starts_tracking(tmp_path: Path, monkeypatch):
 class _StoreStub:
     """Stands in for CredentialStore: one server, one optional key."""
 
-    def __init__(self, key: str | None) -> None:
+    def __init__(self, key: str | None, user_id: str | None = None) -> None:
         self._key = key
+        self._user_id = user_id
 
     def load(self, server: str):
         from trap.auth.store import Credential
 
         if self._key is None:
             return None
-        return Credential(server=server, api_key=self._key)
+        return Credential(server=server, api_key=self._key, user_id=self._user_id)
+
+
+def test_the_owner_is_frozen_from_the_store_with_no_network_call(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("TRAP_NO_LIVE", raising=False)
+    monkeypatch.setattr("trap.live.setup.CredentialStore", lambda: _StoreStub(key="k", user_id="usr_a"))
+
+    class _Silent(_Recorder):
+        def whoami(self):
+            raise AssertionError("the run must not wait on the server to know its owner")
+
+    monkeypatch.setattr("trap.live.setup.LiveClient", lambda *a, **k: _Silent())  # type: ignore[arg-type]
+    tracker = start_tracking(run_dir=tmp_path, case_ids=["c1"])
+    assert tracker is not None
+    session = LiveSession.load(tmp_path)
+    assert session is not None and session.user_id == "usr_a"
+    tracker._thread = None  # never joined: this test is about what is on disk before the first case
 
 
 # -- CLI wiring --------------------------------------------------------------
@@ -634,6 +660,18 @@ class _FakeTracker:
     def on_case_done(self, result) -> None:
         self.calls.append(f"case_done:{result.case_id}")
 
+    def on_judge_started(self, case_id: str) -> None:
+        self.calls.append(f"judge_start:{case_id}")
+
+    def on_judge_finished(self, case_id: str, exit_code, score) -> None:
+        self.calls.append(f"judge_done:{case_id}:{exit_code}:{score}")
+
+    def on_grader_started(self) -> None:
+        self.calls.append("grader_start")
+
+    def on_grader_finished(self, exit_code, score) -> None:
+        self.calls.append(f"grader_done:{exit_code}:{score}")
+
     def on_run_finished(self, **kwargs) -> None:
         self.finished = kwargs
 
@@ -667,8 +705,16 @@ def test_tp_run_prints_the_run_url_and_mirrors_the_outcome(make_project, runner,
 
     assert result.exit_code == 0, result.output
     assert "https://srv/runs/r-1" in result.output
-    assert tracker.calls[:2] == ["case_start:c1", "case_done:c1"]
-    assert tracker.calls[-1] == "closed"
+    # Every stage, in execution order: the judge inside the case, the grader after.
+    assert tracker.calls == [
+        "case_start:c1",
+        "judge_start:c1",
+        "judge_done:c1:0:1.0",
+        "case_done:c1",
+        "grader_start",
+        "grader_done:0:1.0",
+        "closed",
+    ]
     assert tracker.finished == {"exit_code": 0, "cases_done": 1, "score": 1.0}
 
 
@@ -717,7 +763,7 @@ def test_ctrl_c_reports_a_cancellation_it_can_confirm(make_project, runner, monk
 
 def test_a_burst_is_coalesced_into_one_batch(tmp_path: Path):
     client = _Recorder()
-    tracker = _tracker(tmp_path, client)
+    tracker = _ensured(_tracker(tmp_path, client))
     # Fill the queue without a thread, then drain it synchronously.
     for ordinal in (1, 2):
         tracker._queue.put_nowait({"client_seq": ordinal, "type": "case_started"})
@@ -730,7 +776,7 @@ def test_a_burst_is_coalesced_into_one_batch(tmp_path: Path):
 
 def test_the_stop_sentinel_alone_sends_nothing(tmp_path: Path):
     client = _Recorder()
-    tracker = _tracker(tmp_path, client)
+    tracker = _ensured(_tracker(tmp_path, client))
     tracker._queue.put_nowait(tracker._stop)
     assert tracker._drain_once() is False
     assert client.batches == []
@@ -738,7 +784,7 @@ def test_the_stop_sentinel_alone_sends_nothing(tmp_path: Path):
 
 def test_draining_continues_while_events_keep_arriving(tmp_path: Path):
     client = _Recorder()
-    tracker = _tracker(tmp_path, client)
+    tracker = _ensured(_tracker(tmp_path, client))
     tracker._queue.put_nowait({"client_seq": 1, "type": "heartbeat"})
     assert tracker._drain_once() is True  # no sentinel yet
     assert len(client.batches) == 1
@@ -749,7 +795,7 @@ def test_a_batch_is_capped(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(tracker_module, "MAX_BATCH", 2)
     client = _Recorder()
-    tracker = _tracker(tmp_path, client)
+    tracker = _ensured(_tracker(tmp_path, client))
     for seq in range(1, 4):
         tracker._queue.put_nowait({"client_seq": seq, "type": "heartbeat"})
     tracker._drain_once()
@@ -793,8 +839,8 @@ def test_a_disabled_tracker_opens_no_session_and_sends_nothing(tmp_path: Path):
     client = _Recorder()
     tracker = _tracker(tmp_path, client)
     tracker._disable("off")
-    tracker._ensure_session()
-    tracker._send([{"client_seq": 1}])
+    tracker._queue.put_nowait({"client_seq": 1, "type": "heartbeat"})
+    assert tracker._drain_once() is True
     assert client.sessions == [] and client.batches == []
 
 
@@ -808,9 +854,11 @@ def test_the_account_is_only_resolved_once(tmp_path: Path):
 
     client = _CountingRecorder()
     tracker = _tracker(tmp_path, client)
-    tracker._ensure_session()
-    tracker._ensure_session()
+    for _ in range(2):
+        tracker._queue.put_nowait({"client_seq": 99, "type": "heartbeat"})
+        tracker._drain_once()
     assert len(calls) == 1
+    assert client.sessions == ["r-1"]
 
 
 def test_a_session_response_without_an_id_leaves_the_client_id_in_the_url(tmp_path: Path):
@@ -819,7 +867,7 @@ def test_a_session_response_without_an_id_leaves_the_client_id_in_the_url(tmp_pa
             return {}
 
     tracker = _tracker(tmp_path, _NoId())
-    tracker._ensure_session()
+    tracker._try_ensure()
     assert tracker.run_url == "https://srv/runs/r-1"
 
 
@@ -888,7 +936,7 @@ def test_an_ack_that_does_not_advance_is_ignored(tmp_path: Path):
     client = _Stuck()
     tracker = _tracker(tmp_path, client)
     tracker._session.acked_seq = 5
-    tracker._send([{"client_seq": 1}])
+    assert tracker._send([{"client_seq": 1}]) is False
     assert tracker._session.acked_seq == 5
 
 
@@ -936,30 +984,33 @@ def test_checkpoint_posts_the_compare_and_swap():
     def handler(request: httpx.Request) -> httpx.Response:
         seen["path"] = request.url.path
         seen["body"] = json.loads(request.content)
-        return httpx.Response(200, json={"producer_generation": 2, "ack_seq": 0})
+        return httpx.Response(200, json={"producer_generation": 2, "ack_seq": 0, "already_applied": False})
 
     result = _live_client(handler).checkpoint(
         "rs_1",
         checkpoint_id="cp-1",
         expected_producer_generation=1,
-        snapshot={"exec_status": "completed", "cases_done": 2, "cases_total": 2},
+        snapshot={"exec_status": "finished", "cases_done": 2, "cases_total": 2},
     )
-    assert result == {"producer_generation": 2, "ack_seq": 0}
+    assert result == {"producer_generation": 2, "ack_seq": 0, "already_applied": False}
     assert seen["path"] == "/api/v2/local-runs/rs_1/checkpoint"
     assert seen["body"] == {
         "checkpoint_id": "cp-1",
         "expected_producer_generation": 1,
-        "snapshot": {"exec_status": "completed", "cases_done": 2, "cases_total": 2},
+        "snapshot": {"exec_status": "finished", "cases_done": 2, "cases_total": 2},
     }
 
 
-def test_a_conflict_carries_the_generation_the_server_holds():
-    handler = lambda _r: httpx.Response(409, json={"producer_generation": 5})  # noqa: E731
+def test_a_conflict_is_a_409_with_a_machine_code():
+    # The web's shape: {"error": <message>, "code": "CONFLICT"} -- no generation.
+    body = {"error": "GENERATION_CONFLICT", "code": "CONFLICT"}
+    handler = lambda _r: httpx.Response(409, json=body)  # noqa: E731
     with pytest.raises(LiveApiError) as excinfo:
         _live_client(handler).checkpoint(
             "rs_1", checkpoint_id="cp-1", expected_producer_generation=1, snapshot={}
         )
-    assert excinfo.value.payload == {"producer_generation": 5}
+    assert excinfo.value.status == 409
+    assert excinfo.value.payload == body
 
 
 @pytest.mark.parametrize("response", [httpx.Response(409, text="<html>"), httpx.Response(409, json=[1])])
@@ -1032,21 +1083,38 @@ class _SyncClient:
         whoami_error: LiveApiError | None = None,
         sends: list[object] | None = None,
         checkpoints: list[object] | None = None,
+        generation: int | None = 1,
+        ensures: list[object] | None = None,
     ) -> None:
         self.server = "https://srv"
         self._user_id = user_id
         self._whoami_error = whoami_error
         self._sends = list(sends or [])
         self._checkpoints = list(checkpoints or [])
+        self._generation = generation
+        self._ensures = list(ensures or [])
         self.batches: list[list[dict]] = []
         self.refs: list[str] = []
         self.checkpoints_sent: list[dict] = []
+        self.ensured: list[dict] = []
         self.closed = False
 
     def whoami(self) -> str | None:
         if self._whoami_error is not None:
             raise self._whoami_error
         return self._user_id
+
+    def ensure_session(self, client_run_id: str, **kwargs):
+        self.ensured.append({"client_run_id": client_run_id, **kwargs})
+        if self._ensures:
+            answer = self._ensures.pop(0)
+            if isinstance(answer, LiveApiError):
+                raise answer
+            return answer
+        run: dict[str, object] = {"id": "rs_1"}
+        if self._generation is not None:
+            run["producer_generation"] = self._generation
+        return {"run": run}
 
     def send_events(self, run_ref: str, events: list[dict]):
         self.batches.append(events)
@@ -1067,12 +1135,12 @@ class _SyncClient:
         self.closed = True
 
 
-def _run_sync(tmp_path, monkeypatch, client=None, *, key="k", server_override=None, store=None):
+def _run_sync(tmp_path, monkeypatch, client=None, *, key="k", server_override=None, store=None, claim=False):
     from trap.live.sync import sync_run
 
     monkeypatch.setattr("trap.live.sync.CredentialStore", lambda: store or _StoreStub(key=key))
     monkeypatch.setattr("trap.live.sync.LiveClient", lambda *_a, **_k: client or _SyncClient())
-    return sync_run(tmp_path, server_override=server_override)
+    return sync_run(tmp_path, server_override=server_override, claim=claim)
 
 
 def test_an_untracked_run_is_said_plainly_and_is_not_an_error(tmp_path: Path, monkeypatch):
@@ -1161,20 +1229,75 @@ def test_a_rotated_token_for_the_same_person_still_delivers(tmp_path: Path, monk
     assert outcome.status == "delivered"
 
 
-def test_a_run_tracked_entirely_offline_freezes_its_account_on_first_contact(tmp_path: Path, monkeypatch):
+def test_a_run_that_froze_no_account_is_not_adopted_by_default(tmp_path: Path, monkeypatch):
     _queued(tmp_path, user_id=None)
-    outcome = _run_sync(tmp_path, monkeypatch, _SyncClient(user_id="usr_a"))
+    client = _SyncClient(user_id="usr_a")
+    outcome = _run_sync(tmp_path, monkeypatch, client)
+    # Whoever is logged in now is not necessarily who ran it. Refused, told
+    # how to adopt it explicitly, and nothing was sent or opened.
+    assert (outcome.status, outcome.remaining) == ("refused", 2)
+    assert "--claim" in outcome.message
+    assert client.batches == [] and client.ensured == []
+    reloaded = LiveSession.load(tmp_path)
+    assert reloaded is not None and reloaded.user_id is None
+
+
+def test_claiming_an_unowned_run_freezes_the_current_account(tmp_path: Path, monkeypatch):
+    _queued(tmp_path, user_id=None)
+    outcome = _run_sync(tmp_path, monkeypatch, _SyncClient(user_id="usr_a"), claim=True)
     assert outcome.status == "delivered"
     reloaded = LiveSession.load(tmp_path)
     assert reloaded is not None and reloaded.user_id == "usr_a"
 
 
-def test_a_server_that_will_not_say_who_we_are_leaves_the_account_unfrozen(tmp_path: Path, monkeypatch):
+def test_a_claim_needs_a_server_that_says_who_we_are(tmp_path: Path, monkeypatch):
     _queued(tmp_path, user_id=None)
-    outcome = _run_sync(tmp_path, monkeypatch, _SyncClient(user_id=None))
-    assert outcome.status == "delivered"
+    outcome = _run_sync(tmp_path, monkeypatch, _SyncClient(user_id=None), claim=True)
+    assert outcome.status == "refused"
+    assert "did not say which account" in outcome.message
     reloaded = LiveSession.load(tmp_path)
     assert reloaded is not None and reloaded.user_id is None
+
+
+def test_claim_changes_nothing_for_a_run_with_a_frozen_owner(tmp_path: Path, monkeypatch):
+    _queued(tmp_path, user_id="usr_a")
+    outcome = _run_sync(tmp_path, monkeypatch, _SyncClient(user_id="usr_b"), claim=True)
+    assert outcome.status == "refused"
+    assert "different account" in outcome.message
+
+
+# -- the session is ensured before anything is sent ----------------------------
+
+
+def test_a_run_that_began_offline_gets_its_session_opened_first(tmp_path: Path, monkeypatch):
+    """16.2 E: the first-offline run. No server id in the sidecar means the
+    server never heard of it; the events route would 404 forever."""
+    _queued(tmp_path, run_id=None)
+    client = _SyncClient()
+    outcome = _run_sync(tmp_path, monkeypatch, client)
+    assert outcome.status == "delivered"
+    assert [e["client_run_id"] for e in client.ensured] == ["r-1"]
+    # The PUT describes the run the way the sender would have, and the events
+    # then go to the id the server answered with.
+    assert client.ensured[0]["snapshot"] == {"cases_total": 2}
+    assert client.refs == ["rs_1"]
+    reloaded = LiveSession.load(tmp_path)
+    assert reloaded is not None and reloaded.run_id == "rs_1"
+
+
+def test_a_session_the_server_already_named_is_not_reopened(tmp_path: Path, monkeypatch):
+    _queued(tmp_path, run_id="rs_1")
+    client = _SyncClient()
+    assert _run_sync(tmp_path, monkeypatch, client).status == "delivered"
+    assert client.ensured == []
+
+
+def test_a_session_that_cannot_be_opened_keeps_the_queue(tmp_path: Path, monkeypatch):
+    _queued(tmp_path, run_id=None)
+    client = _SyncClient(ensures=[LiveApiError("http 503", status=503)])
+    outcome = _run_sync(tmp_path, monkeypatch, client)
+    assert (outcome.status, outcome.remaining) == ("stalled", 2)
+    assert client.batches == []
 
 
 def test_delivering_the_queue_records_the_acknowledgement(tmp_path: Path, monkeypatch):
@@ -1270,7 +1393,7 @@ def test_a_gap_is_declared_with_a_checkpoint_not_papered_over(tmp_path: Path, mo
     assert client.batches == []  # sending into a hole is pointless
     sent = client.checkpoints_sent[0]
     assert sent["expected_producer_generation"] == 1
-    assert sent["snapshot"] == {"exec_status": "completed", "cases_done": 2, "cases_total": 3}
+    assert sent["snapshot"] == {"exec_status": "finished", "cases_done": 2, "cases_total": 3}
     assert sent["checkpoint_id"].startswith("cp-")
     # The user is told the history is incomplete, in those words.
     assert "4 progress event(s) were lost" in outcome.message
@@ -1283,17 +1406,18 @@ def test_a_gap_is_declared_with_a_checkpoint_not_papered_over(tmp_path: Path, mo
     assert _run_sync(tmp_path, monkeypatch, _SyncClient()).status == "up_to_date"
 
 
+_CONFLICT = LiveApiError("http 409", status=409, payload={"error": "GENERATION_CONFLICT", "code": "CONFLICT"})
+
+
 def test_a_conflicting_checkpoint_is_retried_once_with_the_server_generation(tmp_path: Path, monkeypatch):
-    _gapped(tmp_path)
-    client = _SyncClient(
-        checkpoints=[
-            LiveApiError("http 409", status=409, payload={"producer_generation": 4}),
-            {"producer_generation": 5, "ack_seq": 0},
-        ]
-    )
+    _gapped(tmp_path, run_id="rs_1")
+    # The conflict body names no generation; the run itself does, via the
+    # idempotent PUT, which is where the retry learns the right one.
+    client = _SyncClient(generation=4, checkpoints=[_CONFLICT, {"producer_generation": 5, "ack_seq": 0}])
     outcome = _run_sync(tmp_path, monkeypatch, client)
     assert outcome.status == "recovered"
     assert [c["expected_producer_generation"] for c in client.checkpoints_sent] == [1, 4]
+    assert len(client.ensured) == 1
     # The same logical checkpoint, so the retry is idempotent server-side.
     assert len({c["checkpoint_id"] for c in client.checkpoints_sent}) == 1
     reloaded = LiveSession.load(tmp_path)
@@ -1301,8 +1425,8 @@ def test_a_conflicting_checkpoint_is_retried_once_with_the_server_generation(tmp
 
 
 def test_a_conflict_that_names_no_generation_gives_up_cleanly(tmp_path: Path, monkeypatch):
-    _gapped(tmp_path)
-    client = _SyncClient(checkpoints=[LiveApiError("http 409", status=409, payload={})])
+    _gapped(tmp_path, run_id="rs_1")
+    client = _SyncClient(generation=None, checkpoints=[_CONFLICT])
     outcome = _run_sync(tmp_path, monkeypatch, client)
     assert outcome.status == "stalled"
     assert len(client.checkpoints_sent) == 1
@@ -1310,14 +1434,16 @@ def test_a_conflict_that_names_no_generation_gives_up_cleanly(tmp_path: Path, mo
     assert reloaded is not None and reloaded.producer_generation == 1  # nothing changed
 
 
+def test_a_conflict_whose_re_read_fails_reports_that_failure(tmp_path: Path, monkeypatch):
+    _gapped(tmp_path, run_id="rs_1")
+    client = _SyncClient(checkpoints=[_CONFLICT], ensures=[LiveApiError("unreachable")])
+    outcome = _run_sync(tmp_path, monkeypatch, client)
+    assert (outcome.status, len(client.checkpoints_sent)) == ("offline", 1)
+
+
 def test_a_second_conflict_stops_competing(tmp_path: Path, monkeypatch):
-    _gapped(tmp_path)
-    client = _SyncClient(
-        checkpoints=[
-            LiveApiError("http 409", status=409, payload={"producer_generation": 4}),
-            LiveApiError("http 409", status=409, payload={"producer_generation": 6}),
-        ]
-    )
+    _gapped(tmp_path, run_id="rs_1")
+    client = _SyncClient(generation=4, checkpoints=[_CONFLICT, _CONFLICT])
     outcome = _run_sync(tmp_path, monkeypatch, client)
     assert (outcome.status, len(client.checkpoints_sent)) == ("stalled", 2)
 
@@ -1370,7 +1496,7 @@ def test_a_snapshot_of_a_run_still_in_flight_says_so(tmp_path: Path, monkeypatch
 
 @pytest.mark.parametrize(
     ("event_type", "status"),
-    [("run_finished", "completed"), ("run_failed", "failed"), ("run_cancelled", "cancelled")],
+    [("run_finished", "finished"), ("run_failed", "failed"), ("run_cancelled", "cancelled")],
 )
 def test_a_snapshot_reads_the_last_terminal_event(tmp_path: Path, monkeypatch, event_type, status):
     snapshot = _snapshot_of(tmp_path, monkeypatch, [(5, event_type, {"cases_done": 4}, 1)])
@@ -1417,7 +1543,7 @@ def test_a_snapshot_falls_back_to_the_saved_report(tmp_path: Path, monkeypatch):
     # No terminal event survived, but a report on disk is only ever written by a
     # run that finished.
     snapshot = _snapshot_of(tmp_path, monkeypatch, [(5, "case_started", {"ordinal": 1}, 1)])
-    assert snapshot == {"exec_status": "completed", "cases_done": 2, "cases_total": 2}
+    assert snapshot == {"exec_status": "finished", "cases_done": 2, "cases_total": 2}
 
 
 def test_a_corrupt_report_is_read_as_no_report(tmp_path: Path, monkeypatch):
@@ -1543,8 +1669,359 @@ def test_the_pump_keeps_draining_until_told_to_stop(tmp_path: Path):
         drains.append(1)
         return len(drains) < 3
 
-    tracker._ensure_session = lambda: None  # type: ignore[method-assign]
     tracker._drain_once = drain_twice_then_stop  # type: ignore[method-assign]
     tracker._pump()
 
     assert len(drains) == 3
+
+
+def test_the_pump_never_lets_an_exception_out_of_the_thread(tmp_path: Path):
+    tracker = _tracker(tmp_path)
+
+    def explode() -> bool:
+        raise RuntimeError("the sender is on fire")
+
+    tracker._drain_once = explode  # type: ignore[method-assign]
+    tracker._pump()  # must not raise
+    assert tracker.notice is not None and "RuntimeError" in tracker.notice
+
+
+# -- first-offline recovery (16.2 E) -----------------------------------------
+
+
+class _Flaky(_Recorder):
+    """A server that is down for the first ``failures`` session opens, then fine."""
+
+    def __init__(self, failures: int) -> None:
+        super().__init__()
+        self._failures = failures
+        self.attempts = 0
+
+    def ensure_session(self, client_run_id, **kwargs):
+        self.attempts += 1
+        if self.attempts <= self._failures:
+            raise LiveApiError("unreachable")
+        return super().ensure_session(client_run_id, **kwargs)
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _fill(tracker: LiveTracker, *types: str) -> None:
+    """Append real events, the way the run's thread does."""
+    for type_ in types:
+        tracker._emit(type_, {})
+
+
+def test_nothing_is_posted_until_the_session_exists(tmp_path: Path):
+    clock = _Clock()
+    client = _Flaky(failures=1)
+    tracker = _tracker(tmp_path, client, clock=clock, rng=lambda: 1.0)
+    _fill(tracker, "run_started", "case_started")
+    tracker._drain_once()  # the open fails; the events stay in the outbox
+    assert client.batches == []
+    assert tracker.notice is None  # transient: nothing to say yet
+
+    clock.now = 100.0  # the backoff has elapsed
+    _fill(tracker, "case_finished")
+    tracker._drain_once()  # the open succeeds; the whole backlog goes, in order
+    assert [e["type"] for e in client.batches[0]] == ["run_started", "case_started", "case_finished"]
+    assert tracker._session.acked_seq == 3
+    # Later events take the fast path, and nothing already acknowledged repeats.
+    _fill(tracker, "run_finished")
+    tracker._drain_once()
+    assert [e["type"] for e in client.batches[1]] == ["run_finished"]
+
+
+def test_the_session_open_backs_off_with_jitter_up_to_a_cap(tmp_path: Path):
+    from trap.live.tracker import ENSURE_BACKOFF_CAP
+
+    clock = _Clock()
+    client = _Flaky(failures=100)
+    tracker = _tracker(tmp_path, client, clock=clock, rng=lambda: 1.0)
+    waits: list[float] = []
+    for _ in range(8):
+        tracker._queue.put_nowait({"client_seq": 1, "type": "heartbeat"})
+        tracker._drain_once()
+        waits.append(tracker._next_ensure_at - clock.now)
+        clock.now = tracker._next_ensure_at
+    assert waits == [1, 2, 4, 8, 16, 30, 30, 30]
+    assert client.attempts == 8
+    assert max(waits) == ENSURE_BACKOFF_CAP
+
+
+def test_no_open_is_attempted_before_the_backoff_elapses(tmp_path: Path):
+    clock = _Clock()
+    client = _Flaky(failures=100)
+    tracker = _tracker(tmp_path, client, clock=clock, rng=lambda: 0.0)  # the shortest jitter
+    tracker._queue.put_nowait({"client_seq": 1, "type": "heartbeat"})
+    tracker._drain_once()
+    assert tracker._next_ensure_at == 0.5
+    clock.now = 0.4
+    tracker._queue.put_nowait({"client_seq": 2, "type": "heartbeat"})
+    tracker._drain_once()
+    assert client.attempts == 1
+
+
+def test_a_run_that_never_reaches_the_server_keeps_everything_for_tp_sync(tmp_path: Path):
+    client = _Flaky(failures=100)
+    tracker = _tracker(tmp_path, client, rng=lambda: 1.0)
+    tracker.start()
+    tracker.on_case_start("c1")
+    tracker.on_run_finished(exit_code=0, cases_done=1)
+    tracker.close()
+    assert client.batches == []
+    assert tracker.notice is not None and "3 progress event(s) not delivered" in tracker.notice
+    session = LiveSession.load(tmp_path)
+    assert session is not None and session.run_id is None and session.acked_seq == 0
+
+
+def test_a_backlog_longer_than_a_batch_goes_in_several(tmp_path: Path, monkeypatch):
+    from trap.live import tracker as tracker_module
+
+    monkeypatch.setattr(tracker_module, "MAX_BATCH", 2)
+    client = _Recorder()
+    tracker = _tracker(tmp_path, client)
+    _fill(tracker, "run_started", "case_started", "heartbeat")
+    tracker._drain_once()
+    assert [len(batch) for batch in client.batches] == [2, 1]
+
+
+def test_a_backlog_the_server_stops_taking_is_not_pushed_further(tmp_path: Path, monkeypatch):
+    from trap.live import tracker as tracker_module
+
+    monkeypatch.setattr(tracker_module, "MAX_BATCH", 2)
+
+    class _TakesOne(_Recorder):
+        def send_events(self, _run_ref, events):
+            self.batches.append(events)
+            return {"ack_seq": 0}
+
+    client = _TakesOne()
+    tracker = _tracker(tmp_path, client)
+    _fill(tracker, "run_started", "case_started", "heartbeat")
+    tracker._drain_once()
+    assert len(client.batches) == 1
+
+
+def test_the_run_owns_its_own_credential_so_the_sender_claims_an_unowned_run(tmp_path: Path):
+    client = _Recorder()
+    tracker = _tracker(tmp_path, client)  # the sidecar froze no account
+    tracker._try_ensure()
+    assert tracker._ensured is True
+    session = LiveSession.load(tmp_path)
+    assert session is not None and session.user_id == "usr_a"
+
+
+def test_the_sender_stops_when_the_credential_is_not_the_frozen_account(tmp_path: Path):
+    tracker = _tracker(tmp_path, _Recorder())
+    tracker._session.user_id = "usr_b"
+    tracker._try_ensure()
+    assert tracker._ensured is False
+    assert tracker.notice is not None and "not the account this run was frozen to" in tracker.notice
+
+
+def test_the_sender_stops_when_the_server_will_not_say_who_it_is(tmp_path: Path):
+    class _Anonymous(_Recorder):
+        def whoami(self):
+            return None
+
+    tracker = _tracker(tmp_path, _Anonymous())
+    tracker._try_ensure()
+    assert tracker._ensured is False
+    assert tracker.notice is not None and "did not say which account" in tracker.notice
+
+
+def test_a_frozen_account_continues_under_a_matching_token(tmp_path: Path):
+    tracker = _tracker(tmp_path, _Recorder())
+    tracker._session.user_id = "usr_a"
+    tracker._try_ensure()
+    assert tracker._ensured is True
+
+
+# -- heartbeats and stage events ---------------------------------------------
+
+
+def test_a_quiet_running_case_gets_a_heartbeat(tmp_path: Path, monkeypatch):
+    from trap.live import tracker as tracker_module
+
+    monkeypatch.setattr(tracker_module, "HEARTBEAT_SECONDS", 0.01)
+    client = _Recorder()
+    tracker = _ensured(_tracker(tmp_path, client))
+    tracker.on_case_start("c2")
+    tracker._drain_once()  # sends case_started
+    tracker._drain_once()  # nothing for a heartbeat interval: beat
+    tracker._drain_once()  # ...which the next wake sends
+    assert [e["type"] for e in client.batches[-1]] == ["heartbeat"]
+    assert client.batches[-1][0]["payload"] == {"ordinal": 2}
+
+
+def test_no_heartbeat_between_cases(tmp_path: Path, monkeypatch):
+    from trap.live import tracker as tracker_module
+
+    monkeypatch.setattr(tracker_module, "HEARTBEAT_SECONDS", 0.01)
+    client = _Recorder()
+    tracker = _ensured(_tracker(tmp_path, client))
+    tracker.on_case_start("c1")
+    tracker.on_case_done(_result(metrics={"score": 1}))
+    tracker._drain_once()
+    tracker._drain_once()
+    tracker._drain_once()
+    assert all(e["type"] != "heartbeat" for batch in client.batches for e in batch)
+
+
+def test_no_heartbeat_while_the_session_is_not_open(tmp_path: Path, monkeypatch):
+    # Offline heartbeats would only pile into the outbox at one per interval;
+    # the wake is used to retry the session instead.
+    from trap.live import tracker as tracker_module
+
+    monkeypatch.setattr(tracker_module, "HEARTBEAT_SECONDS", 0.01)
+    client = _Flaky(failures=100)
+    tracker = _tracker(tmp_path, client, rng=lambda: 0.0)
+    tracker.on_case_start("c1")
+    tracker._drain_once()
+    tracker._drain_once()
+    assert [e.type for e in Outbox(tmp_path).read_all()] == ["case_started"]
+
+
+def test_judge_events_carry_the_ordinal_and_only_whitelisted_fields(tmp_path: Path):
+    client = _Recorder()
+    tracker = _tracker(tmp_path, client)
+    tracker.start()
+    tracker.on_judge_started("c2")
+    tracker.on_judge_finished("c2", exit_code=0, score=0.5)
+    tracker.on_judge_finished("c1", exit_code=None, score=None)
+    tracker.on_judge_started("not-in-this-run")
+    tracker.on_judge_finished("not-in-this-run", exit_code=0, score=1.0)
+    events = _sent(tracker, client)
+    judged = [(e["type"], e["payload"]) for e in events if e["type"].startswith("judge_")]
+    assert judged == [
+        ("judge_started", {"ordinal": 2}),
+        ("judge_finished", {"ordinal": 2, "judge_exit_code": 0, "score": 0.5}),
+        ("judge_finished", {"ordinal": 1}),
+    ]
+
+
+def test_unacked_drops_what_the_backlog_already_sent(tmp_path: Path):
+    tracker = _tracker(tmp_path)
+    tracker._session.acked_seq = 2
+    kept = tracker._unacked([{"client_seq": 1}, {"client_seq": 2}, {"client_seq": 3}])
+    assert kept == [{"client_seq": 3}]
+
+
+# -- the shared delivery flow ------------------------------------------------
+
+
+def _delivery(tmp_path: Path, client=None, **session_kwargs):
+    from trap.live.delivery import Delivery
+
+    session = LiveSession(client_run_id="r-1", server="https://srv", **session_kwargs)
+    return Delivery(client or _SyncClient(), session, tmp_path, snapshot={"cases_total": 1})  # type: ignore[arg-type]
+
+
+def test_ensure_sends_the_whole_description_every_time(tmp_path: Path):
+    client = _SyncClient()
+    delivery = _delivery(tmp_path, client)
+    delivery.ensure()
+    delivery.ensure()
+    assert [e["snapshot"] for e in client.ensured] == [{"cases_total": 1}, {"cases_total": 1}]
+    assert client.ensured[0]["runtime"]["orchestrator"] == "tp"
+
+
+def test_ensure_persists_the_server_id_once(tmp_path: Path, monkeypatch):
+    saves: list[int] = []
+    monkeypatch.setattr(LiveSession, "save", lambda self, run_dir: saves.append(1))
+    delivery = _delivery(tmp_path)
+    delivery.ensure()
+    delivery.ensure()  # the same id again: nothing new to write
+    assert delivery.session.run_id == "rs_1"
+    assert len(saves) == 1
+
+
+def test_ensure_tolerates_a_bare_answer(tmp_path: Path):
+    delivery = _delivery(tmp_path, _SyncClient(ensures=[{}]))
+    assert delivery.ensure() == {}
+    assert delivery.server_generation() == 1  # the scripted answer ran out; the default view
+
+
+def test_a_sidecar_that_cannot_be_written_costs_nothing(tmp_path: Path, monkeypatch):
+    def denied(self, run_dir):
+        raise OSError("read-only")
+
+    monkeypatch.setattr(LiveSession, "save", denied)
+    delivery = _delivery(tmp_path)
+    delivery.persist()  # must not raise
+    assert delivery.send([{"client_seq": 1}]) == 1
+
+
+def test_establish_skips_the_open_when_the_server_already_named_the_run(tmp_path: Path):
+    client = _SyncClient()
+    delivery = _delivery(tmp_path, client, user_id="usr_a", run_id="rs_1")
+    assert delivery.establish(claim=False) is None
+    assert client.ensured == []
+
+
+# -- CLI: --claim and the stage hooks ----------------------------------------
+
+
+def test_tp_sync_claim_adopts_an_unowned_run(make_project, runner, monkeypatch):
+    from trap.cli import app
+
+    run_dir = _a_finished_run(make_project, runner, monkeypatch)
+    _queued(run_dir, user_id=None)
+    monkeypatch.setattr("trap.live.sync.CredentialStore", lambda: _StoreStub(key="k"))
+    monkeypatch.setattr("trap.live.sync.LiveClient", lambda *_a, **_k: _SyncClient(user_id="usr_a"))
+
+    refused = runner.invoke(app, ["sync"])
+    assert refused.exit_code == 2 and "--claim" in refused.output
+    claimed = runner.invoke(app, ["sync", "--claim"])
+    assert claimed.exit_code == 0, claimed.output
+    assert "delivered 2 queued event(s)" in claimed.output
+
+
+def test_mirrored_with_only_a_mirror_still_cannot_break_the_run():
+    from trap.cli import _mirrored
+
+    seen: list[tuple] = []
+    callback = _mirrored(None, lambda *args: seen.append(args))
+    assert callback is not None
+    callback("c1", {"score": 1}, 0)
+    assert seen == [("c1", {"score": 1}, 0)]
+
+    def explode(*_args):
+        raise RuntimeError("on fire")
+
+    callback = _mirrored(None, explode)
+    assert callback is not None
+    callback("c1")  # must not raise
+
+
+def test_mirrored_with_neither_side_is_nothing():
+    from trap.cli import _mirrored
+
+    assert _mirrored(None, None) is None
+
+
+def test_stage_hooks_without_a_tracker_add_nothing():
+    from trap.cli import _stage_hooks
+
+    assert _stage_hooks(None) == {}
+
+
+def test_a_rejected_token_on_the_fast_path_stops_the_sender(tmp_path: Path):
+    client = _Recorder(fail=LiveApiError("http 401", status=401))
+    tracker = _ensured(_tracker(tmp_path, client))
+    assert tracker._send([{"client_seq": 1}]) is False
+    assert tracker.notice is not None and "rejected" in tracker.notice
+
+
+def test_a_transient_failure_on_the_fast_path_says_nothing_yet(tmp_path: Path):
+    client = _Recorder(fail=LiveApiError("http 503", status=503))
+    tracker = _ensured(_tracker(tmp_path, client))
+    assert tracker._send([{"client_seq": 1}]) is False
+    assert tracker.notice is None  # close() reports what is left, once

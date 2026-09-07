@@ -8,6 +8,7 @@ import json
 import sys
 from pathlib import Path
 
+import httpx
 import pytest
 from typer.testing import CliRunner
 
@@ -33,14 +34,43 @@ print(json.dumps({"passed": ok, "score": sum(scores) / len(scores) if scores els
 """
 
 
+# The real ``ApiClient._client`` property, kept so one test can check what it builds.
+from trap.auth.client import ApiClient  # noqa: E402
+
+REAL_API_CLIENT_PROPERTY = ApiClient.__dict__["_client"]
+
+
+class _HermeticApiTransport:
+    """A non-data descriptor standing in for ``ApiClient._client``: an httpx client on a
+    mock transport whose ``/api/me`` answers with a fixed test account, so `tp auth login`
+    (which verifies the token at pairing) never reaches the real server from a test. Being
+    a non-data descriptor, a test that plants its own client in the instance ``__dict__``
+    still wins, exactly as it does against the real ``cached_property``."""
+
+    @staticmethod
+    def _handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/me":
+            return httpx.Response(200, json={"user": {"id": "usr_test", "name": "test"}})
+        return httpx.Response(599, json={"error": "hermetic tests: no such endpoint"})
+
+    def __get__(self, obj, objtype=None):
+        if obj is None:
+            return self
+        client = httpx.Client(base_url=obj._server, transport=httpx.MockTransport(self._handle))
+        obj.__dict__["_client"] = client
+        return client
+
+
 @pytest.fixture(autouse=True)
 def _isolate_auth(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Isolate every test from the developer's real credential store: strip the auth env
     vars and point the store at a throwaway path, so no test can read — or, via legacy
-    migration, rewrite — ~/.config/trapstreet/auth.json."""
+    migration, rewrite — ~/.config/trapstreet/auth.json. The API client is kept off the
+    network the same way (see ``_HermeticApiTransport``)."""
     monkeypatch.delenv("TRAPSTREET_URL", raising=False)
     monkeypatch.delenv("TRAPSTREET_API_KEY", raising=False)
     monkeypatch.setattr("trap.auth.store.CredentialStore.PATH", tmp_path / "auth.json")
+    monkeypatch.setattr("trap.auth.client.ApiClient._client", _HermeticApiTransport())
 
 
 @pytest.fixture(autouse=True)

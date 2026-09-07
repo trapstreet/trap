@@ -20,15 +20,23 @@ Layout inside a run directory::
 
 A CLI has no daemon, so whatever the network never took when the process exited
 stays in that outbox until ``tp sync`` (see :mod:`trap.live.sync`) picks it up.
+Both the in-run sender and ``tp sync`` deliver through :mod:`trap.live.delivery`:
+verify the frozen identity, ensure the session, drain, persist the ack.
+
+:mod:`trap.live.grading` is the other direction of the same conversation -- for
+a task the site has admitted as an evaluation, each case's answer is handed to
+the site to judge -- under the same rule: it can never change what the run does.
 """
 
 from trap.live.client import LiveApiError, LiveClient
+from trap.live.delivery import Delivery
 from trap.live.identity import LiveSession, new_client_run_id
 from trap.live.outbox import Outbox, OutboxEvent
 from trap.live.sync import SyncReport, sync_run
 from trap.live.tracker import LiveTracker
 
 __all__ = [
+    "Delivery",
     "LiveApiError",
     "LiveClient",
     "LiveSession",

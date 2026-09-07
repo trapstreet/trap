@@ -46,6 +46,8 @@ class TaskRunner:
         fail_fast: bool = False,
         on_case_start: Callable[[str], None] | None = None,
         on_case_done: Callable[[CaseResult], None] | None = None,
+        on_judge_start: Callable[[str], None] | None = None,
+        on_judge_done: Callable[[str, Any, int], None] | None = None,
     ) -> Iterator[CaseResult]:
         # TODO: parallelize case runs, but judge cases sequentially in the same order as case runs
         for case in cases:
@@ -56,7 +58,11 @@ class TaskRunner:
             if self.traptask_config.judge is not None:
                 # The judge never crashes the run: a broken one returns None metrics and
                 # its exit code, both attached to the case for the report to record.
+                if on_judge_start is not None:
+                    on_judge_start(case.id)
                 metrics, judge_exit_code = JudgeRunner(self, case.id, layout).run()
+                if on_judge_done is not None:
+                    on_judge_done(case.id, metrics, judge_exit_code)
                 case_result = case_result.model_copy(
                     update={"metrics": metrics, "judge_exit_code": judge_exit_code}
                 )
@@ -73,11 +79,24 @@ class TaskRunner:
         fail_fast: bool = False,
         on_case_start: Callable[[str], None] | None = None,
         on_case_done: Callable[[CaseResult], None] | None = None,
+        on_judge_start: Callable[[str], None] | None = None,
+        on_judge_done: Callable[[str, Any, int], None] | None = None,
+        on_grader_start: Callable[[], None] | None = None,
+        on_grader_done: Callable[[Any, int], None] | None = None,
     ) -> tuple[tuple[CaseResult, ...], Any, int | None]:
+        """Run every case, then the grader. The callbacks are stage observers --
+        ``on_judge_*`` fire around each case's judge, ``on_grader_*`` around the
+        run's grader -- and receive only what the report will record: the
+        actor's parsed metrics and exit code."""
 
         case_results = tuple(
             self._iter_cases(
-                cases, fail_fast=fail_fast, on_case_start=on_case_start, on_case_done=on_case_done
+                cases,
+                fail_fast=fail_fast,
+                on_case_start=on_case_start,
+                on_case_done=on_case_done,
+                on_judge_start=on_judge_start,
+                on_judge_done=on_judge_done,
             )
         )
 
@@ -86,6 +105,10 @@ class TaskRunner:
         if self.traptask_config.grader is not None:
             # The grader never crashes the run: a broken one returns None metrics and its
             # exit code (the run still completes and the report still saves).
+            if on_grader_start is not None:
+                on_grader_start()
             grader_metrics, grader_exit_code = GraderRunner(self, case_results).run()
+            if on_grader_done is not None:
+                on_grader_done(grader_metrics, grader_exit_code)
 
         return case_results, grader_metrics, grader_exit_code

@@ -16,6 +16,16 @@ from trap.models.results import CaseResult
 from trap.models.trap_yaml import Profile, TrapConfig
 
 
+class SiteGrading(BaseModel):
+    """Where this run's answers were sent to be judged by the site. Present only when
+    `tp run` opened a server-graded run for an admitted evaluation revision; the local
+    judge's scores in this report are then a preview, and the site's own verdicts live
+    at ``url``."""
+
+    run_id: str
+    url: str
+
+
 class ReportData(BaseModel):
     """Top-level upload protocol envelope."""
 
@@ -54,6 +64,10 @@ class ReportData(BaseModel):
     # off, no CLI token, an unwritable workspace) and absent from reports written by
     # older CLIs, both of which stay valid and upload unchanged.
     client_run_id: str | None = None
+    # The site-graded run this run's answers were submitted to, when there was one
+    # (see SiteGrading). None when site grading was off, unavailable, or the task has
+    # no admitted evaluation revision; absent from older reports.
+    site_grading: SiteGrading | None = None
 
     @classmethod
     def from_run(
@@ -67,6 +81,7 @@ class ReportData(BaseModel):
         grader_exit_code: int | None = None,
         environment: Environment | None = None,
         client_run_id: str | None = None,
+        site_grading: SiteGrading | None = None,
     ) -> ReportData:
         return cls(
             provenance=provenance,
@@ -79,4 +94,5 @@ class ReportData(BaseModel):
             profile=trap_config.profile,
             environment=environment,
             client_run_id=client_run_id,
+            site_grading=site_grading,
         )

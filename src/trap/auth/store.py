@@ -12,11 +12,19 @@ DEFAULT_SERVER = "https://trapstreet.run"
 class Credential(BaseModel):
     """A credential: the api_key paired with the server it was issued for. ``account`` is
     the account name the server echoes at login — shown once in the login message, never
-    persisted (identity lives on the server; ``tp auth status`` fetches it fresh)."""
+    persisted (identity lives on the server; ``tp auth status`` fetches it fresh).
+
+    ``user_id`` is the stable account id ``/api/me`` reported when the token was verified.
+    It is not a secret and it is persisted: a run freezes it into its live-sync sidecar
+    at start, with no network call, so that progress queued offline can later be checked
+    against the account it belongs to. None when pairing never reached the server (an
+    older store, or a login that could not verify) — such a token still submits, but runs
+    it tracks have no frozen owner until `tp auth status` or a later login verifies it."""
 
     server: str
     api_key: str
     account: str | None = None
+    user_id: str | None = None
 
 
 class CredentialStoreError(Exception):
@@ -38,7 +46,8 @@ class CredentialStore:
           }
         }
 
-    Only ``api_key`` is persisted per server — the account name is never written to disk.
+    Only ``api_key`` and the verified ``user_id`` are persisted per server — the account
+    name is never written to disk.
     A legacy flat file (a single unkeyed Credential object) is migrated to the keyed shape
     on first read. Every write re-applies mode 0600.
     """
@@ -136,5 +145,6 @@ class CredentialStore:
     @staticmethod
     def _to_stored(credential: Credential) -> dict[str, Any]:
         """The on-disk projection of a credential: everything except the server (it is the
-        dict key) and the account name (shown once at login, never persisted)."""
+        dict key) and the account name (shown once at login, never persisted). The verified
+        user id stays: it is identity, not a secret."""
         return credential.model_dump(exclude={"server", "account"}, exclude_none=True)

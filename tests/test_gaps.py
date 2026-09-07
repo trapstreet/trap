@@ -394,3 +394,45 @@ def test_client_builds_real_session():
     from trap.auth.client import ApiClient
 
     assert isinstance(ApiClient("https://srv/", "k")._client, httpx.Client)
+
+
+# -- TaskRunner: judge and grader stage hooks ------------------------------------
+
+
+def test_stage_hooks_fire_around_the_judge_and_the_grader(make_project, tmp_path):
+    from tests.conftest import GRADER_PASS, JUDGE_SCORE
+
+    make_project(
+        cmd="sh -c 'cat'",
+        stdin="input.txt",
+        cases=["c1", "c2"],
+        inputs={"c1": {"input.txt": "a"}, "c2": {"input.txt": "b"}},
+        expected={"c1": {"answer.txt": "a"}, "c2": {"answer.txt": "x"}},
+        judge_src=JUDGE_SCORE,
+        grader_src=GRADER_PASS,
+    )
+    tl = TrapLoader.from_solution(None)
+    ttl = TraptaskLoader.from_task_binding(tl.resolve_task(None), tl.trap_dir)
+    tr = TaskRunner(tl.config, tl.trap_dir, ttl.traptask_dir, ttl.traptask, tmp_path / "run", False)
+    seen: list[object] = []
+    tr.run(
+        ttl.traptask.cases,
+        on_case_start=lambda cid: seen.append(("case_start", cid)),
+        on_judge_start=lambda cid: seen.append(("judge_start", cid)),
+        on_judge_done=lambda cid, metrics, code: seen.append(("judge_done", cid, metrics, code)),
+        on_case_done=lambda r: seen.append(("case_done", r.case_id)),
+        on_grader_start=lambda: seen.append(("grader_start",)),
+        on_grader_done=lambda metrics, code: seen.append(("grader_done", metrics, code)),
+    )
+    assert seen == [
+        ("case_start", "c1"),
+        ("judge_start", "c1"),
+        ("judge_done", "c1", {"score": 1.0}, 0),
+        ("case_done", "c1"),
+        ("case_start", "c2"),
+        ("judge_start", "c2"),
+        ("judge_done", "c2", {"score": 0.0}, 0),
+        ("case_done", "c2"),
+        ("grader_start",),
+        ("grader_done", {"passed": False, "score": 0.5}, 0),
+    ]

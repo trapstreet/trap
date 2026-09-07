@@ -10,18 +10,29 @@ The other half of the job is staying out of the way. Every public method is
 wrapped so that no exception reaches the runner's callbacks, and sending
 happens on a daemon thread the run never joins except for one bounded flush at
 the end.
+
+The sender thread owns the network entirely. It opens the session through the
+shared :class:`~trap.live.delivery.Delivery` flow -- and keeps trying, with a
+jittered backoff, for as long as the run lasts -- and it posts no event until
+that has succeeded. Everything appended before then waits in the outbox, which
+is where the backlog is read from once the server answers. While a case is
+running and nothing else has happened for a while, the same thread emits a
+heartbeat so a long case does not read as lost contact.
 """
 
 from __future__ import annotations
 
 import queue
+import random
 import threading
+import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
 from trap.live.client import LiveApiError, LiveClient
+from trap.live.delivery import Delivery
 from trap.live.identity import LiveSession
 from trap.live.outbox import Outbox, OutboxError
 from trap.models.results import CaseResult
@@ -33,6 +44,33 @@ FLUSH_TIMEOUT_SECONDS = 3.0
 
 #: How many events one request may carry. Matches the server's batch limit.
 MAX_BATCH = 100
+
+#: How long a running case may be silent before the sender says it is still
+#: there. The site marks a session stale after 45 seconds without anything.
+HEARTBEAT_SECONDS = 10.0
+
+#: Retrying the session open: first wait, growth, and the ceiling. Jittered so
+#: many CLIs coming back online together do not knock in lockstep.
+ENSURE_BACKOFF_INITIAL = 1.0
+ENSURE_BACKOFF_CAP = 30.0
+
+#: Every event type this module can emit. The contract test checks each one
+#: against the server's allowlist; ``_emit`` is only ever called with these.
+EMITTED_EVENT_TYPES = frozenset(
+    {
+        "run_started",
+        "case_started",
+        "judge_started",
+        "judge_finished",
+        "case_finished",
+        "grader_started",
+        "grader_finished",
+        "run_finished",
+        "run_failed",
+        "run_cancelled",
+        "heartbeat",
+    }
+)
 
 
 def verdict_of(result: CaseResult) -> str | None:
@@ -58,7 +96,11 @@ def verdict_of(result: CaseResult) -> str | None:
 
 
 def _score_of(result: CaseResult) -> float | None:
-    metrics = result.metrics
+    return plain_score(result.metrics)
+
+
+def plain_score(metrics: Any) -> float | None:
+    """``metrics["score"]`` when it is a plain number -- never a bool, never prose."""
     if not isinstance(metrics, dict):
         return None
     score = metrics.get("score")
@@ -83,6 +125,8 @@ class LiveTracker:
         outbox: Outbox,
         run_dir: Path,
         case_ids: Sequence[str],
+        clock: Callable[[], float] = time.monotonic,
+        rng: Callable[[], float] = random.random,
     ) -> None:
         self._client = client
         self._session = session
@@ -92,11 +136,21 @@ class LiveTracker:
         # the wire only ever carries the number.
         self._ordinals = {case_id: index + 1 for index, case_id in enumerate(case_ids)}
         self._cases_total = len(case_ids)
+        self._delivery = Delivery(client, session, run_dir, snapshot={"cases_total": self._cases_total})
         self._queue: queue.Queue[object] = queue.Queue()
         self._thread: threading.Thread | None = None
         self._disabled = False
         self._notice: str | None = None
         self._stop = object()
+        # Session state, owned by the sender thread.
+        self._clock = clock
+        self._rng = rng
+        self._ensured = False
+        self._next_ensure_at = 0.0
+        self._ensure_delay = ENSURE_BACKOFF_INITIAL
+        # The case in flight, for heartbeats. Written by the run's thread, read
+        # by the sender; a stale read costs one heartbeat, never correctness.
+        self._current_ordinal: int | None = None
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -108,8 +162,7 @@ class LiveTracker:
         id, which is what lets the URL exist immediately instead of after a
         round trip that the first case would otherwise wait for.
         """
-        reference = self._session.run_id or self._session.client_run_id
-        return f"{self._client.server}/runs/{reference}"
+        return f"{self._client.server}/runs/{self._delivery.reference}"
 
     @property
     def client_run_id(self) -> str:
@@ -145,7 +198,8 @@ class LiveTracker:
         pending = self._pending_count()
         if pending and self._notice is None:
             self._notice = (
-                f"live sync: {pending} progress event(s) not delivered — they stay in this run's outbox"
+                f"live sync: {pending} progress event(s) not delivered — kept locally in this "
+                "run's outbox; run tp sync later"
             )
 
     # -- observer callbacks -------------------------------------------------
@@ -153,12 +207,14 @@ class LiveTracker:
     def on_case_start(self, case_id: str) -> None:
         ordinal = self._ordinals.get(case_id)
         if ordinal is not None:
+            self._current_ordinal = ordinal
             self._emit("case_started", {"ordinal": ordinal})
 
     def on_case_done(self, result: CaseResult) -> None:
         ordinal = self._ordinals.get(result.case_id)
         if ordinal is None:
             return
+        self._current_ordinal = None
         payload: dict[str, float | int | str] = {"ordinal": ordinal}
         verdict = verdict_of(result)
         if verdict is not None:
@@ -171,6 +227,22 @@ class LiveTracker:
         if result.cost is not None and result.cost.cost_usd is not None:
             payload["cost_usd"] = result.cost.cost_usd
         self._emit("case_finished", payload)
+
+    def on_judge_started(self, case_id: str) -> None:
+        ordinal = self._ordinals.get(case_id)
+        if ordinal is not None:
+            self._emit("judge_started", {"ordinal": ordinal})
+
+    def on_judge_finished(self, case_id: str, exit_code: int | None, score: float | None) -> None:
+        ordinal = self._ordinals.get(case_id)
+        if ordinal is None:
+            return
+        payload: dict[str, float | int | str] = {"ordinal": ordinal}
+        if exit_code is not None:
+            payload["judge_exit_code"] = exit_code
+        if score is not None:
+            payload["score"] = score
+        self._emit("judge_finished", payload)
 
     def on_grader_started(self) -> None:
         self._emit("grader_started", {})
@@ -243,32 +315,61 @@ class LiveTracker:
             return 0
 
     def _pump(self) -> None:
-        """Sender thread: open the session, then ship batches until told to stop."""
-        self._ensure_session()
-        while self._drain_once():
-            pass
+        """Sender thread: keep draining until told to stop. Never lets an
+        exception escape -- a traceback from a background thread is exactly the
+        kind of noise this package promises not to make."""
+        try:
+            while self._drain_once():
+                pass
+        except Exception as e:
+            self._disable(f"live sync off ({e.__class__.__name__})")
 
     def _drain_once(self) -> bool:
-        """Block for one item, coalesce whatever else is queued, send it.
+        """One wake of the sender: a batch, a session attempt, or a heartbeat.
 
-        Split out of the thread body so the batching rules are testable without
-        racing a thread: everything here is synchronous given a filled queue.
-        Returns False once the stop sentinel has been seen.
+        Split out of the thread body so the rules are testable without racing a
+        thread: everything here is synchronous given a filled queue. Returns
+        False once the stop sentinel has been seen.
+
+        Until the session is established nothing is posted. Whatever arrived
+        meanwhile is already in the outbox, so it is not lost by being taken
+        off the queue here -- it is sent as the backlog the moment the server
+        answers.
         """
         batch, stopping = self._collect()
-        if batch:
+        if self._disabled:
+            return not stopping
+        if not self._ensured:
+            self._try_ensure()
+            if self._ensured:
+                self._send_backlog()
+        elif batch := self._unacked(batch):
             self._send(batch)
+        elif not stopping and self._current_ordinal is not None:
+            # A quiet interval in the middle of a case: say it is still running.
+            self._emit("heartbeat", {"ordinal": self._current_ordinal})
         return not stopping
 
+    def _unacked(self, batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Drop what the backlog already delivered: an event queued before the
+        session opened was sent from the outbox, and resending it would only
+        cost the server a duplicate to recognise."""
+        return [event for event in batch if event["client_seq"] > self._session.acked_seq]
+
     def _collect(self) -> tuple[list[dict[str, Any]], bool]:
-        """One blocking take, then everything already waiting, up to a batch.
+        """One bounded take, then everything already waiting, up to a batch.
 
         Coalescing matters because a run emits several events per case; without
-        it a twenty-case run costs sixty requests instead of a handful.
+        it a twenty-case run costs sixty requests instead of a handful. The
+        first take gives up after a heartbeat interval so the sender also wakes
+        when nothing is happening -- to retry the session, or to beat.
         """
         batch: list[dict[str, Any]] = []
         stopping = False
-        item = self._queue.get()
+        try:
+            item = self._queue.get(timeout=HEARTBEAT_SECONDS)
+        except queue.Empty:
+            return batch, stopping
         if item is self._stop:
             stopping = True
         else:
@@ -284,42 +385,50 @@ class LiveTracker:
             batch.append(extra)  # type: ignore[arg-type]
         return batch, stopping
 
-    def _ensure_session(self) -> None:
-        if self._disabled:
-            return
-        try:
-            # Freeze the account this run belongs to before anything is sent.
-            # Without it, events queued now could later be delivered under a
-            # different login (see LiveSession.belongs_to).
-            if self._session.user_id is None:
-                self._session.user_id = self._client.whoami()
-                self._persist()
-            data = self._client.ensure_session(
-                self._session.client_run_id,
-                snapshot={"cases_total": self._cases_total},
-                runtime={"orchestrator": "tp", "executor": "tp"},
-            )
-        except LiveApiError as e:
-            self._handle_api_error(e)
-            return
-        run = data.get("run")
-        if isinstance(run, dict) and isinstance(run.get("id"), str):
-            self._session.run_id = run["id"]
-            self._persist()
+    def _try_ensure(self) -> None:
+        """Verify identity and open the session, if the backoff allows it now.
 
-    def _send(self, events: list[dict[str, Any]]) -> None:
-        if self._disabled:
+        The run's own credential is the one that started it, so a sidecar with
+        no frozen account is claimed here -- this is the process that owns the
+        run, not a later login -- and the verified id is frozen from then on.
+        """
+        now = self._clock()
+        if now < self._next_ensure_at:
             return
-        reference = self._session.run_id or self._session.client_run_id
         try:
-            data = self._client.send_events(reference, events)
+            refusal = self._delivery.establish(claim=True)
         except LiveApiError as e:
             self._handle_api_error(e)
+            self._schedule_retry(now)
             return
-        ack = data.get("ack_seq")
-        if isinstance(ack, int) and ack > self._session.acked_seq:
-            self._session.acked_seq = ack
-            self._persist()
+        if refusal == "unidentified":
+            self._disable(f"live sync off: {self._client.server} did not say which account this token is")
+            return
+        if refusal is not None:
+            self._disable("live sync off: the stored credential is not the account this run was frozen to")
+            return
+        self._ensured = True
+
+    def _schedule_retry(self, now: float) -> None:
+        jitter = 0.5 + 0.5 * self._rng()
+        self._next_ensure_at = now + self._ensure_delay * jitter
+        self._ensure_delay = min(self._ensure_delay * 2, ENSURE_BACKOFF_CAP)
+
+    def _send_backlog(self) -> None:
+        """Everything the server has not acknowledged, oldest first, in batches."""
+        pending = self._outbox.pending(self._session.acked_seq, generation=self._session.producer_generation)
+        for start in range(0, len(pending), MAX_BATCH):
+            if not self._send([event.wire() for event in pending[start : start + MAX_BATCH]]):
+                return
+
+    def _send(self, events: list[dict[str, Any]]) -> bool:
+        """Post one batch. False when the server did not take it, or took it
+        and moved nothing -- pushing the next batch would only repeat that."""
+        try:
+            return self._delivery.send(events) is not None
+        except LiveApiError as e:
+            self._handle_api_error(e)
+            return False
 
     def _handle_api_error(self, error: LiveApiError) -> None:
         if error.credential_rejected:
@@ -327,14 +436,6 @@ class LiveTracker:
             # fallback to another stored credential or another server: the
             # queue belongs to one account.
             self._disable("live sync off: this server rejected the CLI token")
-            return
-        # Everything else -- offline, 5xx, rate limited -- is transient. Say
-        # nothing beyond one line, keep the events, let `tp sync` deal with it.
-        if self._notice is None:
-            self._notice = "live sync: progress not reaching the site — events kept locally"
-
-    def _persist(self) -> None:
-        try:
-            self._session.save(self._run_dir)
-        except Exception:  # pragma: no cover - defensive
-            pass
+        # Everything else -- offline, 5xx, rate limited -- is transient: the
+        # events stay in the outbox, the next wake tries again, and whatever is
+        # still undelivered at the end is reported once, by close().

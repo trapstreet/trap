@@ -10,12 +10,13 @@ from trap.auth import (
     ApiClient,
     ApiError,
     BrowserProvider,
+    Credential,
     CredentialStore,
     CredentialStoreError,
     ResolvedAuth,
     TokenProvider,
 )
-from trap.cli._console import _die, console
+from trap.cli._console import _die, console, err_console
 
 auth_app = typer.Typer(help="Manage authentication.")
 
@@ -59,6 +60,14 @@ def auth_login(
     except (ValueError, TimeoutError) as e:
         raise _die(e) from None
 
+    # Pairing is where the account behind the token is established. The id is
+    # stored beside the token so that every later run can freeze its owner without
+    # a network call; a token the server refuses outright is not stored at all.
+    try:
+        auth_data = auth_data.model_copy(update={"user_id": _verified_user_id(auth_data)})
+    except ApiError as e:
+        raise _die(f"{e} — nothing was saved") from None
+
     try:
         path = CredentialStore().save(auth_data)
     except CredentialStoreError as e:
@@ -68,6 +77,28 @@ def auth_login(
         + (f" · account [bold]{auth_data.account}[/bold]" if auth_data.account else "")
         + f" · token saved to {path}"
     )
+    if auth_data.user_id is None:
+        err_console.print(
+            "[yellow]the server did not confirm which account this token belongs to; runs "
+            "tracked with it have no frozen owner until [bold]tp auth status[/bold] can verify "
+            "it — `tp sync` will then need --claim for those runs.[/yellow]"
+        )
+
+
+def _verified_user_id(credential: Credential) -> str | None:
+    """Ask the server who this token is, at pairing time.
+
+    A refused token (401) raises so the login fails visibly. An unreachable server
+    or a server error does not: the token may well be good, and refusing to pair
+    offline would make CI setups that pre-provision a token impossible. Those
+    return None, which the caller reports once."""
+    try:
+        return ApiClient(credential.server, credential.api_key).verified_user_id()
+    except ApiError as e:
+        if e.status == 401:
+            raise
+        err_console.print(f"[yellow]could not verify the token with {credential.server}: {e}[/yellow]")
+        return None
 
 
 @auth_app.command("logout")
@@ -132,3 +163,21 @@ def auth_status(
     user = me.get("user") or {}
     identity = user.get("name") or user.get("email") or "(unknown)"
     console.print(f"  user      {identity}\n[green]✓ token is valid[/green]")
+    _refresh_stored_user_id(store, resolved, user.get("id"))
+
+
+def _refresh_stored_user_id(store: CredentialStore, resolved: ResolvedAuth, user_id: object) -> None:
+    """Record a freshly verified account id beside the stored token.
+
+    This is how a pairing made by an older CLI — which stored only the token —
+    acquires the frozen owner that live sync needs. Only the stored credential is
+    touched, only when the id is new, and a write failure is not an error: status
+    was asked to report, and it has."""
+    if resolved.api_key_source != "stored" or not isinstance(user_id, str) or user_id == resolved.user_id:
+        return
+    try:
+        stored = store.load(resolved.server)
+        if stored is not None:
+            store.save(stored.model_copy(update={"user_id": user_id}))
+    except (CredentialStoreError, OSError):
+        return

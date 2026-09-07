@@ -288,3 +288,142 @@ def test_submit_corrupt_store_errors(make_project, runner, tmp_path, monkeypatch
     res = runner.invoke(app, ["submit", "--task", "t"])
     assert res.exit_code == 2
     assert "credential store" in res.output
+
+
+# -- the verified account id, stored at pairing --------------------------------
+
+
+def _me(user_id: str | None = "usr_a"):
+    def get_me(self):
+        user = {"name": "Alice"}
+        if user_id is not None:
+            user["id"] = user_id
+        return {"user": user}
+
+    return get_me
+
+
+def test_auth_login_stores_the_verified_user_id(runner, tmp_path, monkeypatch):
+    _store_at(monkeypatch, tmp_path)
+    monkeypatch.setattr("trap.auth.client.ApiClient.get_me", _me("usr_a"))
+    res = runner.invoke(app, ["auth", "login", "--with-token"], input="mytoken\n")
+    assert res.exit_code == 0, res.output
+    stored = CredentialStore().load()
+    assert stored is not None and stored.user_id == "usr_a"
+    # It is on disk, next to the token, in the clear: identity, not a secret.
+    assert json.loads((tmp_path / "auth.json").read_text())["credentials"][DEFAULT_SERVER] == {
+        "api_key": "mytoken",
+        "user_id": "usr_a",
+    }
+
+
+def test_auth_login_refuses_a_token_the_server_rejects(runner, tmp_path, monkeypatch):
+    from trap.auth import ApiError
+
+    _store_at(monkeypatch, tmp_path)
+
+    def rejected(self):
+        raise ApiError("token is invalid", status=401)
+
+    monkeypatch.setattr("trap.auth.client.ApiClient.get_me", rejected)
+    res = runner.invoke(app, ["auth", "login", "--with-token"], input="bad\n")
+    assert res.exit_code == 2
+    assert "token is invalid" in res.output and "nothing was saved" in res.output
+    assert CredentialStore().load() is None
+
+
+def test_auth_login_offline_still_pairs_but_says_the_owner_is_unverified(runner, tmp_path, monkeypatch):
+    from trap.auth import ApiError
+
+    _store_at(monkeypatch, tmp_path)
+
+    def unreachable(self):
+        raise ApiError("server unreachable")
+
+    monkeypatch.setattr("trap.auth.client.ApiClient.get_me", unreachable)
+    res = runner.invoke(app, ["auth", "login", "--with-token"], input="mytoken\n")
+    assert res.exit_code == 0, res.output
+    assert "could not verify" in res.output and "--claim" in res.output
+    stored = CredentialStore().load()
+    assert stored is not None and stored.api_key == "mytoken" and stored.user_id is None
+
+
+def test_auth_login_with_a_server_that_names_no_id(runner, tmp_path, monkeypatch):
+    _store_at(monkeypatch, tmp_path)
+    monkeypatch.setattr("trap.auth.client.ApiClient.get_me", _me(None))
+    res = runner.invoke(app, ["auth", "login", "--with-token"], input="mytoken\n")
+    assert res.exit_code == 0, res.output
+    assert "did not confirm which account" in res.output
+    stored = CredentialStore().load()
+    assert stored is not None and stored.user_id is None
+
+
+def test_auth_status_records_the_id_for_a_pairing_made_before_it_was_stored(runner, tmp_path, monkeypatch):
+    _store_at(monkeypatch, tmp_path)
+    CredentialStore().save(Credential(server=DEFAULT_SERVER, api_key="k"))  # an older pairing
+    monkeypatch.setattr("trap.auth.client.ApiClient.get_me", _me("usr_a"))
+    res = runner.invoke(app, ["auth", "status"])
+    assert res.exit_code == 0, res.output
+    stored = CredentialStore().load()
+    assert stored is not None and stored.user_id == "usr_a"
+
+
+def test_auth_status_leaves_a_matching_id_alone(runner, tmp_path, monkeypatch):
+    _store_at(monkeypatch, tmp_path)
+    CredentialStore().save(Credential(server=DEFAULT_SERVER, api_key="k", user_id="usr_a"))
+    writes: list[object] = []
+    monkeypatch.setattr("trap.auth.store.CredentialStore.save", lambda self, data: writes.append(data))
+    monkeypatch.setattr("trap.auth.client.ApiClient.get_me", _me("usr_a"))
+    assert runner.invoke(app, ["auth", "status"]).exit_code == 0
+    assert writes == []
+
+
+def test_auth_status_never_writes_an_env_token_to_disk(runner, tmp_path, monkeypatch):
+    _store_at(monkeypatch, tmp_path)
+    monkeypatch.setenv("TRAPSTREET_API_KEY", "env-key")
+    monkeypatch.setattr("trap.auth.client.ApiClient.get_me", _me("usr_a"))
+    assert runner.invoke(app, ["auth", "status"]).exit_code == 0
+    assert not (tmp_path / "auth.json").exists()
+
+
+def test_auth_status_survives_a_store_it_cannot_update(runner, tmp_path, monkeypatch):
+    from trap.auth import CredentialStoreError
+
+    _store_at(monkeypatch, tmp_path)
+    CredentialStore().save(Credential(server=DEFAULT_SERVER, api_key="k"))
+    monkeypatch.setattr("trap.auth.client.ApiClient.get_me", _me("usr_a"))
+
+    real_load = CredentialStore.load
+    loads: list[int] = []
+
+    def broken_at_the_refresh(self, server=DEFAULT_SERVER):
+        loads.append(1)
+        if len(loads) == 1:
+            return real_load(self, server)
+        raise CredentialStoreError("locked")
+
+    monkeypatch.setattr("trap.auth.store.CredentialStore.load", broken_at_the_refresh)
+    res = runner.invoke(app, ["auth", "status"])
+    # Status was asked to report, and it has; the failed refresh is silent.
+    assert res.exit_code == 0, res.output
+    assert "valid" in res.output
+
+
+def test_auth_status_skips_a_credential_that_vanished_meanwhile(runner, tmp_path, monkeypatch):
+    _store_at(monkeypatch, tmp_path)
+    CredentialStore().save(Credential(server=DEFAULT_SERVER, api_key="k"))
+    monkeypatch.setattr("trap.auth.client.ApiClient.get_me", _me("usr_a"))
+    real_load = CredentialStore.load
+    loads: list[int] = []
+
+    def load_once(self, server=DEFAULT_SERVER):
+        loads.append(1)
+        # The first read resolves the credential; by the refresh it is gone.
+        return real_load(self, server) if len(loads) == 1 else None
+
+    monkeypatch.setattr("trap.auth.store.CredentialStore.load", load_once)
+    writes: list[object] = []
+    monkeypatch.setattr("trap.auth.store.CredentialStore.save", lambda self, data: writes.append(data))
+    res = runner.invoke(app, ["auth", "status"])
+    assert res.exit_code == 0, res.output
+    assert len(loads) == 2 and writes == []
