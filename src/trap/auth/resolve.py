@@ -26,6 +26,10 @@ class ResolvedAuth(BaseModel):
     server_source: ServerSource
     api_key: str | None
     api_key_source: KeySource | None
+    #: The verified account id stored next to the token at pairing. None for a token
+    #: from the environment (nothing was ever verified for it) and for a stored token
+    #: that never was; a run then starts with no frozen owner.
+    user_id: str | None = None
 
     @classmethod
     def resolve(cls, store: CredentialStore, server_override: str | None = None) -> ResolvedAuth:
@@ -54,6 +58,7 @@ class ResolvedAuth(BaseModel):
                 server_source=server_source,
                 api_key=credential.api_key,
                 api_key_source="stored",
+                user_id=credential.user_id,
             )
         return cls(server=server, server_source=server_source, api_key=None, api_key_source=None)
 

@@ -9,7 +9,13 @@ import httpx
 
 class ApiError(Exception):
     """A trapstreet API call failed — bad status, unreachable server, or invalid token.
-    Carries a user-facing message; the CLI maps it to a clean error (no traceback)."""
+    Carries a user-facing message; the CLI maps it to a clean error (no traceback).
+    ``status`` is the HTTP status when there was one, so a caller can tell a token the
+    server refused (401) from a server it could not reach (None)."""
+
+    def __init__(self, message: str, *, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 class ApiClient:
@@ -38,10 +44,20 @@ class ApiClient:
             return resp.json()
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 401:
-                raise ApiError("token is invalid") from None
-            raise ApiError(f"server error ({e.response.status_code})") from None
+                raise ApiError("token is invalid", status=401) from None
+            status = e.response.status_code
+            raise ApiError(f"server error ({status})", status=status) from None
         except httpx.RequestError:
             raise ApiError("server unreachable") from None
+
+    def verified_user_id(self) -> str | None:
+        """The stable account id behind this token, from ``/api/me``, or None when the
+        server does not report one. Raises ``ApiError`` like ``get_me``."""
+        user = self.get_me().get("user")
+        if not isinstance(user, dict):
+            return None
+        identifier = user.get("id")
+        return identifier if isinstance(identifier, str) else None
 
     def submit(self, report_path: Path) -> dict[str, Any]:
         # Content-addressed ingest: the task identity travels inside the report

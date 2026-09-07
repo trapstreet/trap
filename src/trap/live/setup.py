@@ -54,7 +54,11 @@ def start_tracking(
     if not auth.api_key:
         return None
 
-    session = LiveSession(client_run_id=new_client_run_id(), server=auth.server)
+    # The owner is frozen here, from the id stored at pairing, with no network
+    # call: the first case must not wait on the server, and a run that never
+    # reaches it still knows whose queue it is. A credential that was never
+    # verified leaves it None, which `tp sync` will not adopt without --claim.
+    session = LiveSession(client_run_id=new_client_run_id(), server=auth.server, user_id=auth.user_id)
     outbox = Outbox(run_dir)
     try:
         outbox.prepare(session.producer_generation)

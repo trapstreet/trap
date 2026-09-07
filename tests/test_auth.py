@@ -344,3 +344,60 @@ def test_oauth_rejects_missing_key(monkeypatch):
 
     monkeypatch.setattr("trap.auth.oauth.webbrowser.open", fake_open)
     assert srv.run(timeout=1) is False
+
+
+# -- the verified user id -----------------------------------------------------
+
+
+def test_verified_user_id_reads_the_nested_id():
+    client = ApiClient("https://srv", "k")
+    client.__dict__["_client"] = httpx.Client(
+        base_url="https://srv",
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"user": {"id": "usr_a"}})),
+    )
+    assert client.verified_user_id() == "usr_a"
+
+
+@pytest.mark.parametrize("body", [{}, {"user": {}}, {"user": 5}, {"user": {"id": 7}}])
+def test_verified_user_id_is_none_when_the_server_does_not_say(body):
+    client = ApiClient("https://srv", "k")
+    client.__dict__["_client"] = httpx.Client(
+        base_url="https://srv", transport=httpx.MockTransport(lambda r: httpx.Response(200, json=body))
+    )
+    assert client.verified_user_id() is None
+
+
+def test_api_error_carries_the_status():
+    client = ApiClient("https://srv", "k")
+    client.__dict__["_client"] = httpx.Client(
+        base_url="https://srv", transport=httpx.MockTransport(lambda r: httpx.Response(503))
+    )
+    with pytest.raises(ApiError) as excinfo:
+        client.get_me()
+    assert excinfo.value.status == 503
+
+
+def test_store_persists_the_user_id_beside_the_token(store):
+    store.save(Credential(server=DEFAULT_SERVER, api_key="k", user_id="usr_a", account="alice"))
+    loaded = store.load()
+    assert loaded is not None and loaded.user_id == "usr_a" and loaded.account is None
+
+
+def test_resolve_carries_the_stored_user_id(tmp_path, monkeypatch):
+    monkeypatch.setattr("trap.auth.store.CredentialStore.PATH", tmp_path / "auth.json")
+    store = CredentialStore()
+    store.save(Credential(server=DEFAULT_SERVER, api_key="k", user_id="usr_a"))
+    assert ResolvedAuth.resolve(store).user_id == "usr_a"
+    # An environment token was never verified: no owner travels with it.
+    monkeypatch.setenv("TRAPSTREET_API_KEY", "env-key")
+    assert ResolvedAuth.resolve(store).user_id is None
+
+
+def test_the_api_client_builds_a_real_http_client(monkeypatch):
+    from tests.conftest import REAL_API_CLIENT_PROPERTY
+
+    monkeypatch.setattr(ApiClient, "_client", REAL_API_CLIENT_PROPERTY)
+    client = ApiClient("https://srv/", "key", timeout=3)
+    assert str(client._client.base_url).rstrip("/") == "https://srv"
+    assert client._client.headers["authorization"] == "Bearer key"
+    client._client.close()
