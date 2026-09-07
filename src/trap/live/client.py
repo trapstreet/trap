@@ -1,4 +1,4 @@
-"""HTTP for live progress: two calls, short timeouts, no heroics.
+"""HTTP for live progress and site grading: a handful of calls, short timeouts, no heroics.
 
 Separate from :class:`trap.auth.client.ApiClient` because the failure contract
 is the opposite one. `tp submit` failing is a real error the user must see and
@@ -137,6 +137,37 @@ class LiveClient:
                 "expected_producer_generation": expected_producer_generation,
                 "snapshot": snapshot,
             },
+        )
+
+    # -- site grading ------------------------------------------------------
+
+    def resolve_evaluation(self, *, repo: str, commit: str, path: str | None) -> dict[str, Any]:
+        """The admitted evaluation revision for a task checkout, if there is one.
+
+        ``{revision_id, cases_total, admitted}`` on success; a 404 (raised as
+        ``LiveApiError``) means the task has no admitted revision, which is the
+        ordinary case and not an error to show.
+        """
+        params = {"repo": repo, "commit": commit}
+        if path is not None:
+            params["path"] = path
+        return self._request("GET", "/api/v2/evaluations/resolve", params=params)
+
+    def open_evaluation(self, *, revision_id: str, client_run_id: str) -> dict[str, Any]:
+        """Open a server-graded run. Idempotent on ``client_run_id``: the same id
+        opens the same run, so a retry cannot create a second one."""
+        return self._request(
+            "POST",
+            "/api/v2/evaluations",
+            json={"revision_id": revision_id, "client_run_id": client_run_id},
+        )
+
+    def submit_answers(self, run_id: str, cases_results: list[dict[str, Any]]) -> dict[str, Any]:
+        """Hand in answers for the site to judge, in the report's own ``cases_results`` shape."""
+        return self._request(
+            "POST",
+            f"/api/v2/runs/{run_id}/submissions",
+            json={"cases_results": cases_results},
         )
 
     def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:

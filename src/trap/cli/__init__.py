@@ -23,12 +23,14 @@ from trap.cli._console import _die, _env_truthy, console, err_console
 from trap.display import CaseProgress, OutputFormat, SubmitRenderer, renderer_factory
 from trap.environment import EnvironmentDetector
 from trap.git_ops import GitOpsError, LocalRepo, ParsedGitUrl
+from trap.live.grading import start_site_grading
 from trap.live.setup import start_tracking
 from trap.live.sync import sync_run
 from trap.live.tracker import LiveTracker, plain_score
 from trap.loader import ConfigError, TrapLoader, TraptaskLoader
 from trap.models import Diagnosis, Provenance, ReportData
 from trap.runner import TaskRunner
+from trap.runner.layout import CaseLayout
 from trap.workspace import SolutionIdentity, Workspace
 
 app = typer.Typer(help="AI prompt / agent / workflow / testing framework.")
@@ -316,6 +318,16 @@ def run(
             help="Which trapstreet server to mirror progress to (default: the paired one).",
         ),
     ] = None,
+    site_grading: Annotated[
+        bool,
+        typer.Option(
+            "--site-grading/--no-site-grading",
+            help="When the task is an admitted evaluation on the paired server, submit each "
+            "case's answer for the site to judge (the local judge still runs as a preview). "
+            "Off automatically when no CLI token is stored or the task is not admitted. "
+            "Also settable via TRAP_NO_SITE_GRADING=1.",
+        ),
+    ] = True,
 ) -> None:
     """Run a task against a solution.
 
@@ -385,6 +397,22 @@ def run(
     )
     if tracker is not None and output == OutputFormat.rich:
         console.print(f"[dim]live · {tracker.run_url}[/dim]")
+    # Site grading: for a task the site has admitted as an evaluation, each
+    # answer is handed over as its case finishes and the site judges it. Opened
+    # under the live session's id so the site shows one execution, not two.
+    # Like the mirror, it is fail-open: None, or a grader that says why not.
+    grader = start_site_grading(
+        task=provenance.task,
+        cases_total=len(active_cases),
+        answer_of=lambda case_id: CaseLayout.for_case(
+            ws.run_dir(ts), case_id
+        ).solution_capture.stdout.read_text(),
+        client_run_id=tracker.client_run_id if tracker is not None else None,
+        server_override=server,
+        enabled=site_grading,
+    )
+    if grader is not None and grader.opened and output == OutputFormat.rich:
+        console.print(f"[dim]graded on site · {grader.url}[/dim]")
 
     prog_console = console if output == OutputFormat.rich else None
     try:
@@ -393,7 +421,10 @@ def run(
                 active_cases,
                 fail_fast=fail_fast,
                 on_case_start=_mirrored(prog.on_case_start, tracker.on_case_start if tracker else None),
-                on_case_done=_mirrored(prog.on_case_done, tracker.on_case_done if tracker else None),
+                on_case_done=_mirrored(
+                    _mirrored(prog.on_case_done, tracker.on_case_done if tracker else None),
+                    grader.on_case_done if grader else None,
+                ),
                 **_stage_hooks(tracker),
             )
     except KeyboardInterrupt:
@@ -403,6 +434,8 @@ def run(
         if tracker is not None:
             tracker.on_run_cancelled(cases_done=0)
             tracker.close()
+        if grader is not None:
+            grader.close()
         raise
     finished_at_utc = datetime.now(UTC)
 
@@ -428,6 +461,7 @@ def run(
         # id there is nothing to associate, and inventing one at report time
         # would claim a session the server never saw.
         client_run_id=tracker.client_run_id if tracker is not None else None,
+        site_grading=grader.summary() if grader is not None else None,
     )
     ws.save_as_report(ts, report_data)
     renderer_factory(output).render(report_data)
@@ -455,6 +489,10 @@ def run(
         tracker.close()
         if tracker.notice and output == OutputFormat.rich:
             err_console.print(f"[yellow]{tracker.notice}[/yellow]")
+    if grader is not None:
+        grader.close()
+        if grader.notice and output == OutputFormat.rich:
+            err_console.print(f"[yellow]{grader.notice}[/yellow]")
 
     if diagnosis.judge_broken:
         first = diagnosis.judge_failures[0]

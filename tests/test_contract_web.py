@@ -193,3 +193,37 @@ def test_the_checkpoint_snapshot_carries_only_allowed_fields(tmp_path: Path, che
     assert match, "the snapshot allowlist was not found in checkpoint.ts"
     allowed = set(re.findall(r'"(\w+)"', match.group(1)))
     assert set(_snapshot(tmp_path, [])) <= allowed
+
+
+# -- site grading ------------------------------------------------------------------
+
+
+def _interface_fields(source: str, name: str) -> set[str]:
+    """The field names of ``export interface NAME { ... }``."""
+    start = source.index(f"interface {name}")
+    block = source[start : source.index("\n}", start)]
+    return set(re.findall(r"^\s*(\w+)\??:", block, re.MULTILINE))
+
+
+def test_a_submission_carries_only_fields_the_bulk_route_reads(web_src: Path):
+    from trap.live.grading import SiteGrader
+
+    grading_ts = (web_src / "lib/runs/grading.ts").read_text()
+    cost = CaseCost(by_model=[ModelCost(provider="p", cost_usd=1.0)])
+    result = CaseResult(case_id="c1", duration=1.0, metrics=None, cost=cost)
+    submission = SiteGrader._submission(result, "answer")
+    assert set(submission) <= _interface_fields(grading_ts, "BulkAnswer")
+    assert set(submission["client_reported"]) <= _interface_fields(grading_ts, "ClientReported")
+
+
+def test_the_evaluation_routes_exist_where_the_cli_calls_them(web_src: Path):
+    api = web_src / "app/api/v2"
+    assert (api / "evaluations/route.ts").is_file()
+    assert (api / "runs/[id]/submissions/route.ts").is_file()
+    # The resolve endpoint is being added by the web side; its shape is pinned
+    # in test_grading.py and this line turns red the day it lands elsewhere.
+    resolve = api / "evaluations/resolve/route.ts"
+    if resolve.is_file():
+        source = resolve.read_text()
+        for name in ("repo", "commit", "path", "revision_id", "cases_total", "admitted"):
+            assert name in source, f"resolve route no longer mentions {name}"
