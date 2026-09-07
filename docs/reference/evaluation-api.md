@@ -158,8 +158,10 @@ was `accepted`, what was a `duplicate` retry, what was `skipped` and what was
 `tp run` sits an evaluation for you when three things are true: the CLI is
 paired (`tp auth login`), the task checkout is anchored to a commit, and step 0
 resolves that anchor to an admitted revision. It then opens the run (step 1)
-under the same `client_run_id` as its live-sync session, so the site shows the
-local execution and the graded run as one, and hands in each case's answer —
+under a `client_run_id` derived from its live-sync session's (the site keys a
+session by owner and id across both channels, so the same id would collide rather
+than join); the report's `site_grading` block is what links the two. It hands in
+each case's answer —
 the solver's stdout, as a string — through the bulk call above as the case
 finishes, with the duration, exit code and (when the cost proxy priced it) cost
 as `client_reported`. The local judge still runs; its scores are a preview.
