@@ -67,6 +67,10 @@ A run that **starts offline** is not lost either. The sender keeps trying to ope
 session on the site for as long as the run lasts (backing off to at most 30 seconds between
 attempts), sends nothing until that succeeds, and then delivers everything from the outbox in
 order. If the network never comes back, `tp sync` opens the session first and does the same.
+Progress a network drop loses **mid-run** is re-sent from the outbox too, oldest first, on
+the sender's next wake (at most every ten seconds), so the site's view catches up while the
+run is still going; whatever is still undelivered when `tp run` exits is reported once and
+left for `tp sync`.
 
 While a case is running and nothing else has happened for ten seconds, the sender sends a
 heartbeat so a long case reads as "still running" on the site rather than as lost contact.

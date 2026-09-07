@@ -13,6 +13,7 @@ Two properties are load-bearing and get most of the attention here:
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 import httpx
@@ -330,6 +331,12 @@ def _ensured(tracker: LiveTracker) -> LiveTracker:
 def _sent(tracker: LiveTracker, client: _Recorder) -> list[dict]:
     tracker.close()
     return [event for batch in client.batches for event in batch]
+
+
+def _fill(tracker: LiveTracker, *types: str) -> None:
+    """Append real events, the way the run's thread does."""
+    for type_ in types:
+        tracker._emit(type_, {})
 
 
 def test_a_run_mirrors_its_lifecycle(tmp_path: Path):
@@ -764,14 +771,12 @@ def test_ctrl_c_reports_a_cancellation_it_can_confirm(make_project, runner, monk
 def test_a_burst_is_coalesced_into_one_batch(tmp_path: Path):
     client = _Recorder()
     tracker = _ensured(_tracker(tmp_path, client))
-    # Fill the queue without a thread, then drain it synchronously.
-    for ordinal in (1, 2):
-        tracker._queue.put_nowait({"client_seq": ordinal, "type": "case_started"})
+    # Fill the outbox without a thread, then drain it synchronously.
+    _fill(tracker, "case_started", "case_started")
     tracker._queue.put_nowait(tracker._stop)
 
     assert tracker._drain_once() is False  # the stop sentinel was seen
-    assert len(client.batches) == 1
-    assert len(client.batches[0]) == 2
+    assert [len(batch) for batch in client.batches] == [2]
 
 
 def test_the_stop_sentinel_alone_sends_nothing(tmp_path: Path):
@@ -785,7 +790,7 @@ def test_the_stop_sentinel_alone_sends_nothing(tmp_path: Path):
 def test_draining_continues_while_events_keep_arriving(tmp_path: Path):
     client = _Recorder()
     tracker = _ensured(_tracker(tmp_path, client))
-    tracker._queue.put_nowait({"client_seq": 1, "type": "heartbeat"})
+    _fill(tracker, "heartbeat")
     assert tracker._drain_once() is True  # no sentinel yet
     assert len(client.batches) == 1
 
@@ -796,10 +801,9 @@ def test_a_batch_is_capped(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(tracker_module, "MAX_BATCH", 2)
     client = _Recorder()
     tracker = _ensured(_tracker(tmp_path, client))
-    for seq in range(1, 4):
-        tracker._queue.put_nowait({"client_seq": seq, "type": "heartbeat"})
+    _fill(tracker, "heartbeat", "heartbeat", "heartbeat")
     tracker._drain_once()
-    assert len(client.batches[0]) == 2
+    assert [len(batch) for batch in client.batches] == [2, 1]
 
 
 def test_undelivered_events_are_reported_once_at_the_end(tmp_path: Path):
@@ -1712,12 +1716,6 @@ class _Clock:
         return self.now
 
 
-def _fill(tracker: LiveTracker, *types: str) -> None:
-    """Append real events, the way the run's thread does."""
-    for type_ in types:
-        tracker._emit(type_, {})
-
-
 def test_nothing_is_posted_until_the_session_exists(tmp_path: Path):
     clock = _Clock()
     client = _Flaky(failures=1)
@@ -1907,11 +1905,170 @@ def test_judge_events_carry_the_ordinal_and_only_whitelisted_fields(tmp_path: Pa
     ]
 
 
-def test_unacked_drops_what_the_backlog_already_sent(tmp_path: Path):
-    tracker = _tracker(tmp_path)
-    tracker._session.acked_seq = 2
-    kept = tracker._unacked([{"client_seq": 1}, {"client_seq": 2}, {"client_seq": 3}])
-    assert kept == [{"client_seq": 3}]
+# -- a batch the network drops mid-run (19.3-B) ------------------------------
+
+
+class _GapServer(_Recorder):
+    """The real server's shape: stores what it is handed, acknowledges the
+    highest *contiguous* sequence, and loses exactly one request -- the first
+    one that carries client_seq 2 -- without storing anything from it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.stored: set[int] = set()
+        self.first_request = threading.Event()
+        self.dropped = threading.Event()
+        self._dropped_once = False
+
+    def send_events(self, _run_ref, events):
+        try:
+            if not self._dropped_once and any(e["client_seq"] == 2 for e in events):
+                self._dropped_once = True
+                self.dropped.set()
+                raise LiveApiError("unreachable: ConnectError")
+            self.batches.append(events)
+            self.stored.update(e["client_seq"] for e in events)
+            ack = 0
+            while ack + 1 in self.stored:
+                ack += 1
+            return {"ack_seq": ack}
+        finally:
+            self.first_request.set()
+
+
+def test_a_batch_the_network_dropped_is_resent_before_anything_newer(tmp_path: Path):
+    server = _GapServer()
+    tracker = _ensured(_tracker(tmp_path, server))
+    _fill(tracker, "run_started")
+    tracker._drain_once()
+    assert tracker._session.acked_seq == 1
+
+    _fill(tracker, "case_started")  # seq 2: the request is lost
+    tracker._drain_once()
+    assert len(server.batches) == 1 and tracker._session.acked_seq == 1
+    assert tracker._pending_count() == 1
+    assert tracker.notice is None  # transient: nothing to say yet
+
+    _fill(tracker, "judge_started", "judge_finished")  # seq 3, 4
+    tracker._drain_once()
+    # The gap goes first, in one request with what came after it.
+    assert [e["client_seq"] for e in server.batches[-1]] == [2, 3, 4]
+    assert tracker._session.acked_seq == 4
+    reloaded = LiveSession.load(tmp_path)
+    assert reloaded is not None and reloaded.acked_seq == 4
+    assert tracker._pending_count() == 0
+    # The retried event is the stored line itself -- same id, same payload --
+    # so the server sees a duplicate at worst, never a conflict.
+    stored = Outbox(tmp_path).read_all()[1]
+    assert server.batches[-1][0]["event_id"] == stored.event_id
+    assert server.batches[-1][0]["payload"] == stored.payload
+
+
+def test_the_stop_wake_still_fills_a_gap(tmp_path: Path):
+    server = _GapServer()
+    tracker = _ensured(_tracker(tmp_path, server))
+    _fill(tracker, "run_started")
+    tracker._drain_once()
+    _fill(tracker, "case_started")
+    tracker._drain_once()  # dropped
+    _fill(tracker, "judge_started")
+    tracker._queue.put_nowait(tracker._stop)
+    assert tracker._drain_once() is False
+    assert [e["client_seq"] for e in server.batches[-1]] == [2, 3]
+    assert tracker._session.acked_seq == 3
+
+
+def test_an_idle_wake_fills_the_gap_instead_of_beating(tmp_path: Path, monkeypatch):
+    from trap.live import tracker as tracker_module
+
+    monkeypatch.setattr(tracker_module, "HEARTBEAT_SECONDS", 0.01)
+    server = _GapServer()
+    tracker = _ensured(_tracker(tmp_path, server))
+    tracker.on_case_start("c1")
+    tracker._drain_once()
+    _fill(tracker, "judge_started")  # seq 2: dropped
+    tracker._drain_once()
+    assert tracker._session.acked_seq == 1
+
+    tracker._drain_once()  # idle: something is owed, so retry it rather than beat
+    assert [e["client_seq"] for e in server.batches[-1]] == [2]
+    assert tracker._session.acked_seq == 2
+    assert "heartbeat" not in [e.type for e in Outbox(tmp_path).read_all()]
+
+    tracker._drain_once()  # idle again, nothing owed, mid-case: beat
+    appended = Outbox(tmp_path).read_all()[-1]
+    assert appended.type == "heartbeat" and appended.payload == {"ordinal": 1}
+    tracker._drain_once()
+    assert [e["type"] for e in server.batches[-1]] == ["heartbeat"]
+
+
+def test_no_heartbeat_piles_up_while_the_link_is_down(tmp_path: Path, monkeypatch):
+    from trap.live import tracker as tracker_module
+
+    monkeypatch.setattr(tracker_module, "HEARTBEAT_SECONDS", 0.01)
+    client = _Recorder(fail=LiveApiError("unreachable"))
+    tracker = _ensured(_tracker(tmp_path, client))
+    tracker.on_case_start("c1")
+    tracker._drain_once()  # the send fails; seq 1 stays owed
+    tracker._drain_once()  # idle
+    tracker._drain_once()  # idle
+    assert [e.type for e in Outbox(tmp_path).read_all()] == ["case_started"]
+    assert tracker._pending_count() == 1
+
+
+def test_a_wake_for_an_event_already_sent_does_not_beat(tmp_path: Path):
+    client = _Recorder()
+    tracker = _ensured(_tracker(tmp_path, client))
+    tracker.on_case_start("c1")
+    tracker._drain_once()
+    tracker._queue.put_nowait(1)  # a stale wake for something already acknowledged
+    tracker._drain_once()
+    assert len(client.batches) == 1
+    assert [e.type for e in Outbox(tmp_path).read_all()] == ["case_started"]
+
+
+def test_a_gap_the_server_will_not_close_costs_one_request_per_wake(tmp_path: Path, monkeypatch):
+    from trap.live import tracker as tracker_module
+
+    monkeypatch.setattr(tracker_module, "MAX_BATCH", 2)
+
+    class _Stuck(_Recorder):
+        """A permanent conflict on seq 2: the server takes requests, moves nothing."""
+
+        def send_events(self, _run_ref, events):
+            self.batches.append(events)
+            return {"ack_seq": 1}
+
+    client = _Stuck()
+    tracker = _ensured(_tracker(tmp_path, client))
+    tracker._session.acked_seq = 1
+    _fill(tracker, "run_started", "case_started", "judge_started", "judge_finished")
+    tracker._drain_once()
+    tracker._queue.put_nowait(0)
+    tracker._drain_once()
+    # One request per wake, always from the ack, never the next batch as well.
+    assert [[e["client_seq"] for e in batch] for batch in client.batches] == [[2, 3], [2, 3]]
+    assert tracker._pending_count() == 3
+
+
+def test_a_run_that_loses_one_request_still_ends_fully_acknowledged(tmp_path: Path):
+    server = _GapServer()
+    tracker = _tracker(tmp_path, server)
+    tracker.start()
+    # Event handshakes, not sleeps: the request carrying seq 2 must be the one
+    # dropped, and it must be dropped before the final flush exists to retry it.
+    assert server.first_request.wait(2)
+    tracker.on_case_start("c1")
+    assert server.dropped.wait(2)
+    tracker.on_case_done(_result(metrics={"score": 1}))
+    tracker.on_run_finished(exit_code=0, cases_done=1)
+    tracker.close()
+
+    assert tracker.notice is None
+    total = len(Outbox(tmp_path).read_all())
+    reloaded = LiveSession.load(tmp_path)
+    assert reloaded is not None and reloaded.acked_seq == total
+    assert server.stored == set(range(1, total + 1))
 
 
 # -- the shared delivery flow ------------------------------------------------

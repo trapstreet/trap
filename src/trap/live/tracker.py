@@ -14,10 +14,13 @@ the end.
 The sender thread owns the network entirely. It opens the session through the
 shared :class:`~trap.live.delivery.Delivery` flow -- and keeps trying, with a
 jittered backoff, for as long as the run lasts -- and it posts no event until
-that has succeeded. Everything appended before then waits in the outbox, which
-is where the backlog is read from once the server answers. While a case is
-running and nothing else has happened for a while, the same thread emits a
-heartbeat so a long case does not read as lost contact.
+that has succeeded. The outbox is where every batch is cut from, against the
+server's contiguous acknowledgement: the queue between the run and the sender
+only says *that* something was appended, never what. So a batch the network
+dropped is re-sent, before anything newer, on the sender's next wake, and the
+server's acknowledgement can move again. While a case is running and nothing
+else has happened for a while, the same thread emits a heartbeat so a long case
+does not read as lost contact.
 """
 
 from __future__ import annotations
@@ -29,12 +32,12 @@ import time
 import uuid
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from trap.live.client import LiveApiError, LiveClient
 from trap.live.delivery import Delivery
 from trap.live.identity import LiveSession
-from trap.live.outbox import Outbox, OutboxError
+from trap.live.outbox import Outbox, OutboxError, OutboxEvent
 from trap.models.results import CaseResult
 
 #: Wait no longer than this for the queue to drain at the end of a run. The
@@ -53,6 +56,10 @@ HEARTBEAT_SECONDS = 10.0
 #: many CLIs coming back online together do not knock in lockstep.
 ENSURE_BACKOFF_INITIAL = 1.0
 ENSURE_BACKOFF_CAP = 30.0
+
+#: What woke the sender. ``event``: the run appended something; ``stop``:
+#: close() was called; ``idle``: a heartbeat interval passed with nothing new.
+Wake = Literal["event", "stop", "idle"]
 
 #: Every event type this module can emit. The contract test checks each one
 #: against the server's allowlist; ``_emit`` is only ever called with these.
@@ -293,7 +300,9 @@ class LiveTracker:
                 payload=payload,
                 producer_generation=self._session.producer_generation,
             )
-            self._queue.put_nowait(event.wire())
+            # A wake token, not the batch: the event is already durable, and the
+            # sender cuts every batch from the outbox itself.
+            self._queue.put_nowait(event.client_seq)
         except OutboxError as e:
             # A read-only or full disk. The run is unaffected; only the mirror
             # stops, and it stops loudly enough to be seen once.
@@ -306,11 +315,13 @@ class LiveTracker:
         if self._notice is None:
             self._notice = notice
 
+    def _pending(self) -> list[OutboxEvent]:
+        """Everything the server has not acknowledged, oldest first."""
+        return self._outbox.pending(self._session.acked_seq, generation=self._session.producer_generation)
+
     def _pending_count(self) -> int:
         try:
-            return len(
-                self._outbox.pending(self._session.acked_seq, generation=self._session.producer_generation)
-            )
+            return len(self._pending())
         except Exception:  # pragma: no cover - defensive
             return 0
 
@@ -325,65 +336,53 @@ class LiveTracker:
             self._disable(f"live sync off ({e.__class__.__name__})")
 
     def _drain_once(self) -> bool:
-        """One wake of the sender: a batch, a session attempt, or a heartbeat.
+        """One wake of the sender: a session attempt, the outbox, or a heartbeat.
 
         Split out of the thread body so the rules are testable without racing a
         thread: everything here is synchronous given a filled queue. Returns
         False once the stop sentinel has been seen.
 
-        Until the session is established nothing is posted. Whatever arrived
-        meanwhile is already in the outbox, so it is not lost by being taken
-        off the queue here -- it is sent as the backlog the moment the server
-        answers.
+        Every cycle sends from the sidecar's contiguous acknowledgement, never
+        from what happened to be queued: a batch the network dropped is re-sent,
+        before anything newer, on the very next wake, so the server's ack can
+        move again. The queue only says *that* something happened; the outbox
+        says what. Until the session is established nothing is posted, and
+        whatever arrived meanwhile is already on disk to be sent as the backlog
+        the moment the server answers.
         """
-        batch, stopping = self._collect()
+        wake = self._collect()
         if self._disabled:
-            return not stopping
+            return wake != "stop"
         if not self._ensured:
             self._try_ensure()
-            if self._ensured:
-                self._send_backlog()
-        elif batch := self._unacked(batch):
-            self._send(batch)
-        elif not stopping and self._current_ordinal is not None:
-            # A quiet interval in the middle of a case: say it is still running.
+        owed = self._ensured and self._send_pending()
+        if self._ensured and not owed and wake == "idle" and self._current_ordinal is not None:
+            # A quiet interval mid-case with nothing owed: say it is still
+            # running. A wake with something owed retries that instead --
+            # beating into a dead link would only pile heartbeats into the
+            # outbox.
             self._emit("heartbeat", {"ordinal": self._current_ordinal})
-        return not stopping
+        return wake != "stop"
 
-    def _unacked(self, batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Drop what the backlog already delivered: an event queued before the
-        session opened was sent from the outbox, and resending it would only
-        cost the server a duplicate to recognise."""
-        return [event for event in batch if event["client_seq"] > self._session.acked_seq]
+    def _collect(self) -> Wake:
+        """Block for the next wake, then swallow every wake already queued.
 
-    def _collect(self) -> tuple[list[dict[str, Any]], bool]:
-        """One bounded take, then everything already waiting, up to a batch.
-
-        Coalescing matters because a run emits several events per case; without
-        it a twenty-case run costs sixty requests instead of a handful. The
-        first take gives up after a heartbeat interval so the sender also wakes
-        when nothing is happening -- to retry the session, or to beat.
+        Many wakes collapse into one cycle so a burst of events costs one
+        request, not one per event; the batch itself is cut from the outbox.
+        The wait gives up after a heartbeat interval so the sender also runs
+        when nothing is happening -- to retry the session, to re-send what the
+        network dropped, or to beat.
         """
-        batch: list[dict[str, Any]] = []
-        stopping = False
         try:
             item = self._queue.get(timeout=HEARTBEAT_SECONDS)
         except queue.Empty:
-            return batch, stopping
-        if item is self._stop:
-            stopping = True
-        else:
-            batch.append(item)  # type: ignore[arg-type]
-        while not stopping and len(batch) < MAX_BATCH:
+            return "idle"
+        while item is not self._stop:
             try:
-                extra = self._queue.get_nowait()
+                item = self._queue.get_nowait()
             except queue.Empty:
-                break
-            if extra is self._stop:
-                stopping = True
-                break
-            batch.append(extra)  # type: ignore[arg-type]
-        return batch, stopping
+                return "event"
+        return "stop"
 
     def _try_ensure(self) -> None:
         """Verify identity and open the session, if the backoff allows it now.
@@ -414,12 +413,20 @@ class LiveTracker:
         self._next_ensure_at = now + self._ensure_delay * jitter
         self._ensure_delay = min(self._ensure_delay * 2, ENSURE_BACKOFF_CAP)
 
-    def _send_backlog(self) -> None:
-        """Everything the server has not acknowledged, oldest first, in batches."""
-        pending = self._outbox.pending(self._session.acked_seq, generation=self._session.producer_generation)
+    def _send_pending(self) -> bool:
+        """Everything the server has not acknowledged, oldest first, in batches.
+
+        Read from the outbox against the contiguous ack, so a gap -- a batch the
+        network dropped while later ones went through -- is filled before
+        anything newer is pushed. Stops at the first batch the server does not
+        take; the next wake starts again from the ack. True when there was
+        anything to send.
+        """
+        pending = self._pending()
         for start in range(0, len(pending), MAX_BATCH):
             if not self._send([event.wire() for event in pending[start : start + MAX_BATCH]]):
-                return
+                break
+        return bool(pending)
 
     def _send(self, events: list[dict[str, Any]]) -> bool:
         """Post one batch. False when the server did not take it, or took it
