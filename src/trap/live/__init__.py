@@ -23,12 +23,14 @@ stays in that outbox until ``tp sync`` (see :mod:`trap.live.sync`) picks it up.
 """
 
 from trap.live.client import LiveApiError, LiveClient
+from trap.live.delivery import Delivery
 from trap.live.identity import LiveSession, new_client_run_id
 from trap.live.outbox import Outbox, OutboxEvent
 from trap.live.sync import SyncReport, sync_run
 from trap.live.tracker import LiveTracker
 
 __all__ = [
+    "Delivery",
     "LiveApiError",
     "LiveClient",
     "LiveSession",

@@ -3,7 +3,9 @@
 `tp run` mirrors progress while it happens, but a CLI has no daemon: when the
 process exits, whatever the network never took stays in the run's outbox. This
 module is the other half of that promise -- `tp sync` picks a run up afterwards
-and hands the queue over.
+and hands the queue over, through the same :class:`~trap.live.delivery.Delivery`
+flow the in-run sender uses: verify the frozen identity, ensure the session,
+drain, persist the acknowledgement.
 
 Three rules shape everything here.
 
@@ -11,7 +13,9 @@ Three rules shape everything here.
 identity, so before a single event is sent the current credential is checked
 against it. A rotated token for the same person is fine; a different person, or
 a different server, means the events stay on disk rather than being delivered to
-whoever happens to be logged in now.
+whoever happens to be logged in now. A run that froze *no* account -- tracked
+under a credential that was never verified -- is not adopted by default either:
+``--claim`` says, explicitly, that it belongs to the current account.
 
 *Being offline is not a failure.* Nothing about a run changed because the site
 did not hear about it. Sync says what happened and exits 0; only a genuine
@@ -36,6 +40,7 @@ from pydantic import BaseModel, ValidationError
 from trap.auth.resolve import ResolvedAuth
 from trap.auth.store import CredentialStore, CredentialStoreError
 from trap.live.client import LiveApiError, LiveClient
+from trap.live.delivery import Delivery, RefusalReason
 from trap.live.identity import LiveSession
 from trap.live.outbox import Outbox, OutboxEvent
 from trap.live.tracker import MAX_BATCH
@@ -56,10 +61,14 @@ SyncStatus = Literal[
     "refused",  # wrong account, wrong server, or a rejected token
 ]
 
+#: The execution statuses a checkpoint snapshot may name. The server's own
+#: list; the contract test checks it against the web source.
+EXEC_STATUSES = ("created", "running", "finished", "failed", "cancelled")
+
 #: Event types that say a run reached an end state, and the execution status
 #: each one implies in a checkpoint snapshot.
 _TERMINAL_STATUS = {
-    "run_finished": "completed",
+    "run_finished": "finished",
     "run_failed": "failed",
     "run_cancelled": "cancelled",
 }
@@ -84,8 +93,13 @@ class SyncReport(BaseModel):
         return self.status == "refused"
 
 
-def sync_run(run_dir: Path, *, server_override: str | None = None) -> SyncReport:
-    """Deliver ``run_dir``'s queued progress. Never raises."""
+def sync_run(run_dir: Path, *, server_override: str | None = None, claim: bool = False) -> SyncReport:
+    """Deliver ``run_dir``'s queued progress. Never raises.
+
+    ``claim`` adopts a run that froze no account into the current one; without
+    it such a run is refused, because whoever is logged in now is not
+    necessarily who ran it.
+    """
     session = LiveSession.load(run_dir)
     if session is None:
         # Either sync was off, or the sidecar never landed. Both mean this run
@@ -119,13 +133,13 @@ def sync_run(run_dir: Path, *, server_override: str | None = None) -> SyncReport
 
     client = LiveClient(session.server, auth.api_key)
     try:
-        return _deliver(session, run_dir, client)
+        return _deliver(session, run_dir, client, claim=claim)
     finally:
         client.close()
 
 
-def _deliver(session: LiveSession, run_dir: Path, client: LiveClient) -> SyncReport:
-    """Everything that needs a live client: identity, then the queue itself."""
+def _deliver(session: LiveSession, run_dir: Path, client: LiveClient, *, claim: bool) -> SyncReport:
+    """Everything that needs a live client: identity, session, then the queue itself."""
     outbox = Outbox(run_dir)
     pending = outbox.pending(session.acked_seq, generation=session.producer_generation)
     if not pending:
@@ -134,73 +148,74 @@ def _deliver(session: LiveSession, run_dir: Path, client: LiveClient) -> SyncRep
             message="nothing queued — the site already has this run's progress.",
         )
 
+    surviving = outbox.read_all()
+    snapshot = _snapshot(run_dir, surviving)
+    delivery = Delivery(client, session, run_dir, snapshot={"cases_total": snapshot["cases_total"]})
     try:
-        user_id = client.whoami()
+        # The same steps the in-run sender takes, in the same order: who are we,
+        # then does the session exist. A run that began offline has no server
+        # id yet, and this PUT is what finally creates it.
+        refusal = delivery.establish(claim=claim)
     except LiveApiError as e:
         return _api_failure(e, delivered=0, remaining=len(pending))
-    if not _may_deliver(session, user_id):
-        return SyncReport(
-            status="refused",
-            remaining=len(pending),
-            message=(
-                f"this run's {len(pending)} queued event(s) belong to a different account on "
-                f"{session.server}; they stay on disk. Log in as that account to send them."
-            ),
-        )
-    if session.user_id is None and user_id is not None:
-        # First successful contact for a run that was tracked entirely offline.
-        # Nothing was frozen before, so there is no owner to contradict -- but
-        # from here on there is.
-        session.user_id = user_id
-        session.save(run_dir)
+    if refusal is not None:
+        return _refused(refusal, session, len(pending))
 
     if pending[0].client_seq > session.acked_seq + 1:
         # Events between the last acknowledgement and the oldest surviving one
         # are gone (cleanup, or a corrupt file). The server's acknowledgement
         # can never move past the hole, so sending is pointless until a
         # checkpoint declares it.
-        return _recover_gap(session, run_dir, client, outbox, pending)
-    return _send(session, run_dir, client, pending)
+        return _recover_gap(delivery, snapshot, pending)
+    return _send(delivery, pending)
 
 
-def _may_deliver(session: LiveSession, user_id: str | None) -> bool:
-    """May this credential be handed the queue?
+def _refused(reason: RefusalReason, session: LiveSession, remaining: int) -> SyncReport:
+    """Word a refusal for the user. Each names what to do about it."""
+    if reason == "unowned":
+        message = (
+            f"this run froze no account: it was tracked before the CLI's pairing with "
+            f"{session.server} was verified, so its {remaining} queued event(s) have no "
+            "proven owner. Re-run it under a paired account, or pass --claim to adopt it "
+            "into the account you are logged in as now."
+        )
+    elif reason == "unidentified":
+        message = (
+            f"cannot claim this run: {session.server} did not say which account this token "
+            "belongs to, so there is no verified identity to freeze."
+        )
+    else:
+        message = (
+            f"this run's {remaining} queued event(s) belong to a different account on "
+            f"{session.server}; they stay on disk. Log in as that account to send them."
+        )
+    return SyncReport(status="refused", remaining=remaining, message=message)
 
-    A sidecar with no frozen account is one that never reached the server; there
-    is nothing to violate, so the current account adopts it. Once an account is
-    frozen, only that account -- under any token it later holds -- may continue.
-    """
-    if session.user_id is None:
-        return True
-    return session.belongs_to(session.server, user_id)
 
-
-def _send(session: LiveSession, run_dir: Path, client: LiveClient, pending: list[OutboxEvent]) -> SyncReport:
+def _send(delivery: Delivery, pending: list[OutboxEvent]) -> SyncReport:
     """Ship the queue in batches, persisting each acknowledgement as it lands."""
-    reference = session.run_id or session.client_run_id
+    session = delivery.session
+    server = delivery.session.server
     delivered = 0
     for start in range(0, len(pending), MAX_BATCH):
         batch = pending[start : start + MAX_BATCH]
         try:
-            data = client.send_events(reference, [event.wire() for event in batch])
+            ack = delivery.send([event.wire() for event in batch])
         except LiveApiError as e:
             return _api_failure(e, delivered=delivered, remaining=len(pending) - delivered)
-        ack = data.get("ack_seq")
-        if not isinstance(ack, int) or ack <= session.acked_seq:
+        if ack is None:
             # The server took the request but moved nothing -- a conflict, or a
             # generation it no longer accepts. Pushing the next batch would only
             # repeat that, so stop and say so.
             break
-        session.acked_seq = ack
-        session.save(run_dir)
-        delivered = sum(1 for event in pending if event.client_seq <= ack)
+        delivered = sum(1 for event in pending if event.client_seq <= session.acked_seq)
 
     remaining = len(pending) - delivered
     if remaining == 0:
         return SyncReport(
             status="delivered",
             delivered=delivered,
-            message=f"delivered {delivered} queued event(s) to {client.server}.",
+            message=f"delivered {delivered} queued event(s) to {server}.",
         )
     if delivered:
         return SyncReport(
@@ -208,45 +223,39 @@ def _send(session: LiveSession, run_dir: Path, client: LiveClient, pending: list
             delivered=delivered,
             remaining=remaining,
             message=(
-                f"delivered {delivered} of {len(pending)} queued event(s) to {client.server}; "
+                f"delivered {delivered} of {len(pending)} queued event(s) to {server}; "
                 f"{remaining} remain — run tp sync again later."
             ),
         )
     return SyncReport(
         status="stalled",
         remaining=remaining,
-        message=(
-            f"{client.server} acknowledged none of this run's {remaining} queued event(s); they stay on disk."
-        ),
+        message=(f"{server} acknowledged none of this run's {remaining} queued event(s); they stay on disk."),
     )
 
 
-def _recover_gap(
-    session: LiveSession,
-    run_dir: Path,
-    client: LiveClient,
-    outbox: Outbox,
-    pending: list[OutboxEvent],
-) -> SyncReport:
+def _recover_gap(delivery: Delivery, snapshot: dict[str, Any], pending: list[OutboxEvent]) -> SyncReport:
     """Close an unbridgeable gap by checkpointing what is still knowable.
 
     The snapshot only ever reports local execution state -- how far the run got
     -- so adopting it can never overwrite a report, a final status or a platform
     score the server already holds.
     """
-    surviving = outbox.read_all()
-    snapshot = _snapshot(run_dir, surviving)
+    session = delivery.session
     checkpoint_id = f"cp-{uuid.uuid4().hex}"
-    reference = session.run_id or session.client_run_id
     lost = pending[0].client_seq - session.acked_seq - 1
 
-    result = _try_checkpoint(client, reference, checkpoint_id, session.producer_generation, snapshot)
+    result = _try_checkpoint(delivery, checkpoint_id, session.producer_generation, snapshot)
     if isinstance(result, LiveApiError) and result.status == 409:
-        # Someone opened a generation after we read ours. The server says which
-        # one it holds; one retry with that is enough, and a second conflict is
-        # a race we stop competing in.
-        current = result.payload.get("producer_generation")
-        if not isinstance(current, int):
+        # Someone opened a generation after we read ours. The conflict answer is
+        # bare, so the generation the server holds is re-read from the run
+        # itself; one retry with that is enough, and a second conflict is a
+        # race we stop competing in.
+        try:
+            current = delivery.server_generation()
+        except LiveApiError as e:
+            return _api_failure(e, delivered=0, remaining=len(pending))
+        if current is None:
             return SyncReport(
                 status="stalled",
                 remaining=len(pending),
@@ -255,7 +264,7 @@ def _recover_gap(
                     "generation it holds; nothing was changed and the queue stays on disk."
                 ),
             )
-        result = _try_checkpoint(client, reference, checkpoint_id, current, snapshot)
+        result = _try_checkpoint(delivery, checkpoint_id, current, snapshot)
     if isinstance(result, LiveApiError):
         return _api_failure(result, delivered=0, remaining=len(pending))
 
@@ -272,13 +281,13 @@ def _recover_gap(
     ack = result.get("ack_seq")
     session.producer_generation = generation
     session.acked_seq = ack if isinstance(ack, int) else 0
-    session.save(run_dir)
+    delivery.persist()
     return SyncReport(
         status="recovered",
         remaining=0,
         message=(
             f"{lost} progress event(s) were lost from this run's local queue, so its history "
-            f"cannot be completed. Sent a checkpoint instead: {client.server} now records this "
+            f"cannot be completed. Sent a checkpoint instead: {session.server} now records this "
             f"run as {snapshot['exec_status']} at {snapshot['cases_done']} of "
             f"{snapshot['cases_total']} case(s), and shows the history as incomplete."
         ),
@@ -286,8 +295,7 @@ def _recover_gap(
 
 
 def _try_checkpoint(
-    client: LiveClient,
-    reference: str,
+    delivery: Delivery,
     checkpoint_id: str,
     generation: int,
     snapshot: dict[str, Any],
@@ -295,8 +303,7 @@ def _try_checkpoint(
     """One checkpoint attempt, with the failure returned rather than raised — the
     caller has to branch on a conflict, which an exception would hide."""
     try:
-        return client.checkpoint(
-            reference,
+        return delivery.checkpoint(
             checkpoint_id=checkpoint_id,
             expected_producer_generation=generation,
             snapshot=snapshot,
@@ -348,7 +355,7 @@ def _exec_status(events: list[OutboxEvent], report: ReportData | None) -> str:
         status = _TERMINAL_STATUS.get(event.type)
         if status is not None:
             return status
-    return "completed" if report is not None else "running"
+    return "finished" if report is not None else "running"
 
 
 def _load_report(run_dir: Path) -> ReportData | None:

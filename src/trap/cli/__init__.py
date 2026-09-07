@@ -25,6 +25,7 @@ from trap.environment import EnvironmentDetector
 from trap.git_ops import GitOpsError, LocalRepo, ParsedGitUrl
 from trap.live.setup import start_tracking
 from trap.live.sync import sync_run
+from trap.live.tracker import LiveTracker, plain_score
 from trap.loader import ConfigError, TrapLoader, TraptaskLoader
 from trap.models import Diagnosis, Provenance, ReportData
 from trap.runner import TaskRunner
@@ -190,20 +191,24 @@ def _confirm_submit(
         raise typer.Exit(code=1)
 
 
-def _mirrored(primary: Callable[[Any], None], mirror: Callable[[Any], None] | None) -> Callable[[Any], None]:
+def _mirrored(
+    primary: Callable[..., None] | None, mirror: Callable[..., None] | None
+) -> Callable[..., None] | None:
     """Fan one runner callback out to the terminal and to live sync.
 
     Terminal first, and the mirror is wrapped: progress reporting is not
     allowed to interrupt a run, so a bug in the mirror surfaces as a missing
-    progress bar on a web page, never as a failed case.
+    progress bar on a web page, never as a failed case. Either side may be
+    absent -- a stage the terminal does not draw still reaches the mirror.
     """
     if mirror is None:
         return primary
 
-    def call(value: Any) -> None:
-        primary(value)
+    def call(*args: Any) -> None:
+        if primary is not None:
+            primary(*args)
         try:
-            mirror(value)
+            mirror(*args)
         except Exception:
             pass
 
@@ -212,12 +217,24 @@ def _mirrored(primary: Callable[[Any], None], mirror: Callable[[Any], None] | No
 
 def _grader_score(grader_metrics: Any) -> float | None:
     """The run's aggregate score, when the grader produced a plain number for it."""
-    if not isinstance(grader_metrics, dict):
-        return None
-    score = grader_metrics.get("score")
-    if isinstance(score, bool) or not isinstance(score, (int, float)):
-        return None
-    return float(score)
+    return plain_score(grader_metrics)
+
+
+def _stage_hooks(tracker: LiveTracker | None) -> dict[str, Callable[..., None]]:
+    """The runner's judge/grader observers, aimed at the tracker. Nothing draws these
+    on the terminal, so the mirror is the only listener -- still wrapped, still unable
+    to interrupt the run."""
+    if tracker is None:
+        return {}
+    hooks = {
+        "on_judge_start": tracker.on_judge_started,
+        "on_judge_done": lambda case_id, metrics, code: tracker.on_judge_finished(
+            case_id, code, plain_score(metrics)
+        ),
+        "on_grader_start": tracker.on_grader_started,
+        "on_grader_done": lambda metrics, code: tracker.on_grader_finished(code, plain_score(metrics)),
+    }
+    return {name: _mirrored(None, hook) for name, hook in hooks.items()}  # type: ignore[misc]
 
 
 @app.command()
@@ -377,6 +394,7 @@ def run(
                 fail_fast=fail_fast,
                 on_case_start=_mirrored(prog.on_case_start, tracker.on_case_start if tracker else None),
                 on_case_done=_mirrored(prog.on_case_done, tracker.on_case_done if tracker else None),
+                **_stage_hooks(tracker),
             )
     except KeyboardInterrupt:
         # A cancellation we can confirm. Anything we cannot confirm (SIGKILL)
@@ -585,6 +603,14 @@ def sync(
             "a value that disagrees with the run's own is refused rather than redirected.",
         ),
     ] = None,
+    claim: Annotated[
+        bool,
+        typer.Option(
+            "--claim",
+            help="Adopt a run that froze no account (tracked before the pairing was verified) "
+            "into the account you are logged in as. Without it such a run is refused.",
+        ),
+    ] = False,
 ) -> None:
     """Send a tracked run's queued progress to trapstreet.
 
@@ -607,7 +633,7 @@ def sync(
     if not run_dir.is_dir():
         raise _die(f"no run {run} in {ws.solution_task_alias_dir}")
 
-    outcome = sync_run(run_dir, server_override=server)
+    outcome = sync_run(run_dir, server_override=server, claim=claim)
     # Sync reports; it never re-grades. Whatever happened here, the run's own
     # exit code was decided when it ran, and a queue left on disk is not an
     # error — only a refusal (wrong account, wrong server, rejected token) is.

@@ -28,10 +28,9 @@ class LiveApiError(Exception):
     ) -> None:
         super().__init__(message)
         self.status = status
-        #: The error body, when the server sent a JSON object. A 409 on the
-        #: checkpoint endpoint carries the generation the server actually holds,
-        #: which is the only way a retry can name the right one; every other
-        #: caller can ignore it.
+        #: The error body, when the server sent a JSON object: ``{"error": <message>,
+        #: "code": <machine code>}`` on every route. Advisory only -- no caller
+        #: branches on it today, but a message worth showing lives here.
         self.payload: dict[str, Any] = payload or {}
 
     @property
@@ -124,9 +123,11 @@ class LiveClient:
         """Recover from a gap the server can never ack past.
 
         A compare-and-swap on the producer generation: the server accepts only
-        if it still holds ``expected_producer_generation``, and answers with the
-        new one it opened. A 409 means someone else moved it first -- the
-        generation it does hold comes back in the error payload.
+        if it still holds ``expected_producer_generation``, and answers
+        ``{producer_generation, ack_seq, already_applied}`` with the one it
+        opened. A 409 (``code: CONFLICT``, ``error: GENERATION_CONFLICT``) means
+        someone else moved it first; the body names no generation, so the
+        caller re-reads the run to learn it.
         """
         return self._request(
             "POST",
