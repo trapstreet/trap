@@ -25,6 +25,7 @@ tp run [SOLUTION] [OPTIONS]
 | `--cost / --no-cost` | on | track LLM tokens/spend via the proxy |
 | `--environment / --no-environment` | on | record host CPU/RAM/OS/Python in the report |
 | `--live / --no-live` | on | mirror progress to the paired trapstreet account (see below) |
+| `--site-grading / --no-site-grading` | on | for an admitted evaluation, submit each answer for the site to judge (see below); also `TRAP_NO_SITE_GRADING=1` |
 | `--server` | the paired one | which trapstreet server to mirror progress to; also `TRAPSTREET_URL` |
 
 **Live progress sync.** With a stored token (`tp auth login`), `tp run` mirrors progress to
@@ -42,10 +43,35 @@ sync, the solution, judge, grader, `report.json` and the exit code are identical
 at the end; [`tp sync`](#tp-sync) delivers it later. No background service survives `tp run`,
 so nothing is sent after it exits until you ask.
 
+The sender opens the run's session on the site from a background thread and retries with a
+jittered backoff (at most 30 seconds between attempts) for as long as the run lasts; no event
+is posted before the session exists, and a run that starts offline is delivered in full once
+the site answers. While a case has been running with nothing to report for ten seconds the
+sender emits a heartbeat, so a long case is not shown as lost contact. The run's owner is
+frozen into the sidecar at start from the account id stored at pairing (see `tp auth`) — no
+network call — and only that account may later deliver the queue.
+
 When a run had a live session, its `report.json` carries the session's `client_run_id`, which
 is how a later `tp submit` lands on the same run page instead of creating a second one.
 Reports from runs without a session — and from older CLIs — simply have no such field and
 upload unchanged.
+
+**Site grading.** When the CLI is paired and the task checkout resolves, on the server, to an
+*admitted evaluation revision* (`GET /api/v2/evaluations/resolve` by the task's `{repo,
+commit, subdirectory}`), `tp run` opens a server-graded run (`POST /api/v2/evaluations`, under
+the live session's `client_run_id` so the site shows one execution) and prints `graded on site
+· <url>` once. As each case finishes, the solver's stdout is submitted as that case's answer
+(`POST /api/v2/runs/{run}/submissions`, in the report's `cases_results` shape with the
+duration, exit code and, when known, cost as self-declared `client_reported`). The local
+judge still runs and its scores are a preview; the site's verdicts are the evaluation's. The
+report gains an optional `site_grading: {run_id, url}` block.
+
+Site grading is fail-open and has no queue: a task that is not an admitted evaluation, an
+unpaired CLI, an unanchored task checkout, or a site that cannot be reached at start all mean
+the run is judged locally and nothing is submitted, then or later (only the last of these
+prints a line). Losing the site midway stops further submissions and leaves the site's run
+unfinished, said once. Nothing here changes the run's `0` / `2` / `3` exit code. `--no-site-grading`
+or `TRAP_NO_SITE_GRADING=1` turns it off; it is separate from `--no-live`.
 
 **Remote sources.** A remote `git+<url>` solution (or a task whose `source` is a git+
 URL) makes trap **download and run code you may not have seen** — its `setup_cmd`, the
@@ -87,14 +113,23 @@ tp sync [SOLUTION] [OPTIONS]
 | `--run / -r` | `latest` | which run to sync |
 | `--workspace / -w` | `.trap` | directory containing run artifacts |
 | `--server` | the run's own | the server the run was tracked against; a disagreement is refused |
+| `--claim` | `false` | adopt a run that froze no account into the account you are logged in as |
 
 `tp sync` publishes nothing and changes nothing about the run — not its `report.json`, not
 its `0` / `2` / `3` exit code. It only delivers progress the network never took.
 
+**One flow.** `tp sync` and the run's own sender share one delivery flow: verify the frozen
+identity, idempotently ensure the run's session exists on the site (`PUT
+/api/v2/local-runs/{client_run_id}` — done whenever the sidecar has no server id yet, which is
+what a run that began offline looks like), deliver the outbox in order, persist the
+acknowledgement. Nothing is sent before the session exists.
+
 **Identity.** A run's outbox is frozen to the account and server that created it. `tp sync`
 resolves the credential for *that* server (not `TRAPSTREET_URL`, not the default), fetches
 the account it belongs to, and compares. A rotated token for the same account continues; a
-different account is refused and the events stay on disk for their owner. `--server` exists
+different account is refused and the events stay on disk for their owner. A run that froze
+*no* account (tracked before the pairing was verified) is refused as well — `--claim` adopts
+it into the current account explicitly, freezing that account's verified id. `--server` exists
 to state the expected target, not to redirect a queue: a value that disagrees with the run's
 own is refused.
 
@@ -107,10 +142,12 @@ stored credential and no other server is tried.
 
 **Gap recovery.** If events the server still needs are gone (a cleaned-up or corrupted
 outbox), its contiguous acknowledgement can never move past the hole, and re-sending cannot
-help. `tp sync` then posts a **checkpoint** instead: the run's execution status and how many
-of how many cases finished, rebuilt from the events that survived and the saved report. The
-server opens a new producer generation, and the run's history is marked incomplete on the
-site. The checkpoint reports local execution state only — it cannot overwrite a report, a
+help. `tp sync` then posts a **checkpoint** instead: the run's execution status (one of
+`created`, `running`, `finished`, `failed`, `cancelled`) and how many of how many cases
+finished, rebuilt from the events that survived and the saved report. The server opens a new
+producer generation, and the run's history is marked incomplete on the site. If another
+client moved the generation first the server answers `409 CONFLICT`; `tp sync` re-reads the
+generation the server holds and retries the same checkpoint once. The checkpoint reports local execution state only — it cannot overwrite a report, a
 final status, or any score the server already holds. A run whose session id never reached
 disk cannot be synced at all: a fresh id would be a different run, so trap says the run was
 never tracked rather than inventing one.
@@ -191,6 +228,13 @@ stored one credential per server in `~/.config/trapstreet/auth.json` (mode 600),
 URL — logging in to one server never displaces another's. Legacy single-token files are migrated
 to the keyed shape automatically on first read. All three commands default to
 `https://trapstreet.run`; `--server` (or `TRAPSTREET_URL`) selects another credential.
+
+Both login flows verify the token with `GET /api/me` and store the account's **user id** next
+to it (it is identity, not a secret). A token the server refuses is not stored. If the server
+cannot be reached, the token is stored without an id and `login` says so: runs tracked with it
+have no frozen owner until `tp auth status` (which records the id once it can verify) or a later
+login succeeds, and `tp sync` needs `--claim` for those runs. A `TRAPSTREET_API_KEY` from the
+environment is never written to disk and carries no stored id.
 
 One credential per server also decides what `tp sync` may do: it resolves the token for the
 server a run's queue was created against, and refuses rather than reaching for another

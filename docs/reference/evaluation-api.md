@@ -8,7 +8,8 @@ This path needs no CLI. Any agent that can make HTTP requests can sit an
 evaluation — `tp` is one client, not the only one. If you have a terminal and
 just want to run a public task locally, you want [`tp run`](cli.md) instead;
 that path mirrors your progress to your account and keeps everything on your
-machine.
+machine — and, for a task the site has admitted as an evaluation, submits your
+answers for the site to judge as well (see [the `tp` path](#the-tp-path)).
 
 ## What the two paths actually differ on
 
@@ -38,6 +39,24 @@ publish it.
 
 ## The three calls
 
+### 0. Find the revision for a task checkout
+
+```http
+GET /api/v2/evaluations/resolve?repo=<repo_url>&commit=<sha>&path=<subdir>
+```
+
+```json
+{ "revision_id": "ev_…", "cases_total": 12, "admitted": true }
+```
+
+Given a task's git anchor — the normalised repository URL, the commit, and the
+subdirectory inside the repo when the task does not live at its root (omit
+`path` then) — this names the admitted evaluation revision built from it.
+`404` means there is none: the task is not an evaluation the site grades, which
+is the ordinary answer for most tasks and not an error. This is how a client
+that already knows *which checkout it ran* finds the revision without a
+catalogue; `tp run` uses it with the task's own `{repo, commit, subdirectory}`.
+
 ### 1. Open a run
 
 ```http
@@ -47,8 +66,8 @@ POST /api/v2/evaluations
 
 `client_run_id` is yours and must be unique per attempt. It is the idempotency
 key: retrying this call with the same one returns the same run rather than
-opening a second. The response carries the run's id, its URL, and how many
-cases there are.
+opening a second. The response carries the run (`run.id` is the id every later
+call uses), its `view_url`, and `cases_total`.
 
 The revision fixes the case set, the denominator, and whether this is a
 benchmark or a public sample. You choose *which* revision; you do not get to
@@ -115,6 +134,41 @@ until the end removes the gradient that would make guessing worth it.
   ungraded and the run does not finalise. A subset is not a shorter test.
 - **Answers are size-capped and refused, not truncated**, when too large — a
   truncated answer that scores zero is indistinguishable from a wrong one.
+
+## Submitting a whole run at once
+
+```http
+POST /api/v2/runs/{run}/submissions
+{ "cases_results": [
+    { "case_id": "c1", "answer": "tags", "duration": 0.41, "exit_code": 0,
+      "client_reported": { "duration_ms": 410, "cost_usd": 0.002 } } ] }
+```
+
+The bulk form of step 3, for a client that already holds the answers — the
+array is the CLI report's own `cases_results` shape, so `case_id` (or
+`ordinal`), `answer`, `duration` in seconds and `exit_code` are accepted as
+they are. It does not claim leases: a case is still answered once per run, a
+case whose `exit_code` is not `0` is **skipped** (left unanswered, not
+submitted empty), and every rule below still holds. The response counts what
+was `accepted`, what was a `duplicate` retry, what was `skipped` and what was
+`rejected`, and says `grading: queued`.
+
+## The `tp` path
+
+`tp run` sits an evaluation for you when three things are true: the CLI is
+paired (`tp auth login`), the task checkout is anchored to a commit, and step 0
+resolves that anchor to an admitted revision. It then opens the run (step 1)
+under the same `client_run_id` as its live-sync session, so the site shows the
+local execution and the graded run as one, and hands in each case's answer —
+the solver's stdout, as a string — through the bulk call above as the case
+finishes, with the duration, exit code and (when the cost proxy priced it) cost
+as `client_reported`. The local judge still runs; its scores are a preview.
+
+It is fail-open and keeps no queue: an unreachable site at start means the run
+is judged locally and nothing is submitted, then or later; a connection lost
+midway stops further submissions and leaves the site's run unfinished. Neither
+changes the run's exit code. `--no-site-grading` or `TRAP_NO_SITE_GRADING=1`
+turns it off. See [`tp run`](cli.md#tp-run).
 
 ## Publishing
 

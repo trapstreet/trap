@@ -26,6 +26,7 @@ tp run --output json  # machine-readable instead of the rich table
 | `--cost / --no-cost` | on | track LLM tokens/spend via the proxy |
 | `--environment / --no-environment` | on | record host CPU/RAM/OS/Python in the report |
 | `--live / --no-live` | on | mirror progress to your paired trapstreet account (see below) |
+| `--site-grading / --no-site-grading` | on | for an admitted evaluation, let the site judge each answer (see below) |
 | `--server` | the paired one | which trapstreet server to mirror to |
 
 ### Live progress sync
@@ -61,6 +62,44 @@ live sync: 7 progress event(s) not delivered — they stay in this run's outbox
 
 Send them later with [`tp sync`](#tp-sync). The CLI leaves no background service running,
 so nothing is delivered after `tp run` exits until you ask for it.
+
+A run that **starts offline** is not lost either. The sender keeps trying to open the run's
+session on the site for as long as the run lasts (backing off to at most 30 seconds between
+attempts), sends nothing until that succeeds, and then delivers everything from the outbox in
+order. If the network never comes back, `tp sync` opens the session first and does the same.
+
+While a case is running and nothing else has happened for ten seconds, the sender sends a
+heartbeat so a long case reads as "still running" on the site rather than as lost contact.
+
+**Whose run it is.** `tp auth login` verifies the token with the server and stores the
+account it belongs to; every run freezes that account into its sidecar before the first
+case, without a network call. `tp sync` only ever delivers a run to the account it was
+frozen to — under any later token of that account. A run tracked before the pairing was
+verified has no frozen owner, and `tp sync` refuses to hand it to whoever is logged in now
+unless you say so with `--claim`.
+
+### Site grading
+
+Some tasks are **admitted evaluations** on trapstreet: the site holds the reference answers
+and runs the task's own judge over what you submit. For those, a paired `tp run` hands each
+case's answer — the solver's stdout, nothing else — to the site as the case finishes, and
+prints where the site's verdicts will appear:
+
+```
+graded on site · https://trapstreet.run/runs/rs_…
+```
+
+The local judge still runs, and its scores are still what `report.json` and the terminal
+show; treat them as a **preview**. The site's verdicts are the ones that count for the
+evaluation, and they appear on that page as each case is graded (the numbers arrive
+together once every case is). The report records the graded run under `site_grading`.
+
+This is fail-open and has no queue. If the site cannot be reached when the run starts, or
+the task is not an admitted evaluation, the run is judged locally and nothing is submitted —
+then or later. If contact is lost midway, the remaining answers are not submitted and the
+site's run stays unfinished; the CLI says so in one line. None of this changes the run's exit
+code. Turn it off for a run with `--no-site-grading`, or everywhere with
+`TRAP_NO_SITE_GRADING=1`.
 
 ### Remote sources
 
@@ -105,11 +144,21 @@ tp sync --task test --run 2026-05-09T14:30:00 # a specific run
 | `--run / -r` | `latest` | which run to sync |
 | `--workspace / -w` | `.trap` | directory containing run artifacts |
 | `--server` | the run's own | must match the server the run was tracked against |
+| `--claim` | `false` | adopt a run that froze no account into the one you are logged in as |
 
 The queue belongs to the account and server it was created under. `tp sync` checks the
 current credential against that frozen identity first: a rotated token for the same person
 continues normally, a different account is refused and the events stay on disk. A `--server`
 that disagrees with the run's own is refused too — a queue cannot move servers.
+
+A run whose sidecar froze **no** account — tracked before `tp auth login` (or `tp auth
+status`) had verified the pairing — is refused too, because whoever is logged in now is not
+necessarily who ran it. Pass `--claim` to adopt it explicitly; the run then freezes your
+verified account and behaves like any other from then on.
+
+`tp sync` does the same three things the run's own sender does, in the same order: verify
+the frozen identity, make sure the run's session exists on the site (opening it if the run
+never reached the server), then deliver the queue. Nothing is sent before the session exists.
 
 `--task` names the alias in your `trap.yaml`, the same one you ran with. It is the solution
 author's own label and need not match the website's task id, so use the same alias for
