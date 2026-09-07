@@ -17,10 +17,12 @@ is what the local run earned. The only trace is one line saying what happened.
 for later. Grading is a conversation with a live server; a run that starts
 offline is graded locally and only locally, and says so.
 
-*One run on the site per run here.* The graded run is opened with the same
-``client_run_id`` as the live-sync session, so the site can show the two as one
-execution; when there is no live session, a fresh id is minted for the graded
-run alone.
+*One run on the site per run here.* The graded run's id is derived from the
+live-sync session's (``<client_run_id>-site``): the site keys a session by
+(owner, client_run_id) across BOTH channels, so the same id would collide with
+the private progress session rather than join it. The report carries the
+graded run's id and URL under ``site_grading``, which is the join. When there
+is no live session, a fresh id is minted for the graded run alone.
 """
 
 from __future__ import annotations
@@ -175,7 +177,7 @@ def start_site_grading(
         path=task.subdirectory,
         cases_total=cases_total,
         answer_of=answer_of,
-        client_run_id=client_run_id or new_client_run_id(),
+        client_run_id=f"{client_run_id}-site" if client_run_id else new_client_run_id(),
     )
     if grader is None:
         client.close()

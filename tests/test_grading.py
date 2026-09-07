@@ -97,13 +97,16 @@ def _start(monkeypatch, site: _Site | None = None, *, task=ANCHORED, store=None,
 # -- when grading is on -------------------------------------------------------
 
 
-def test_an_admitted_task_opens_a_graded_run_under_the_live_id(monkeypatch):
+def test_an_admitted_task_opens_a_graded_run_under_an_id_derived_from_the_live_one(monkeypatch):
+    # Not the SAME id: the site keys sessions by (owner, client_run_id) across
+    # both channels, so reusing the live id would collide with the private
+    # progress session instead of joining it.
     grader, site = _start(monkeypatch, client_run_id="r-1")
     assert grader is not None and grader.opened
     assert grader.url == "https://srv/runs/rs_9"
     assert grader.notice is None
     assert site.resolved == [{"repo": ANCHORED.repo, "commit": "abc123", "path": "tasks/a"}]
-    assert site.opens == [{"revision_id": "ev_1", "client_run_id": "r-1"}]
+    assert site.opens == [{"revision_id": "ev_1", "client_run_id": "r-1-site"}]
     summary = grader.summary()
     assert summary is not None and summary.model_dump() == {"run_id": "rs_9", "url": "https://srv/runs/rs_9"}
 
