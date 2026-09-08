@@ -8,10 +8,15 @@ stdin and prints its `message` field; the task scores that output.
 trap needs [uv](https://docs.astral.sh/uv/getting-started/installation/). Then:
 
 ```bash
-uv tool install trap-cli       # from PyPI
-# or latest main:
-uv tool install "git+https://github.com/trapstreet/trap.git"
+# main: --server, live progress, site grading (what trapstreet.run's launch pages need)
+uv tool install --force "git+https://github.com/trapstreet/trap.git"
+
+# stable 0.0.14 from PyPI: no --server / live progress / site grading
+uv tool install trap-cli
 ```
+
+A server can refuse a build that is too old for it (`426 CLIENT_TOO_OLD`); `tp` then prints
+the server's own message, which carries the install line, and runs the task locally only.
 
 The command is `tp` (check with `tp --help`).
 

@@ -15,6 +15,12 @@ from typing import Any
 
 import httpx
 
+from trap import __version__
+
+#: The server's answer to a CLI it will no longer talk to: HTTP 426 with this
+#: code, and an ``error`` text that carries the install command.
+CLIENT_TOO_OLD = "CLIENT_TOO_OLD"
+
 
 class LiveApiError(Exception):
     """A live-sync call did not succeed. Always caught by the tracker."""
@@ -25,13 +31,16 @@ class LiveApiError(Exception):
         *,
         status: int | None = None,
         payload: dict[str, Any] | None = None,
+        retry_after: int | None = None,
     ) -> None:
         super().__init__(message)
         self.status = status
         #: The error body, when the server sent a JSON object: ``{"error": <message>,
-        #: "code": <machine code>}`` on every route. Advisory only -- no caller
-        #: branches on it today, but a message worth showing lives here.
+        #: "code": <machine code>}`` on every route. Mostly advisory; the two
+        #: things a caller may branch on are the properties below.
         self.payload: dict[str, Any] = payload or {}
+        #: A ``Retry-After`` the server gave in whole seconds, else None.
+        self.retry_after = retry_after
 
     @property
     def credential_rejected(self) -> bool:
@@ -42,6 +51,19 @@ class LiveApiError(Exception):
         credential or server.
         """
         return self.status in (401, 403)
+
+    @property
+    def client_too_old(self) -> bool:
+        """The server refuses this build of tp outright. Terminal, never retried:
+        the feature is switched off for the run and the server's own words --
+        which name the install command -- are shown once."""
+        return self.status == 426 or self.payload.get("code") == CLIENT_TOO_OLD
+
+    @property
+    def server_message(self) -> str | None:
+        """The human ``error`` text from the body, when there is one."""
+        message = self.payload.get("error")
+        return message if isinstance(message, str) and message else None
 
 
 class LiveClient:
@@ -67,6 +89,7 @@ class LiveClient:
             headers={
                 "authorization": f"Bearer {self._api_key}",
                 "content-type": "application/json",
+                "user-agent": f"tp/{__version__}",
             },
             timeout=self._timeout,
         )
@@ -153,14 +176,37 @@ class LiveClient:
             params["path"] = path
         return self._request("GET", "/api/v2/evaluations/resolve", params=params)
 
-    def open_evaluation(self, *, revision_id: str, client_run_id: str) -> dict[str, Any]:
+    def open_evaluation(
+        self,
+        *,
+        revision_id: str,
+        client_run_id: str,
+        runtime: dict[str, Any] | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Open a server-graded run. Idempotent on ``client_run_id``: the same id
-        opens the same run, so a retry cannot create a second one."""
-        return self._request(
-            "POST",
-            "/api/v2/evaluations",
-            json={"revision_id": revision_id, "client_run_id": client_run_id},
-        )
+        opens the same run, so a retry cannot create a second one. ``runtime``
+        declares who is running it -- the same block the session PUT sends --
+        and ``context`` is the opening description (see :mod:`trap.live.context`),
+        stored with the run when it is created; a retry never replaces it."""
+        body: dict[str, Any] = {
+            "revision_id": revision_id,
+            "client_run_id": client_run_id,
+            "runtime": runtime or {},
+        }
+        if context is not None:
+            body["context"] = context
+        return self._request("POST", "/api/v2/evaluations", json=body)
+
+    def put_context(self, run_ref: str, patch: dict[str, Any]) -> dict[str, Any]:
+        """Describe a run: merge ``patch`` into what the site knows about it.
+
+        Accepted on both channels (the private local run and the graded one)
+        under the run's server id or its ``client_run_id``. The site answers
+        ``{accepted, ignored, context, run}``; a 400 names a field that is not
+        the client's to send, and is the one answer worth not retrying.
+        """
+        return self._request("POST", f"/api/v2/runs/{run_ref}/context", json=patch)
 
     def submit_answers(self, run_id: str, cases_results: list[dict[str, Any]]) -> dict[str, Any]:
         """Hand in answers for the site to judge, in the report's own ``cases_results`` shape."""
@@ -179,6 +225,7 @@ class LiveClient:
                 f"http {e.response.status_code}",
                 status=e.response.status_code,
                 payload=_json_object(e.response),
+                retry_after=_retry_after(e.response),
             ) from None
         except httpx.RequestError as e:
             raise LiveApiError(f"unreachable: {type(e).__name__}") from None
@@ -200,3 +247,11 @@ def _json_object(response: httpx.Response) -> dict[str, Any]:
     except ValueError:
         return {}
     return body if isinstance(body, dict) else {}
+
+
+def _retry_after(response: httpx.Response) -> int | None:
+    """``Retry-After`` in whole seconds, or None. The HTTP-date form is ignored:
+    a backoff of its own is good enough, and a clock comparison is not worth
+    getting wrong."""
+    value = response.headers.get("retry-after", "").strip()
+    return int(value) if value.isdigit() else None

@@ -14,10 +14,21 @@ the end.
 The sender thread owns the network entirely. It opens the session through the
 shared :class:`~trap.live.delivery.Delivery` flow -- and keeps trying, with a
 jittered backoff, for as long as the run lasts -- and it posts no event until
-that has succeeded. Everything appended before then waits in the outbox, which
-is where the backlog is read from once the server answers. While a case is
-running and nothing else has happened for a while, the same thread emits a
-heartbeat so a long case does not read as lost contact.
+that has succeeded. The outbox is where every batch is cut from, against the
+server's contiguous acknowledgement: the queue between the run and the sender
+only says *that* something was appended, never what. So a batch the network
+dropped is re-sent, before anything newer, on the sender's next wake, and the
+server's acknowledgement can move again. While a case is running and nothing
+else has happened for a while, the same thread emits a heartbeat so a long case
+does not read as lost contact.
+
+The run's *description* -- what it was made of, see :mod:`trap.live.context`
+-- travels beside the events, not among them. It is not progress: it is a
+merge-only record the site keeps per run, so it has no sequence number and no
+place in the outbox. :meth:`LiveTracker.describe` hands a patch to the sender,
+which posts it once the session exists and the outbox is caught up; a patch
+the site did not take is dropped with one notice -- the end-of-run description
+says everything the opening one did, and what it adds is also in the report.
 """
 
 from __future__ import annotations
@@ -29,12 +40,12 @@ import time
 import uuid
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from trap.live.client import LiveApiError, LiveClient
 from trap.live.delivery import Delivery
 from trap.live.identity import LiveSession
-from trap.live.outbox import Outbox, OutboxError
+from trap.live.outbox import Outbox, OutboxError, OutboxEvent
 from trap.models.results import CaseResult
 
 #: Wait no longer than this for the queue to drain at the end of a run. The
@@ -53,6 +64,10 @@ HEARTBEAT_SECONDS = 10.0
 #: many CLIs coming back online together do not knock in lockstep.
 ENSURE_BACKOFF_INITIAL = 1.0
 ENSURE_BACKOFF_CAP = 30.0
+
+#: What woke the sender. ``event``: the run appended something; ``stop``:
+#: close() was called; ``idle``: a heartbeat interval passed with nothing new.
+Wake = Literal["event", "stop", "idle"]
 
 #: Every event type this module can emit. The contract test checks each one
 #: against the server's allowlist; ``_emit`` is only ever called with these.
@@ -141,7 +156,12 @@ class LiveTracker:
         self._thread: threading.Thread | None = None
         self._disabled = False
         self._notice: str | None = None
+        # A description the site did not take is worth one line, but never at
+        # the expense of the line that says progress is still on disk.
+        self._context_notice: str | None = None
         self._stop = object()
+        # Descriptions collected off the queue and not yet posted; sender-owned.
+        self._descriptions: list[dict[str, Any]] = []
         # Session state, owned by the sender thread.
         self._clock = clock
         self._rng = rng
@@ -172,8 +192,13 @@ class LiveTracker:
 
     @property
     def notice(self) -> str | None:
-        """A single short line to show the user, or None. Never more than one per run."""
-        return self._notice
+        """A single short line to show the user, or None. Never more than one per run.
+
+        Anything about the queue -- a rejected token, an outbox that could not
+        be written, progress left on disk -- outranks a description the site
+        did not take: the first is actionable, the second is not.
+        """
+        return self._notice or self._context_notice
 
     def start(self) -> None:
         """Begin mirroring. Never raises."""
@@ -201,6 +226,21 @@ class LiveTracker:
                 f"live sync: {pending} progress event(s) not delivered — kept locally in this "
                 "run's outbox; run tp sync later"
             )
+
+    def describe(self, patch: dict[str, Any]) -> None:
+        """Record what this run is made of (see :mod:`trap.live.context`).
+
+        Handed to the sender as it is: the patch was built field by field by the
+        context module, and this method adds nothing to it. Posted after the
+        session exists and the outbox is caught up, so the opening description
+        never overtakes the session it describes. Never raises, never blocks.
+        """
+        if self._disabled:
+            return
+        try:
+            self._queue.put_nowait(dict(patch))
+        except Exception as e:  # pragma: no cover - defensive
+            self._disable(f"live sync off ({e.__class__.__name__})")
 
     # -- observer callbacks -------------------------------------------------
 
@@ -293,7 +333,9 @@ class LiveTracker:
                 payload=payload,
                 producer_generation=self._session.producer_generation,
             )
-            self._queue.put_nowait(event.wire())
+            # A wake token, not the batch: the event is already durable, and the
+            # sender cuts every batch from the outbox itself.
+            self._queue.put_nowait(event.client_seq)
         except OutboxError as e:
             # A read-only or full disk. The run is unaffected; only the mirror
             # stops, and it stops loudly enough to be seen once.
@@ -306,11 +348,13 @@ class LiveTracker:
         if self._notice is None:
             self._notice = notice
 
+    def _pending(self) -> list[OutboxEvent]:
+        """Everything the server has not acknowledged, oldest first."""
+        return self._outbox.pending(self._session.acked_seq, generation=self._session.producer_generation)
+
     def _pending_count(self) -> int:
         try:
-            return len(
-                self._outbox.pending(self._session.acked_seq, generation=self._session.producer_generation)
-            )
+            return len(self._pending())
         except Exception:  # pragma: no cover - defensive
             return 0
 
@@ -325,65 +369,58 @@ class LiveTracker:
             self._disable(f"live sync off ({e.__class__.__name__})")
 
     def _drain_once(self) -> bool:
-        """One wake of the sender: a batch, a session attempt, or a heartbeat.
+        """One wake of the sender: a session attempt, the outbox, or a heartbeat.
 
         Split out of the thread body so the rules are testable without racing a
         thread: everything here is synchronous given a filled queue. Returns
         False once the stop sentinel has been seen.
 
-        Until the session is established nothing is posted. Whatever arrived
-        meanwhile is already in the outbox, so it is not lost by being taken
-        off the queue here -- it is sent as the backlog the moment the server
-        answers.
+        Every cycle sends from the sidecar's contiguous acknowledgement, never
+        from what happened to be queued: a batch the network dropped is re-sent,
+        before anything newer, on the very next wake, so the server's ack can
+        move again. The queue only says *that* something happened; the outbox
+        says what. Until the session is established nothing is posted, and
+        whatever arrived meanwhile is already on disk to be sent as the backlog
+        the moment the server answers.
         """
-        batch, stopping = self._collect()
+        wake = self._collect()
         if self._disabled:
-            return not stopping
+            return wake != "stop"
         if not self._ensured:
             self._try_ensure()
-            if self._ensured:
-                self._send_backlog()
-        elif batch := self._unacked(batch):
-            self._send(batch)
-        elif not stopping and self._current_ordinal is not None:
-            # A quiet interval in the middle of a case: say it is still running.
+        owed = self._ensured and self._send_pending()
+        if self._ensured:
+            self._send_descriptions()
+        if self._ensured and not owed and wake == "idle" and self._current_ordinal is not None:
+            # A quiet interval mid-case with nothing owed: say it is still
+            # running. A wake with something owed retries that instead --
+            # beating into a dead link would only pile heartbeats into the
+            # outbox.
             self._emit("heartbeat", {"ordinal": self._current_ordinal})
-        return not stopping
+        return wake != "stop"
 
-    def _unacked(self, batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Drop what the backlog already delivered: an event queued before the
-        session opened was sent from the outbox, and resending it would only
-        cost the server a duplicate to recognise."""
-        return [event for event in batch if event["client_seq"] > self._session.acked_seq]
+    def _collect(self) -> Wake:
+        """Block for the next wake, then swallow every wake already queued.
 
-    def _collect(self) -> tuple[list[dict[str, Any]], bool]:
-        """One bounded take, then everything already waiting, up to a batch.
-
-        Coalescing matters because a run emits several events per case; without
-        it a twenty-case run costs sixty requests instead of a handful. The
-        first take gives up after a heartbeat interval so the sender also wakes
-        when nothing is happening -- to retry the session, or to beat.
+        Many wakes collapse into one cycle so a burst of events costs one
+        request, not one per event; the batch itself is cut from the outbox.
+        A description rides the same queue and is kept aside for posting,
+        in the order it was given. The wait gives up after a heartbeat
+        interval so the sender also runs when nothing is happening -- to
+        retry the session, to re-send what the network dropped, or to beat.
         """
-        batch: list[dict[str, Any]] = []
-        stopping = False
         try:
             item = self._queue.get(timeout=HEARTBEAT_SECONDS)
         except queue.Empty:
-            return batch, stopping
-        if item is self._stop:
-            stopping = True
-        else:
-            batch.append(item)  # type: ignore[arg-type]
-        while not stopping and len(batch) < MAX_BATCH:
+            return "idle"
+        while item is not self._stop:
+            if isinstance(item, dict):
+                self._descriptions.append(item)
             try:
-                extra = self._queue.get_nowait()
+                item = self._queue.get_nowait()
             except queue.Empty:
-                break
-            if extra is self._stop:
-                stopping = True
-                break
-            batch.append(extra)  # type: ignore[arg-type]
-        return batch, stopping
+                return "event"
+        return "stop"
 
     def _try_ensure(self) -> None:
         """Verify identity and open the session, if the backoff allows it now.
@@ -414,12 +451,20 @@ class LiveTracker:
         self._next_ensure_at = now + self._ensure_delay * jitter
         self._ensure_delay = min(self._ensure_delay * 2, ENSURE_BACKOFF_CAP)
 
-    def _send_backlog(self) -> None:
-        """Everything the server has not acknowledged, oldest first, in batches."""
-        pending = self._outbox.pending(self._session.acked_seq, generation=self._session.producer_generation)
+    def _send_pending(self) -> bool:
+        """Everything the server has not acknowledged, oldest first, in batches.
+
+        Read from the outbox against the contiguous ack, so a gap -- a batch the
+        network dropped while later ones went through -- is filled before
+        anything newer is pushed. Stops at the first batch the server does not
+        take; the next wake starts again from the ack. True when there was
+        anything to send.
+        """
+        pending = self._pending()
         for start in range(0, len(pending), MAX_BATCH):
             if not self._send([event.wire() for event in pending[start : start + MAX_BATCH]]):
-                return
+                break
+        return bool(pending)
 
     def _send(self, events: list[dict[str, Any]]) -> bool:
         """Post one batch. False when the server did not take it, or took it
@@ -430,7 +475,36 @@ class LiveTracker:
             self._handle_api_error(e)
             return False
 
+    def _send_descriptions(self) -> None:
+        """Post the descriptions collected so far, oldest first, once the outbox
+        is caught up -- to the run the server named, or the client id it also
+        resolves. Each is tried once: a description is not progress, nothing
+        on disk depends on it, and the closing one repeats everything the
+        opening one said. A refusal that retires the credential or the build
+        is handled like any other; anything else costs one line, once.
+        """
+        if not self._descriptions or self._pending():
+            # Nothing to say, or the link just dropped a batch: a description
+            # would fail the same way, so it waits for the wake that catches up.
+            return
+        descriptions, self._descriptions = self._descriptions, []
+        for patch in descriptions:
+            if self._disabled:
+                break  # a retired credential or build: the next would be refused the same way
+            try:
+                self._client.put_context(self._delivery.reference, patch)
+            except LiveApiError as e:
+                self._handle_api_error(e)
+                if self._context_notice is None:
+                    self._context_notice = f"live sync: this run's description was not recorded ({e})"
+
     def _handle_api_error(self, error: LiveApiError) -> None:
+        if error.client_too_old:
+            # The server will not talk to this build at all. Not a retry case:
+            # its answer names the install command, so that is what is shown,
+            # and the outbox is kept for the next build to deliver.
+            self._disable("live sync off: " + (error.server_message or "this server needs a newer tp"))
+            return
         if error.credential_rejected:
             # Stop using a credential the server refused. Deliberately no
             # fallback to another stored credential or another server: the

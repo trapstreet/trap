@@ -1,11 +1,14 @@
-"""Delivering a finished run's queued progress, later.
+"""Delivering a finished run's queued progress -- and its unconfirmed answers -- later.
 
 `tp run` mirrors progress while it happens, but a CLI has no daemon: when the
 process exits, whatever the network never took stays in the run's outbox. This
 module is the other half of that promise -- `tp sync` picks a run up afterwards
 and hands the queue over, through the same :class:`~trap.live.delivery.Delivery`
 flow the in-run sender uses: verify the frozen identity, ensure the session,
-drain, persist the acknowledgement.
+drain, persist the acknowledgement. A run that was also graded on the site has
+a second queue, its answers (:mod:`trap.live.answers`); `tp sync` resends
+those to the same graded run, under the same identity rule, and reports both
+halves.
 
 Three rules shape everything here.
 
@@ -39,8 +42,9 @@ from pydantic import BaseModel, ValidationError
 
 from trap.auth.resolve import ResolvedAuth
 from trap.auth.store import CredentialStore, CredentialStoreError
+from trap.live.answers import AnswerOutbox, GradedRun, ResendOutcome, classify, describe, resend, shortfall
 from trap.live.client import LiveApiError, LiveClient
-from trap.live.delivery import Delivery, RefusalReason
+from trap.live.delivery import Delivery, RefusalReason, verify_identity
 from trap.live.identity import LiveSession
 from trap.live.outbox import Outbox, OutboxEvent
 from trap.live.tracker import MAX_BATCH
@@ -74,34 +78,72 @@ _TERMINAL_STATUS = {
 }
 
 
-class SyncReport(BaseModel):
-    """What one `tp sync` did, as data the CLI only has to print.
+#: What resending a run's answers ended up being. The same reading as
+#: ``SyncStatus``: only ``refused`` is an error.
+AnswerSyncStatus = Literal["up_to_date", "delivered", "partial", "offline", "stalled", "refused"]
 
-    Keeping the outcome a model rather than printed text means the decision
-    "is this an error?" is made once, here, and the command layer cannot
-    accidentally turn a queued run into a non-zero exit.
-    """
 
-    status: SyncStatus
+class AnswerSyncReport(BaseModel):
+    """What `tp sync` did with a run's unconfirmed answers."""
+
+    status: AnswerSyncStatus
     delivered: int = 0
     remaining: int = 0
     message: str
 
     @property
     def refused(self) -> bool:
-        """True when the CLI should exit non-zero. Offline never is."""
         return self.status == "refused"
 
 
+class SyncReport(BaseModel):
+    """What one `tp sync` did, as data the CLI only has to print.
+
+    Keeping the outcome a model rather than printed text means the decision
+    "is this an error?" is made once, here, and the command layer cannot
+    accidentally turn a queued run into a non-zero exit. The progress half is
+    the model itself; the answers half, when the run was graded on the site,
+    sits under ``answers``.
+    """
+
+    status: SyncStatus
+    delivered: int = 0
+    remaining: int = 0
+    message: str
+    answers: AnswerSyncReport | None = None
+
+    @property
+    def refused(self) -> bool:
+        """True when the CLI should exit non-zero. Offline never is."""
+        return self.status == "refused" or (self.answers is not None and self.answers.refused)
+
+    @property
+    def refusal(self) -> str:
+        """The message of whichever half refused -- the progress half first."""
+        if self.status != "refused" and self.answers is not None and self.answers.refused:
+            return self.answers.message
+        return self.message
+
+    @property
+    def lines(self) -> list[str]:
+        """What to print, in order. A run that mirrored no progress but was
+        graded on the site says nothing about progress -- only about answers."""
+        lines = [] if self.status == "untracked" and self.answers is not None else [self.message]
+        if self.answers is not None:
+            lines.append(self.answers.message)
+        return lines
+
+
 def sync_run(run_dir: Path, *, server_override: str | None = None, claim: bool = False) -> SyncReport:
-    """Deliver ``run_dir``'s queued progress. Never raises.
+    """Deliver ``run_dir``'s queued progress and unconfirmed answers. Never raises.
 
     ``claim`` adopts a run that froze no account into the current one; without
     it such a run is refused, because whoever is logged in now is not
     necessarily who ran it.
     """
     session = LiveSession.load(run_dir)
-    if session is None:
+    graded = GradedRun.load(run_dir)
+    if session is None and graded is None:
         # Either sync was off, or the sidecar never landed. Both mean this run
         # has no identity on the server, and minting one now would invent a
         # second run rather than continue this one -- so sync is simply not
@@ -110,30 +152,40 @@ def sync_run(run_dir: Path, *, server_override: str | None = None, claim: bool =
             status="untracked",
             message="this run was never tracked, so there is no queued progress to send.",
         )
-    if server_override is not None and server_override.rstrip("/") != session.server.rstrip("/"):
+    # Both sidecars are written under one credential, so they name one server.
+    server = session.server if session is not None else graded.server  # type: ignore[union-attr]
+    if server_override is not None and server_override.rstrip("/") != server.rstrip("/"):
         return SyncReport(
             status="refused",
             message=(
-                f"this run's queue was created against {session.server}, not {server_override} — "
+                f"this run's queue was created against {server}, not {server_override} — "
                 "a queue cannot move servers. Re-run tp sync without --server."
             ),
         )
     try:
-        auth = ResolvedAuth.resolve(CredentialStore(), session.server)
+        auth = ResolvedAuth.resolve(CredentialStore(), server)
     except CredentialStoreError as e:
         return SyncReport(status="refused", message=f"cannot read the stored credentials: {e}")
     if auth.api_key is None:
         return SyncReport(
             status="refused",
             message=(
-                f"not logged in to {session.server}, which is where this run's queue belongs. "
-                f"Run tp auth login --server {session.server}."
+                f"not logged in to {server}, which is where this run's queue belongs. "
+                f"Run tp auth login --server {server}."
             ),
         )
 
-    client = LiveClient(session.server, auth.api_key)
+    client = LiveClient(server, auth.api_key)
     try:
-        return _deliver(session, run_dir, client, claim=claim)
+        if session is not None:
+            report = _deliver(session, run_dir, client, claim=claim)
+        else:
+            report = SyncReport(status="untracked", message="this run mirrored no progress.")
+        if graded is None or report.status == "refused":
+            # A credential the progress half refused would be refused again
+            # for the answers, for the same reason; one refusal says it.
+            return report
+        return report.model_copy(update={"answers": _deliver_answers(graded, run_dir, client, claim=claim)})
     finally:
         client.close()
 
@@ -366,8 +418,148 @@ def _load_report(run_dir: Path) -> ReportData | None:
         return None
 
 
+# -- the answers half --------------------------------------------------------
+
+
+def _deliver_answers(
+    graded: GradedRun, run_dir: Path, client: LiveClient, *, claim: bool
+) -> AnswerSyncReport:
+    """Resend the answers the site never confirmed, under the same identity rule
+    the progress queue has: the graded run belongs to the account it was
+    opened under, and `--claim` is what adopts one that froze none."""
+    outbox = AnswerOutbox(run_dir)
+    pending = outbox.pending()
+    if not pending:
+        return AnswerSyncReport(
+            status="up_to_date",
+            message=f"nothing queued — the site has every answer this run submitted ({graded.url}).",
+        )
+    try:
+        refusal, verified = verify_identity(client, frozen_user_id=graded.user_id, claim=claim)
+    except LiveApiError as e:
+        return _answers_failure(e, graded, ResendOutcome(remaining=len(pending)))
+    if refusal is not None:
+        return AnswerSyncReport(
+            status="refused", remaining=len(pending), message=_answers_refused(refusal, graded, len(pending))
+        )
+    if graded.user_id is None:
+        # Claimed: freeze the verified account so the question is never open again.
+        graded.user_id = verified
+        try:
+            graded.save(run_dir)
+        except OSError:
+            pass  # costs a --claim next time, never the queue
+
+    outcome = resend(client, graded, outbox, run_dir)
+    if outcome.error is not None:
+        return _answers_failure(outcome.error, graded, outcome)
+    detail = shortfall(outcome.rejected, outcome.skipped, outcome.unreadable)
+    if outcome.remaining == 0:
+        return AnswerSyncReport(
+            status="delivered",
+            delivered=outcome.delivered,
+            message=f"submitted {outcome.delivered} queued answer(s) to {graded.url}{detail}.",
+        )
+    if outcome.delivered:
+        return AnswerSyncReport(
+            status="partial",
+            delivered=outcome.delivered,
+            remaining=outcome.remaining,
+            message=(
+                f"submitted {outcome.delivered} of {outcome.delivered + outcome.remaining} queued answer(s) "
+                f"to {graded.server}; {outcome.remaining} remain — run tp sync again later{detail}."
+            ),
+        )
+    return AnswerSyncReport(
+        status="stalled",
+        remaining=outcome.remaining,
+        message=(
+            f"{graded.server} confirmed none of this run's {outcome.remaining} queued answer(s); "
+            f"they stay on disk{detail}."
+        ),
+    )
+
+
+def _answers_refused(reason: RefusalReason, graded: GradedRun, remaining: int) -> str:
+    if reason == "unowned":
+        return (
+            f"this run's graded run froze no account: it was opened before the CLI's pairing with "
+            f"{graded.server} was verified, so its {remaining} unconfirmed answer(s) have no proven "
+            "owner. Pass --claim to adopt it into the account you are logged in as now."
+        )
+    if reason == "unidentified":
+        return (
+            f"cannot claim this run's graded run: {graded.server} did not say which account this "
+            "token belongs to, so there is no verified identity to freeze."
+        )
+    return (
+        f"this run's {remaining} unconfirmed answer(s) belong to a different account on "
+        f"{graded.server}; they stay on disk. Log in as that account to send them."
+    )
+
+
+def _answers_failure(error: LiveApiError, graded: GradedRun, outcome: ResendOutcome) -> AnswerSyncReport:
+    """Turn a failed request into an outcome. A rejected token, or a build the
+    server refuses, is an error; everything else leaves the answers on disk."""
+    why = describe(error, graded.run_id)
+    remaining = outcome.remaining
+    detail = shortfall(outcome.rejected, outcome.skipped, outcome.unreadable)
+    if error.client_too_old:
+        return AnswerSyncReport(
+            status="refused",
+            delivered=outcome.delivered,
+            remaining=remaining,
+            message=f"{why}; {remaining} answer(s) stay on disk for it.",
+        )
+    if classify(error) == "credential":
+        return AnswerSyncReport(
+            status="refused",
+            delivered=outcome.delivered,
+            remaining=remaining,
+            message=f"{why}, so no other credential was tried; {remaining} answer(s) stay on disk.",
+        )
+    if error.status is None and not outcome.delivered:
+        return AnswerSyncReport(
+            status="offline",
+            remaining=remaining,
+            message=(
+                f"the site is unreachable ({error}); this run's {remaining} queued answer(s) stay on "
+                "disk — run tp sync again when you are back online."
+            ),
+        )
+    if outcome.delivered:
+        return AnswerSyncReport(
+            status="partial",
+            delivered=outcome.delivered,
+            remaining=remaining,
+            message=(
+                f"submitted {outcome.delivered} queued answer(s), then {why}; "
+                f"{remaining} remain — run tp sync again later{detail}."
+            ),
+        )
+    return AnswerSyncReport(
+        status="stalled",
+        remaining=remaining,
+        message=f"{why}; {remaining} answer(s) stay on disk{detail}.",
+    )
+
+
 def _api_failure(error: LiveApiError, *, delivered: int, remaining: int) -> SyncReport:
-    """Turn a failed call into an outcome. Only a rejected credential is an error."""
+    """Turn a failed call into an outcome. A rejected credential, or a build the
+    server will no longer talk to, is an error; everything else is a queue that
+    stays on disk."""
+    if error.client_too_old:
+        # Retrying can never succeed from this build, so this is not "later":
+        # the server's words name the install command.
+        return SyncReport(
+            status="refused",
+            delivered=delivered,
+            remaining=remaining,
+            message=(
+                f"{error.server_message or 'this server needs a newer tp'}; "
+                f"{remaining} event(s) stay on disk for it."
+            ),
+        )
     if error.credential_rejected:
         return SyncReport(
             status="refused",

@@ -10,13 +10,22 @@ allowlist of progress facts, nothing more: the run's execution status; case **or
 (`3 of 12`), never case names; a pass / fail / error verdict per case; scores, durations
 and cost; judge and grader started / finished; a heartbeat while a long case runs; the
 run's exit code. For a task the site does not know, a snapshot of the display name, case
-count and selected ordinals. What never crosses: case names, inputs, expected answers,
-your solution's output, stdout, stderr, file paths, environment variables, command lines.
-Undelivered events wait in the run's outbox on disk until `tp sync` sends them.
+count and selected ordinals. And the run's **description**, once at the start and once at
+the end: tp's version, the model and framework `trap.yaml` declares, the agent that
+launched tp when it names itself (`TRAP_AGENT`), the machine (OS, CPU, RAM, Python — the
+same block as `report.json`, or *disabled* under `--no-environment`), the solution's and
+task's commits, the solver time, and the cost proxy's token counts per model (or *disabled*
+under `--no-cost`). What never crosses: case names, inputs, expected answers, your
+solution's output, stdout, stderr, file paths, environment variables, command lines.
+Undelivered events wait in the run's outbox on disk until `tp sync` sends them; a
+description the site did not take is dropped and said once.
 
 **`tp run` on an admitted evaluation** (site grading, on by default when paired)
 additionally sends each case's **answer** — the solver's stdout as a string, nothing
-else — with its duration, exit code and cost as self-declared fields.
+else — with its duration, exit code and cost as self-declared fields. An answer the site
+did not confirm is retried during the run and, afterwards, by `tp sync`, which re-reads it
+from the run directory: the queue on disk holds a digest and the wire fields, never a
+second copy of the answer.
 
 **`tp submit`** uploads the whole `report.json`: per-case metrics verbatim from the judge,
 grader output, environment, cost, and the git provenance of the solution and task. It is

@@ -32,10 +32,10 @@ tp run [SOLUTION] [OPTIONS]
 that account while the run happens and prints the private page for it. It **publishes
 nothing** — no report upload, no leaderboard entry, nothing visible to anyone else; that is
 `tp submit`'s job alone. Only progress facts leave the machine: case ordinals (never case
-names), a `passed` / `failed` / `error` verdict, scores, durations, cost and the exit code —
-never inputs, expected answers, solution output, stdout, paths, environment or command
-lines. Sync is off when no token is stored, off with `--no-live`, and off everywhere with
-`TRAP_NO_LIVE=1`.
+names), a `passed` / `failed` / `error` verdict, scores, durations, cost and the exit code,
+plus the run's description (below) — never inputs, expected answers, solution output,
+stdout, paths, environment variables or command lines. Sync is off when no token is
+stored, off with `--no-live`, and off everywhere with `TRAP_NO_LIVE=1`.
 
 Sync can never change the run: with no network, a rejected token, a full disk or a bug in
 sync, the solution, judge, grader, `report.json` and the exit code are identical to a
@@ -51,10 +51,40 @@ sender emits a heartbeat, so a long case is not shown as lost contact. The run's
 frozen into the sidecar at start from the account id stored at pairing (see `tp auth`) — no
 network call — and only that account may later deliver the queue.
 
+A server may refuse a build of `tp` that is too old for it (`426 CLIENT_TOO_OLD`, on the
+session open or on `tp sync`). That is terminal, not retried: `tp run` prints the server's own
+message — it carries the install command — once, keeps mirroring off for the run, and the
+outbox stays on disk for a newer build; `tp sync` reports it as a refusal (exit `2`). Site
+grading answers the same refusal the same way. Both send `runtime.trap_version` as the build
+reports it, `0.0.0+unknown` included; the server decides.
+
 When a run had a live session, its `report.json` carries the session's `client_run_id`, which
 is how a later `tp submit` lands on the same run page instead of creating a second one.
 Reports from runs without a session — and from older CLIs — simply have no such field and
 upload unchanged.
+
+**What tp reports about the run.** Beside the progress events, `tp run` *describes* the run
+to the site twice — once when it opens and once when it ends (`POST
+/api/v2/runs/{run}/context`; the graded run, when there is one, gets the opening
+description on its open and the closing one on its way out) — so the run page can say what
+the run was made of, apart from what it scored. The description has eight groups, and tp
+fills them as far as it can see: `identity` (tp as launcher and executor, the
+`profile.framework` list, and the agent that launched tp when it says so through
+`TRAP_AGENT` / `TRAP_AGENT_VERSION`); `model` (the `profile.model` list, recorded as
+*declared* from `trap.yaml` — tp does not watch the calls, so it never claims a model was
+*observed*); `environment` (the same OS / CPU / RAM / Python block as `report.json`);
+`reproducibility` (the solution's and task's `{repo, commit, subdirectory}`, or the reason a
+side is unanchored, and the tp build); and, at the end, `timing` (the sum of the cases'
+durations and the run's wall time) and `usage` (the cost proxy's token counts, calls and
+priced cost, folded per provider and model — never per case; a bucket with an unpriced call
+reports its tokens and no cost). `skills` and `tools` are reported as *unsupported* with the
+reason: tp runs a solver process and does not see inside it. `--no-environment` and
+`--no-cost` report their group as *disabled* rather than leaving it out, and a group tp did
+not report is shown by the site as **not reported — never as zero**. Nothing in the
+description names a case: no ids, no answers, no output, no paths. It is descriptive only
+— never part of a score — and it cannot change the run: a description the site does not
+take is dropped with one line (it keeps no outbox and is not retried; the closing one
+repeats everything the opening one said, and `report.json` holds the same facts).
 
 **Site grading.** When the CLI is paired and the task checkout resolves, on the server, to an
 *admitted evaluation revision* (`GET /api/v2/evaluations/resolve` by the task's `{repo,
@@ -66,12 +96,22 @@ duration, exit code and, when known, cost as self-declared `client_reported`). T
 judge still runs and its scores are a preview; the site's verdicts are the evaluation's. The
 report gains an optional `site_grading: {run_id, url}` block.
 
-Site grading is fail-open and has no queue: a task that is not an admitted evaluation, an
-unpaired CLI, an unanchored task checkout, or a site that cannot be reached at start all mean
-the run is judged locally and nothing is submitted, then or later (only the last of these
-prints a line). Losing the site midway stops further submissions and leaves the site's run
-unfinished, said once. Nothing here changes the run's `0` / `2` / `3` exit code. `--no-site-grading`
-or `TRAP_NO_SITE_GRADING=1` turns it off; it is separate from `--no-live`.
+Site grading is fail-open at start: a task that is not an admitted evaluation, an unpaired
+CLI, an unanchored task checkout, or a site that cannot be reached at start all mean the run
+is judged locally and nothing is submitted, then or later (only the last of these prints a
+line). Once the graded run is open it **keeps a queue**: each answer is recorded in the run's
+answers outbox (`live/answers.jsonl` — the wire fields and a sha256, never the answer text,
+which stays in `<case>/solution/stdout`) before it is sent, from a background thread the run
+never waits on. A request the site does not take is retried with a jittered backoff (at most
+30 seconds, or the site's `Retry-After`) for as long as the run lasts; a rejected token, a
+graded run the site no longer holds for this account, or a build the site refuses stops
+submissions for good and is said once. The site's receipt settles each case by name: an
+answer it `skipped` (the solver errored) or `rejected` is never resent as if it were new,
+and the site's run stays unfinished. At the end `tp run` prints one summary line —
+`site grading: 3 of 4 answer(s) submitted; …` — naming anything skipped, rejected, unreadable
+here, or not yet confirmed; the unconfirmed ones stay on disk for [`tp sync`](#tp-sync).
+Nothing here changes the run's `0` / `2` / `3` exit code. `--no-site-grading` or
+`TRAP_NO_SITE_GRADING=1` turns it off; it is separate from `--no-live`.
 
 **Remote sources.** A remote `git+<url>` solution (or a task whose `source` is a git+
 URL) makes trap **download and run code you may not have seen** — its `setup_cmd`, the
@@ -116,7 +156,21 @@ tp sync [SOLUTION] [OPTIONS]
 | `--claim` | `false` | adopt a run that froze no account into the account you are logged in as |
 
 `tp sync` publishes nothing and changes nothing about the run — not its `report.json`, not
-its `0` / `2` / `3` exit code. It only delivers progress the network never took.
+its `0` / `2` / `3` exit code. It only delivers progress the network never took and, for a run
+that was graded on the site, resends the answers the site never confirmed.
+
+**Two queues, one command.** A run may have a live session (`live/session.json` +
+`live/outbox.jsonl`), a graded run (`live/grading.json` + `live/answers.jsonl`), both, or
+neither. `tp sync` handles whichever exist and prints one line per half; a run with neither
+was never tracked. The answers are re-read from each case's `solution/stdout` and checked
+against the digest recorded when they were queued — a file that changed underneath the queue
+is reported as unreadable, not sent as a different answer — and posted to the same graded run
+(`POST /api/v2/runs/{run}/submissions`), which answers a per-case receipt. A graded run the
+site no longer holds for this account is reported and the answers stay on disk (exit `0`);
+only a rejected token, a different account, or a build the site refuses is an error.
+
+`latest` resolves to the newest run that has a `report.json`, so a run that was killed before
+it finished is synced by naming it: `tp sync --run <timestamp>`.
 
 **One flow.** `tp sync` and the run's own sender share one delivery flow: verify the frozen
 identity, idempotently ensure the run's session exists on the site (`PUT
@@ -131,14 +185,16 @@ different account is refused and the events stay on disk for their owner. A run 
 *no* account (tracked before the pairing was verified) is refused as well — `--claim` adopts
 it into the current account explicitly, freezing that account's verified id. `--server` exists
 to state the expected target, not to redirect a queue: a value that disagrees with the run's
-own is refused.
+own is refused. The graded run is frozen the same way, to the account it was opened under;
+`--claim` adopts one that froze none and writes the verified id into `live/grading.json`.
 
 **Exit codes.** `0` for everything that leaves the user informed and the data intact —
-delivered, nothing to deliver, a run that was never tracked, or no network (the events stay
-queued; run it again later). `2` only for a trap-level failure: bad/missing config, an
-unknown run, an unreadable workspace, no credential for that server, a token the server
-rejects, or a queue belonging to another account. A rejected token stops there — no other
-stored credential and no other server is tried.
+delivered, nothing to deliver, a run that was never tracked, or no network (the events and
+answers stay queued; run it again later). `2` only for a trap-level failure: bad/missing
+config, an unknown run, an unreadable workspace, no credential for that server, a token the
+server rejects, a build the server refuses, or a queue belonging to another account. A
+rejected token stops there — no other stored credential and no other server is tried, and
+the answers half is not attempted with it either.
 
 **Gap recovery.** If events the server still needs are gone (a cleaned-up or corrupted
 outbox), its contiguous acknowledgement can never move past the hole, and re-sending cannot

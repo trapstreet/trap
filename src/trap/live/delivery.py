@@ -36,6 +36,42 @@ RefusalReason = Literal[
 ]
 
 
+def verify_identity(
+    client: LiveClient, *, frozen_user_id: str | None, claim: bool
+) -> tuple[RefusalReason | None, str | None]:
+    """Ask the server who this token is and compare with a frozen account.
+
+    Returns ``(None, verified_id)`` when the queue may be delivered under this
+    credential, else ``(reason, None)``. A frozen account continues under any
+    later token of the same account. No frozen account is not adopted by
+    default -- whoever is logged in now is not necessarily who ran it -- unless
+    the caller claims it explicitly; the id handed back is then the one to
+    freeze. Raises ``LiveApiError`` when the server cannot answer.
+
+    Shared by the progress sidecar and the graded-run sidecar, and only ever
+    called from a session open or from `tp sync`: the in-run answers sender
+    makes no identity call of its own, because the open already proved the
+    token on this server.
+    """
+    user_id = client.whoami()
+    if frozen_user_id is None:
+        if not claim:
+            return "unowned", None
+        if user_id is None:
+            return "unidentified", None
+        return None, user_id
+    if user_id is None or user_id != frozen_user_id:
+        return "other_account", None
+    return None, user_id
+
+
+def tp_runtime() -> dict[str, Any]:
+    """Who is running this: what both the session PUT and the graded-run open
+    declare. One place, so the two payloads cannot drift. ``trap_version`` is
+    sent as it is -- ``0.0.0+unknown`` included -- and the server decides."""
+    return {"orchestrator": "tp", "executor": "tp", "trap_version": __version__}
+
+
 class Delivery:
     """One run's delivery pipeline: identity, session, then events.
 
@@ -88,17 +124,12 @@ class Delivery:
         it explicitly, which then freezes the verified id so the question is
         never open again. Raises ``LiveApiError`` when the server cannot answer.
         """
-        user_id = self._client.whoami()
+        refusal, verified = verify_identity(self._client, frozen_user_id=self._session.user_id, claim=claim)
+        if refusal is not None:
+            return refusal
         if self._session.user_id is None:
-            if not claim:
-                return "unowned"
-            if user_id is None:
-                return "unidentified"
-            self._session.user_id = user_id
+            self._session.user_id = verified
             self.persist()
-            return None
-        if not self._session.belongs_to(self._session.server, user_id):
-            return "other_account"
         return None
 
     def ensure(self) -> dict[str, Any]:
@@ -110,7 +141,7 @@ class Delivery:
         data = self._client.ensure_session(
             self._session.client_run_id,
             snapshot=self._snapshot,
-            runtime={"orchestrator": "tp", "executor": "tp", "trap_version": __version__},
+            runtime=tp_runtime(),
         )
         run = data.get("run")
         if not isinstance(run, dict):
