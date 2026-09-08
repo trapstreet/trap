@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from collections.abc import Callable
@@ -23,6 +24,7 @@ from trap.cli._console import _die, _env_truthy, console, err_console
 from trap.display import CaseProgress, OutputFormat, SubmitRenderer, renderer_factory
 from trap.environment import EnvironmentDetector
 from trap.git_ops import GitOpsError, LocalRepo, ParsedGitUrl
+from trap.live.context import agent_from_env, build_context
 from trap.live.grading import start_site_grading
 from trap.live.setup import start_tracking
 from trap.live.sync import sync_run
@@ -383,6 +385,28 @@ def run(
         run_dir=ws.run_dir(ts),
         cost_enabled=cost,
     )
+    # Capture the host machine environment (CPU/RAM/OS/Python) unless disabled.
+    # Detection is best-effort and must never abort a run. Probed once, here,
+    # so the report and the run's description on the site say the same thing.
+    environment_info = None
+    if environment:
+        try:
+            environment_info = EnvironmentDetector().detect()
+        except Exception:
+            environment_info = None
+    # What this run is made of, as far as it is known before the first case:
+    # the opening description both the private session and the graded run
+    # are told (see trap.live.context). Everything in it is built by name --
+    # never a case, an answer or a path.
+    opening = build_context(
+        profile=trap_yaml_loader.config.profile,
+        provenance=provenance,
+        environment=environment_info,
+        trap_version=__version__,
+        agent=agent_from_env(os.environ),
+        cost_enabled=cost,
+        environment_enabled=environment,
+    )
     # Private progress mirroring. None when sync is off or no CLI token is
     # stored; from here on every interaction with it is optional and silent.
     # The terminal renderer and the mirror share one event source -- the
@@ -394,8 +418,10 @@ def run(
         server_override=server,
         enabled=live,
     )
-    if tracker is not None and output == OutputFormat.rich:
-        console.print(f"[dim]live · {tracker.run_url}[/dim]")
+    if tracker is not None:
+        tracker.describe(opening)
+        if output == OutputFormat.rich:
+            console.print(f"[dim]live · {tracker.run_url}[/dim]")
     # Site grading: for a task the site has admitted as an evaluation, each
     # answer is handed over as its case finishes and the site judges it. Opened
     # under the live session's id so the site shows one execution, not two.
@@ -407,6 +433,7 @@ def run(
         client_run_id=tracker.client_run_id if tracker is not None else None,
         server_override=server,
         enabled=site_grading,
+        context=opening,
     )
     if grader is not None and grader.opened and output == OutputFormat.rich:
         console.print(f"[dim]graded on site · {grader.url}[/dim]")
@@ -435,15 +462,6 @@ def run(
             grader.close()
         raise
     finished_at_utc = datetime.now(UTC)
-
-    # Capture the host machine environment (CPU/RAM/OS/Python) unless disabled.
-    # Detection is best-effort and must never abort a completed run.
-    environment_info = None
-    if environment:
-        try:
-            environment_info = EnvironmentDetector().detect()
-        except Exception:
-            environment_info = None
 
     report_data = ReportData.from_run(
         cases_results=case_results,
@@ -474,10 +492,26 @@ def run(
     # that completed.
     diagnosis = Diagnosis.from_report_data(report_data)
 
+    # The closing description: the opening one again, plus how long the solver
+    # took and what the cost proxy saw. Aggregates only -- never a case.
+    final = build_context(
+        profile=trap_yaml_loader.config.profile,
+        provenance=provenance,
+        environment=environment_info,
+        trap_version=__version__,
+        agent=agent_from_env(os.environ),
+        cases=case_results,
+        started_at=started_at_local.astimezone(UTC),
+        finished_at=finished_at_utc,
+        cost_enabled=cost,
+        environment_enabled=environment,
+    )
     # Mirror the outcome, then stop. Deliberately after the report is on disk
     # and after the diagnosis is computed, and deliberately unable to change
-    # either: a sync failure never alters the exit code (0 / 2 / 3).
+    # either: a sync failure never alters the exit code (0 / 2 / 3). The
+    # description goes ahead of the final event so one flush carries both.
     if tracker is not None:
+        tracker.describe(final)
         tracker.on_run_finished(
             exit_code=diagnosis.exit_code,
             cases_done=len(case_results),
@@ -487,7 +521,7 @@ def run(
         if tracker.notice and output == OutputFormat.rich:
             err_console.print(f"[yellow]{tracker.notice}[/yellow]")
     if grader is not None:
-        grader.close()
+        grader.close(context=final)
         if output == OutputFormat.rich:
             if grader.summary_line:
                 console.print(f"[dim]{grader.summary_line}[/dim]")

@@ -75,6 +75,16 @@ left for `tp sync`.
 While a case is running and nothing else has happened for ten seconds, the sender sends a
 heartbeat so a long case reads as "still running" on the site rather than as lost contact.
 
+**What the site is told about the run.** Beside progress, `tp run` describes the run once
+when it opens and once when it ends, so the run page can say what it was made of: tp as the
+launcher (and the agent that launched tp, if it names itself with `TRAP_AGENT`), the model
+and framework `trap.yaml` declares, the machine (the same OS / CPU / RAM / Python block as
+`report.json`), the solution's and task's commits, and at the end how long the solver took
+and what the cost proxy counted per model. Skills and tools are reported as *unsupported* —
+tp does not see inside the solver — and `--no-environment` / `--no-cost` report their part
+as *disabled*. A part tp did not report is shown as **not reported, never as zero**. None of
+it names a case, and none of it is part of a score. See [the reference](../reference/cli.md#tp-run).
+
 **Whose run it is.** `tp auth login` verifies the token with the server and stores the
 account it belongs to; every run freezes that account into its sidecar before the first
 case, without a network call. `tp sync` only ever delivers a run to the account it was

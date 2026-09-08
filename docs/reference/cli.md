@@ -32,10 +32,10 @@ tp run [SOLUTION] [OPTIONS]
 that account while the run happens and prints the private page for it. It **publishes
 nothing** — no report upload, no leaderboard entry, nothing visible to anyone else; that is
 `tp submit`'s job alone. Only progress facts leave the machine: case ordinals (never case
-names), a `passed` / `failed` / `error` verdict, scores, durations, cost and the exit code —
-never inputs, expected answers, solution output, stdout, paths, environment or command
-lines. Sync is off when no token is stored, off with `--no-live`, and off everywhere with
-`TRAP_NO_LIVE=1`.
+names), a `passed` / `failed` / `error` verdict, scores, durations, cost and the exit code,
+plus the run's description (below) — never inputs, expected answers, solution output,
+stdout, paths, environment variables or command lines. Sync is off when no token is
+stored, off with `--no-live`, and off everywhere with `TRAP_NO_LIVE=1`.
 
 Sync can never change the run: with no network, a rejected token, a full disk or a bug in
 sync, the solution, judge, grader, `report.json` and the exit code are identical to a
@@ -62,6 +62,29 @@ When a run had a live session, its `report.json` carries the session's `client_r
 is how a later `tp submit` lands on the same run page instead of creating a second one.
 Reports from runs without a session — and from older CLIs — simply have no such field and
 upload unchanged.
+
+**What tp reports about the run.** Beside the progress events, `tp run` *describes* the run
+to the site twice — once when it opens and once when it ends (`POST
+/api/v2/runs/{run}/context`; the graded run, when there is one, gets the opening
+description on its open and the closing one on its way out) — so the run page can say what
+the run was made of, apart from what it scored. The description has eight groups, and tp
+fills them as far as it can see: `identity` (tp as launcher and executor, the
+`profile.framework` list, and the agent that launched tp when it says so through
+`TRAP_AGENT` / `TRAP_AGENT_VERSION`); `model` (the `profile.model` list, recorded as
+*declared* from `trap.yaml` — tp does not watch the calls, so it never claims a model was
+*observed*); `environment` (the same OS / CPU / RAM / Python block as `report.json`);
+`reproducibility` (the solution's and task's `{repo, commit, subdirectory}`, or the reason a
+side is unanchored, and the tp build); and, at the end, `timing` (the sum of the cases'
+durations and the run's wall time) and `usage` (the cost proxy's token counts, calls and
+priced cost, folded per provider and model — never per case; a bucket with an unpriced call
+reports its tokens and no cost). `skills` and `tools` are reported as *unsupported* with the
+reason: tp runs a solver process and does not see inside it. `--no-environment` and
+`--no-cost` report their group as *disabled* rather than leaving it out, and a group tp did
+not report is shown by the site as **not reported — never as zero**. Nothing in the
+description names a case: no ids, no answers, no output, no paths. It is descriptive only
+— never part of a score — and it cannot change the run: a description the site does not
+take is dropped with one line (it keeps no outbox and is not retried; the closing one
+repeats everything the opening one said, and `report.json` holds the same facts).
 
 **Site grading.** When the CLI is paired and the task checkout resolves, on the server, to an
 *admitted evaluation revision* (`GET /api/v2/evaluations/resolve` by the task's `{repo,

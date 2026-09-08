@@ -61,7 +61,8 @@ catalogue; `tp run` uses it with the task's own `{repo, commit, subdirectory}`.
 
 ```http
 POST /api/v2/evaluations
-{ "revision_id": "ev_…", "client_run_id": "<a UUID you generate>" }
+{ "revision_id": "ev_…", "client_run_id": "<a UUID you generate>",
+  "context": { "schema_version": 1, "source": "my-agent", … } }
 ```
 
 `client_run_id` is yours and must be unique per attempt. It is the idempotency
@@ -72,6 +73,22 @@ call uses), its `view_url`, and `cases_total`.
 The revision fixes the case set, the denominator, and whether this is a
 benchmark or a public sample. You choose *which* revision; you do not get to
 describe it.
+
+`context` is optional: the run's **opening description** — who is running it,
+with which model, on what machine — in the patch shape of
+[Describing the run](#describing-the-run) below. It is stored with the run
+when the run is *created*; a retry of this call never replaces it, and the
+response may carry `ignored: [paths]` for parts it did not keep. What you
+learn by running — timing, token usage — goes in the end-of-run call:
+
+```http
+POST /api/v2/runs/{run}/context
+{ "schema_version": 1, "source": "my-agent", "observed_at": "2026-09-08T10:04:12Z",
+  "timing": { "started_at": "…", "finished_at": "…", "solver_ms": 41200 },
+  "usage": { "by_model": [ { "model": "gpt-5", "provider": "openai",
+                             "input": 12000, "output": 900, "calls": 12,
+                             "cost_usd_reported": 0.031 } ] } }
+```
 
 ### 2. Claim a case
 
@@ -170,6 +187,57 @@ is what the site stored. A client that keeps a queue settles each case by its
 receipt — a skipped or rejected case stays unanswered on the site and the run
 does not finalise, so it is worth saying by name rather than resending.
 
+## Describing the run
+
+A run's **context** is what it was made of, kept beside the score and never
+part of it: who ran it, on what, with which model, from which commits, with
+which skills and tools, how long it took and what it cost. It is
+**merge-only** — a patch adds to the record and never replaces it, `null`
+never erases, and an absent group means *not said this time*, so several
+reporters (an agent, a harness hook, `tp`) can describe one run without an
+order between them. It is accepted on both channels, the private local run and
+the server-graded one, under the run's id or its `client_run_id`.
+
+```http
+POST /api/v2/runs/{run}/context
+{ "schema_version": 1, "source": "my-agent", "collector": "my-agent/1.4",
+  "observed_at": "2026-09-08T10:00:00Z",
+  "identity": { "agent": { "name": "my-agent", "version": "1.4" },
+                "launcher": { "name": "my-agent" },
+                "framework": [ { "name": "langgraph" } ] },
+  "model": { "declared": [ { "model": "gpt-5", "role": "solver" } ] },
+  "environment": { "os": "macOS 15.1", "arch": "arm64",
+                   "cpu": { "model": "Apple M3", "cores_logical": 8 },
+                   "memory_total_bytes": 17179869184,
+                   "runtime": { "python": "3.13.2" } },
+  "reproducibility": { "solution": { "repo": "https://github.com/o/r", "commit": "…" } },
+  "skills": { "status": "unsupported", "reason": "this harness has no skills" },
+  "tools": [ { "name": "Bash", "kind": "shell", "calls": 29 } ] }
+```
+
+The groups are `identity`, `model`, `environment`, `reproducibility`, `skills`,
+`tools`, `timing` and `usage`; `schema_version` is `1` and `source` (who is
+describing) is required. A group may be data, or
+`{ "status": "unsupported" | "disabled", "reason": "…" }` when the reporter
+cannot see it or the user switched it off — the page shows that as what it
+is. A group nobody spoke about is shown as **not reported**, never as zero.
+`model.declared` is what the reporter *says* it used; a hook that watched the
+calls adds `model.observed`, and the page shows both rather than picking.
+Keyed lists — `model.declared` and `usage.by_model` by model and source,
+`tools` by name and server, `skills.*` and `identity.framework` by name —
+replace an entry by its key and never delete one.
+
+The response is `{ "ok": true, "accepted": { "groups": [...], "entries": {...} },
+"ignored": [...], "context": {...}, "run": {...} }`. Unknown fields, and the
+fields the server owns (`timing.received_at`, `usage.by_model[].cost_usd_priced`
+and its `price_version`, `usage.totals`), come back under `ignored`. Three
+things are **refused with `400`**, not cleaned up: any authoritative key at
+any depth — `score`, `passed`, `verdict`, `metrics`, and the run's own status
+columns; a `schema_version` this server does not speak; a patch over 64 KiB.
+`404` is a run that is not yours; `409` means the record changed under the
+patch three times and it is safe to send again. Everything here is recorded as
+**declared by the client** — it certifies nothing about the score.
+
 ## The `tp` path
 
 `tp run` sits an evaluation for you when three things are true: the CLI is
@@ -177,11 +245,13 @@ paired (`tp auth login`), the task checkout is anchored to a commit, and step 0
 resolves that anchor to an admitted revision. It then opens the run (step 1)
 under a `client_run_id` derived from its live-sync session's (the site keys a
 session by owner and id across both channels, so the same id would collide rather
-than join); the report's `site_grading` block is what links the two. It hands in
-each case's answer —
+than join), with the run's opening description as `context`; the report's
+`site_grading` block is what links the two. It hands in each case's answer —
 the solver's stdout, as a string — through the bulk call above as the case
 finishes, with the duration, exit code and (when the cost proxy priced it) cost
-as `client_reported`. The local judge still runs; its scores are a preview.
+as `client_reported`, and posts the closing description (timing, usage) to the
+graded run on the way out — see [what `tp` reports about a run](cli.md#tp-run).
+The local judge still runs; its scores are a preview.
 
 It is fail-open and keeps a queue. An unreachable site at start means the run
 is judged locally and nothing is submitted, then or later. Once a graded run

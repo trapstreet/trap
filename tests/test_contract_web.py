@@ -317,3 +317,99 @@ def test_the_web_floor_is_not_ahead_of_this_checkout(web_src: Path):
     if checkout is None:
         pytest.skip("no git tags to describe this checkout with")
     assert checkout >= _parse_floor(match.group(1))
+
+
+# -- the run description (RunContext) ------------------------------------------
+
+
+_CONTEXT_TS = Path("lib/runs/context.ts")
+
+
+@pytest.fixture(scope="module")
+def context_ts(web_src: Path) -> str:
+    path = web_src / _CONTEXT_TS
+    if not path.is_file():
+        pytest.skip("the web checkout has no run context yet")
+    return path.read_text()
+
+
+def _keys_at_any_depth(value: object) -> set[str]:
+    if isinstance(value, dict):
+        return set(value) | {key for child in value.values() for key in _keys_at_any_depth(child)}
+    if isinstance(value, list):
+        return {key for item in value for key in _keys_at_any_depth(item)}
+    return set()
+
+
+def _every_description() -> list[dict]:
+    """The opening and closing descriptions with every optional part populated."""
+    from datetime import UTC, datetime
+
+    from trap.live.context import build_context
+    from trap.models.environment import Cpu, Environment
+    from trap.models.provenance import GitProvenance, Provenance
+    from trap.models.trap_yaml import Profile
+
+    profile = Profile(model=["gpt-5"], framework=["langgraph"])
+    provenance = Provenance(
+        solution=GitProvenance(repo="https://github.com/o/s", commit="a" * 40, subdirectory="s"),
+        task=GitProvenance(issue="uncommitted changes"),
+    )
+    environment = Environment(
+        os="macOS", kernel="Darwin", arch="arm64", cpu=Cpu(model="M3"), memory_total_bytes=1
+    )
+    cases = [
+        CaseResult(
+            case_id="c1",
+            duration=1.0,
+            metrics={"score": 1.0},
+            cost=CaseCost(
+                by_model=[ModelCost(provider="openai", model="gpt-5", prompt_tokens=1, cost_usd=0.1)]
+            ),
+        )
+    ]
+    now = datetime.now(UTC)
+    shared = {"profile": profile, "provenance": provenance, "trap_version": "1.0.0", "agent": {"name": "a"}}
+    return [
+        build_context(environment=environment, **shared),
+        build_context(environment=environment, cases=cases, started_at=now, finished_at=now, **shared),
+        build_context(environment=None, cost_enabled=False, environment_enabled=False, **shared),
+    ]
+
+
+def test_every_group_tp_can_describe_is_one_the_web_records(context_ts: str):
+    from trap.live.context import EMITTED_GROUPS
+
+    assert EMITTED_GROUPS <= _string_list(context_ts, "CONTEXT_GROUPS")
+
+
+def test_the_emitted_groups_match_what_build_context_actually_emits():
+    from trap.live.context import EMITTED_GROUPS
+
+    envelope = {"schema_version", "source", "collector", "observed_at"}
+    emitted = {group for patch in _every_description() for group in patch} - envelope
+    assert emitted == EMITTED_GROUPS
+
+
+def test_no_key_tp_describes_a_run_with_is_one_the_web_refuses(context_ts: str):
+    rejected = _string_list(context_ts, "REJECTED_KEYS")
+    assert rejected, "REJECTED_KEYS not parsed from the web source"
+    for patch in _every_description():
+        assert not (_keys_at_any_depth(patch) & rejected)
+
+
+def test_the_group_statuses_tp_declares_are_ones_the_web_knows(context_ts: str):
+    statuses = {
+        patch[group]["status"]
+        for patch in _every_description()
+        for group in patch
+        if isinstance(patch[group], dict) and "status" in patch[group]
+    }
+    assert statuses == {"unsupported", "disabled"}
+    assert statuses <= _string_list(context_ts, "COVERAGE_STATUS")
+
+
+def test_the_context_route_exists_where_the_cli_posts_to_it(web_src: Path, context_ts: str):
+    assert (web_src / "app/api/v2/runs/[id]/context/route.ts").is_file()
+    # And the open call takes the opening description in the same body.
+    assert "context" in (web_src / "app/api/v2/evaluations/route.ts").read_text()

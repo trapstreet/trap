@@ -55,6 +55,7 @@ class _Site:
         opened: object | None = None,
         submits: list[object] | None = None,
         receipts: bool = False,
+        context_error: LiveApiError | None = None,
     ) -> None:
         self.server = "https://srv"
         self._resolve = resolve if resolve is not None else _ADMITTED
@@ -65,9 +66,12 @@ class _Site:
         )
         self._submits = list(submits or [])
         self._receipts = receipts
+        self._context_error = context_error
         self.resolved: list[dict] = []
         self.opens: list[dict] = []
         self.submissions: list[tuple[str, list[dict]]] = []
+        self.contexts: list[tuple[str, dict]] = []
+        self.order: list[str] = []
         self.closed = False
 
     def resolve_evaluation(self, **kwargs):
@@ -82,8 +86,16 @@ class _Site:
             raise self._opened
         return self._opened
 
+    def put_context(self, run_id, patch):
+        if self._context_error is not None:
+            raise self._context_error
+        self.contexts.append((run_id, patch))
+        self.order.append("context")
+        return {"ok": True}
+
     def submit_answers(self, run_id, cases_results):
         self.submissions.append((run_id, cases_results))
+        self.order.append("answers")
         if self._submits:
             answer = self._submits.pop(0)
             if isinstance(answer, LiveApiError):
@@ -180,7 +192,9 @@ def test_an_admitted_task_opens_a_graded_run_under_an_id_derived_from_the_live_o
     assert grader.url == "https://srv/runs/rs_9"
     assert grader.notice is None
     assert site.resolved == [{"repo": ANCHORED.repo, "commit": "abc123", "path": "tasks/a"}]
-    assert site.opens == [{"revision_id": "ev_1", "client_run_id": "r-1-site", "runtime": TP_RUNTIME}]
+    assert site.opens == [
+        {"revision_id": "ev_1", "client_run_id": "r-1-site", "runtime": TP_RUNTIME, "context": None}
+    ]
     summary = grader.summary()
     assert summary is not None and summary.model_dump() == {"run_id": "rs_9", "url": "https://srv/runs/rs_9"}
 
@@ -845,6 +859,36 @@ def test_open_without_a_runtime_sends_an_empty_block():
     assert seen["body"] == {"revision_id": "ev_1", "client_run_id": "r-1", "runtime": {}}
 
 
+def test_open_carries_the_opening_description_when_given_one():
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(201, json={"run": {"id": "rs_9"}, "ignored": []})
+
+    _live_client(handler).open_evaluation(
+        revision_id="ev_1", client_run_id="r-1", runtime=TP_RUNTIME, context=OPENING
+    )
+    assert seen["body"] == {
+        "revision_id": "ev_1",
+        "client_run_id": "r-1",
+        "runtime": TP_RUNTIME,
+        "context": OPENING,
+    }
+
+
+def test_put_context_posts_the_patch_to_the_runs_context():
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(method=request.method, path=request.url.path, body=json.loads(request.content))
+        return httpx.Response(200, json={"ok": True, "accepted": {"groups": ["timing"]}, "ignored": []})
+
+    result = _live_client(handler).put_context("rs_9", FINAL)
+    assert result["accepted"] == {"groups": ["timing"]}
+    assert seen == {"method": "POST", "path": "/api/v2/runs/rs_9/context", "body": FINAL}
+
+
 def test_submit_posts_cases_results_to_the_runs_submissions():
     seen: dict[str, object] = {}
 
@@ -874,6 +918,7 @@ class _FakeGrader:
         self.summary_line = summary_line
         self.cases: list[str] = []
         self.closed = False
+        self.closed_with: dict | None = None
         self.started_with: dict[str, object] = {}
 
     def on_case_done(self, result) -> None:
@@ -884,8 +929,9 @@ class _FakeGrader:
 
         return SiteGrading(run_id="rs_9", url=self.url) if self.opened else None
 
-    def close(self) -> None:
+    def close(self, context: dict | None = None) -> None:
         self.closed = True
+        self.closed_with = context
 
 
 def _use_fake_grader(monkeypatch, grader: _FakeGrader) -> None:
@@ -917,6 +963,12 @@ def test_tp_run_grades_on_site_and_records_where(make_project, runner, monkeypat
     # told where the run directory is so the answers can be read back from it.
     assert grader.started_with["client_run_id"] == "r-1"
     assert grader.started_with["case_ids"] == ["c1", "c2"]
+    # Told what the run is made of, both when it opens and when it closes:
+    # the same description the private session gets, aggregates only.
+    opening = grader.started_with["context"]
+    assert isinstance(opening, dict) and opening["source"] == "tp" and "timing" not in opening
+    assert grader.closed_with is not None and grader.closed_with["timing"]["solver_ms"] >= 0
+    assert "c1" not in json.dumps(grader.closed_with)
     run_dir = _run_dir_of(project)
     assert grader.started_with["run_dir"] == run_dir
     assert (run_dir / "c1" / "solution" / "stdout").read_text() == "hi"
@@ -990,3 +1042,70 @@ def test_a_run_with_no_grader_records_none(make_project, runner, monkeypatch):
     project = make_project(cmd="sh -c 'cat'", cases=["c1"])
     assert runner.invoke(app, ["run", "--no-environment"]).exit_code == 0
     assert json.loads((_run_dir_of(project) / "report.json").read_text())["site_grading"] is None
+
+
+# -- describing the graded run ------------------------------------------------------
+
+
+OPENING = {"schema_version": 1, "source": "tp", "identity": {"launcher": {"name": "tp"}}}
+FINAL = {"schema_version": 1, "source": "tp", "timing": {"solver_ms": 12}}
+
+
+def test_the_opening_description_is_stored_with_the_graded_run(monkeypatch, tmp_path):
+    _grader, site = _start(monkeypatch, tmp_path, context=OPENING)
+    assert site.opens[0]["context"] == OPENING
+    assert site.opens[0]["runtime"] == TP_RUNTIME  # the runtime block still travels beside it
+
+
+def test_the_closing_description_goes_to_the_graded_run_after_the_answers(monkeypatch, tmp_path):
+    grader, site = _start(monkeypatch, tmp_path, _Site(receipts=True))
+    assert grader is not None
+    grader.on_case_done(_result("c1"))
+    grader._queue.put_nowait(dict(FINAL))
+    _drain(grader)
+    assert site.order == ["answers", "context"]
+    assert site.contexts == [("rs_9", FINAL)]  # the site's id for the graded run
+    assert grader.notice is None
+
+
+def test_close_hands_the_description_to_the_sender(monkeypatch, tmp_path):
+    grader, site = _start(monkeypatch, tmp_path, _Site(receipts=True), threaded=True)
+    assert grader is not None
+    grader.on_case_done(_result("c1"))
+    grader.close(context=FINAL)
+    assert site.order == ["answers", "context"] and site.contexts == [("rs_9", FINAL)]
+    assert site.closed is True  # posted before the client went away
+
+
+def test_a_description_the_site_refuses_is_one_line_and_grading_stays_on(monkeypatch, tmp_path):
+    grader, _site = _start(
+        monkeypatch, tmp_path, _Site(receipts=True, context_error=LiveApiError("http 400", status=400))
+    )
+    assert grader is not None
+    grader.on_case_done(_result("c1"))
+    grader._queue.put_nowait(dict(OPENING))
+    grader._queue.put_nowait(dict(FINAL))
+    _drain(grader)
+    assert grader.notice == "site grading: the run's description was not recorded (http 400)"
+    assert grader._descriptions == []  # each tried once, then dropped; one line for both
+    # The answers are unaffected: the next one still goes.
+    grader.on_case_done(_result("c2"))
+    _drain(grader)
+    assert _states(tmp_path) == {"c1": "accepted", "c2": "accepted"}
+    assert grader.summary() is not None
+
+
+def test_no_description_is_posted_once_grading_stopped_for_good(monkeypatch, tmp_path):
+    grader, site = _start(monkeypatch, tmp_path, _Site(submits=[LiveApiError("http 401", status=401)]))
+    assert grader is not None
+    grader.on_case_done(_result("c1"))
+    grader._queue.put_nowait(dict(FINAL))
+    _drain(grader)  # the answer's refusal stops grading in the same wake
+    assert grader.notice is not None and "rejected" in grader.notice
+    assert site.contexts == []
+
+
+def test_a_grader_that_never_opened_takes_a_description_quietly(tmp_path):
+    grader = SiteGrader(client=_Site(), run_dir=tmp_path, notice="off")  # type: ignore[arg-type]
+    grader.close(context=FINAL)  # no thread, no graded run: nothing to post, nothing raised
+    assert grader.notice == "off"

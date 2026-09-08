@@ -21,6 +21,14 @@ dropped is re-sent, before anything newer, on the sender's next wake, and the
 server's acknowledgement can move again. While a case is running and nothing
 else has happened for a while, the same thread emits a heartbeat so a long case
 does not read as lost contact.
+
+The run's *description* -- what it was made of, see :mod:`trap.live.context`
+-- travels beside the events, not among them. It is not progress: it is a
+merge-only record the site keeps per run, so it has no sequence number and no
+place in the outbox. :meth:`LiveTracker.describe` hands a patch to the sender,
+which posts it once the session exists and the outbox is caught up; a patch
+the site did not take is dropped with one notice -- the end-of-run description
+says everything the opening one did, and what it adds is also in the report.
 """
 
 from __future__ import annotations
@@ -148,7 +156,12 @@ class LiveTracker:
         self._thread: threading.Thread | None = None
         self._disabled = False
         self._notice: str | None = None
+        # A description the site did not take is worth one line, but never at
+        # the expense of the line that says progress is still on disk.
+        self._context_notice: str | None = None
         self._stop = object()
+        # Descriptions collected off the queue and not yet posted; sender-owned.
+        self._descriptions: list[dict[str, Any]] = []
         # Session state, owned by the sender thread.
         self._clock = clock
         self._rng = rng
@@ -179,8 +192,13 @@ class LiveTracker:
 
     @property
     def notice(self) -> str | None:
-        """A single short line to show the user, or None. Never more than one per run."""
-        return self._notice
+        """A single short line to show the user, or None. Never more than one per run.
+
+        Anything about the queue -- a rejected token, an outbox that could not
+        be written, progress left on disk -- outranks a description the site
+        did not take: the first is actionable, the second is not.
+        """
+        return self._notice or self._context_notice
 
     def start(self) -> None:
         """Begin mirroring. Never raises."""
@@ -208,6 +226,21 @@ class LiveTracker:
                 f"live sync: {pending} progress event(s) not delivered — kept locally in this "
                 "run's outbox; run tp sync later"
             )
+
+    def describe(self, patch: dict[str, Any]) -> None:
+        """Record what this run is made of (see :mod:`trap.live.context`).
+
+        Handed to the sender as it is: the patch was built field by field by the
+        context module, and this method adds nothing to it. Posted after the
+        session exists and the outbox is caught up, so the opening description
+        never overtakes the session it describes. Never raises, never blocks.
+        """
+        if self._disabled:
+            return
+        try:
+            self._queue.put_nowait(dict(patch))
+        except Exception as e:  # pragma: no cover - defensive
+            self._disable(f"live sync off ({e.__class__.__name__})")
 
     # -- observer callbacks -------------------------------------------------
 
@@ -356,6 +389,8 @@ class LiveTracker:
         if not self._ensured:
             self._try_ensure()
         owed = self._ensured and self._send_pending()
+        if self._ensured:
+            self._send_descriptions()
         if self._ensured and not owed and wake == "idle" and self._current_ordinal is not None:
             # A quiet interval mid-case with nothing owed: say it is still
             # running. A wake with something owed retries that instead --
@@ -369,15 +404,18 @@ class LiveTracker:
 
         Many wakes collapse into one cycle so a burst of events costs one
         request, not one per event; the batch itself is cut from the outbox.
-        The wait gives up after a heartbeat interval so the sender also runs
-        when nothing is happening -- to retry the session, to re-send what the
-        network dropped, or to beat.
+        A description rides the same queue and is kept aside for posting,
+        in the order it was given. The wait gives up after a heartbeat
+        interval so the sender also runs when nothing is happening -- to
+        retry the session, to re-send what the network dropped, or to beat.
         """
         try:
             item = self._queue.get(timeout=HEARTBEAT_SECONDS)
         except queue.Empty:
             return "idle"
         while item is not self._stop:
+            if isinstance(item, dict):
+                self._descriptions.append(item)
             try:
                 item = self._queue.get_nowait()
             except queue.Empty:
@@ -436,6 +474,29 @@ class LiveTracker:
         except LiveApiError as e:
             self._handle_api_error(e)
             return False
+
+    def _send_descriptions(self) -> None:
+        """Post the descriptions collected so far, oldest first, once the outbox
+        is caught up -- to the run the server named, or the client id it also
+        resolves. Each is tried once: a description is not progress, nothing
+        on disk depends on it, and the closing one repeats everything the
+        opening one said. A refusal that retires the credential or the build
+        is handled like any other; anything else costs one line, once.
+        """
+        if not self._descriptions or self._pending():
+            # Nothing to say, or the link just dropped a batch: a description
+            # would fail the same way, so it waits for the wake that catches up.
+            return
+        descriptions, self._descriptions = self._descriptions, []
+        for patch in descriptions:
+            if self._disabled:
+                break  # a retired credential or build: the next would be refused the same way
+            try:
+                self._client.put_context(self._delivery.reference, patch)
+            except LiveApiError as e:
+                self._handle_api_error(e)
+                if self._context_notice is None:
+                    self._context_notice = f"live sync: this run's description was not recorded ({e})"
 
     def _handle_api_error(self, error: LiveApiError) -> None:
         if error.client_too_old:

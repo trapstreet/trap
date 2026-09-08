@@ -327,13 +327,20 @@ def test_no_judge_at_all_yields_no_verdict():
 
 
 class _Recorder:
-    """A LiveClient stand-in that records batches instead of sending them."""
+    """A LiveClient stand-in that records batches instead of sending them.
 
-    def __init__(self, *, fail: LiveApiError | None = None) -> None:
+    ``order`` is every call that reached the server, in order, so a test can
+    say what went before what."""
+
+    def __init__(self, *, fail: LiveApiError | None = None, context_fail: LiveApiError | None = None) -> None:
         self.server = "https://srv"
         self.batches: list[list[dict]] = []
         self.sessions: list[str] = []
+        self.contexts: list[tuple[str, dict]] = []
+        self.context_attempts = 0
+        self.order: list[str] = []
         self._fail = fail
+        self._context_fail = context_fail
         self.closed = False
 
     def whoami(self) -> str | None:
@@ -343,13 +350,23 @@ class _Recorder:
         if self._fail:
             raise self._fail
         self.sessions.append(client_run_id)
+        self.order.append("session")
         return {"run": {"id": "rs_1", "producer_generation": 1}}
 
     def send_events(self, _run_ref, events):
         if self._fail:
             raise self._fail
         self.batches.append(events)
+        self.order.append("events")
         return {"ack_seq": max(e["client_seq"] for e in events)}
+
+    def put_context(self, run_ref, patch):
+        self.context_attempts += 1
+        if self._context_fail:
+            raise self._context_fail
+        self.contexts.append((run_ref, patch))
+        self.order.append("context")
+        return {"ok": True, "accepted": {"groups": list(patch)}, "ignored": []}
 
     def close(self) -> None:
         self.closed = True
@@ -730,6 +747,11 @@ class _FakeTracker:
         self.notice = notice
         self.calls: list[str] = []
         self.finished: dict[str, object] | None = None
+        self.described: list[dict] = []
+
+    def describe(self, patch: dict) -> None:
+        self.described.append(patch)
+        self.calls.append("describe")
 
     def on_case_start(self, case_id: str) -> None:
         self.calls.append(f"case_start:{case_id}")
@@ -782,17 +804,25 @@ def test_tp_run_prints_the_run_url_and_mirrors_the_outcome(make_project, runner,
 
     assert result.exit_code == 0, result.output
     assert "https://srv/runs/r-1" in result.output
-    # Every stage, in execution order: the judge inside the case, the grader after.
+    # Every stage, in execution order: the run described before the first
+    # case, the judge inside the case, the grader after, the closing
+    # description ahead of the final event so one flush carries both.
     assert tracker.calls == [
+        "describe",
         "case_start:c1",
         "judge_start:c1",
         "judge_done:c1:0:1.0",
         "case_done:c1",
         "grader_start",
         "grader_done:0:1.0",
+        "describe",
         "closed",
     ]
     assert tracker.finished == {"exit_code": 0, "cases_done": 1, "score": 1.0}
+    opening, final = tracker.described
+    assert "timing" not in opening and "usage" not in opening
+    assert final["timing"]["solver_ms"] >= 0 and final["timing"]["wall_ms"] >= 0
+    assert final["environment"] == {"status": "disabled", "reason": "--no-environment"}
 
 
 def test_a_sync_notice_is_shown_but_does_not_change_the_exit_code(make_project, runner, monkeypatch):
@@ -831,7 +861,8 @@ def test_ctrl_c_reports_a_cancellation_it_can_confirm(make_project, runner, monk
 
     # A confirmed cancellation, and only ever from here: a SIGKILL leaves no
     # event at all, which the site shows as lost contact rather than failure.
-    assert tracker.calls == ["cancelled:0", "closed"]
+    # The opening description was given before the first case; no closing one.
+    assert tracker.calls == ["describe", "cancelled:0", "closed"]
     assert tracker.finished is None
 
 
@@ -2553,3 +2584,165 @@ def test_a_transient_failure_on_the_fast_path_says_nothing_yet(tmp_path: Path):
     tracker = _ensured(_tracker(tmp_path, client))
     assert tracker._send([{"client_seq": 1}]) is False
     assert tracker.notice is None  # close() reports what is left, once
+
+
+# -- describing the run --------------------------------------------------------
+
+
+OPENING = {"schema_version": 1, "source": "tp", "identity": {"launcher": {"name": "tp"}}}
+FINAL = {"schema_version": 1, "source": "tp", "timing": {"solver_ms": 12}}
+
+
+def test_a_description_is_posted_only_after_the_session_exists_and_under_its_id(tmp_path: Path):
+    client = _Recorder()
+    tracker = _tracker(tmp_path, client)  # not yet ensured: the first wake opens the session
+    tracker.describe(OPENING)
+    assert tracker._drain_once() is True
+    assert client.order == ["session", "context"]
+    assert client.contexts == [("rs_1", OPENING)]  # the id the server named, not the client's
+
+
+def test_a_description_waits_while_the_session_cannot_be_opened(tmp_path: Path):
+    clock = _Clock()
+    client = _Recorder(fail=LiveApiError("unreachable"))
+    tracker = _tracker(tmp_path, client, clock=clock)
+    tracker.describe(OPENING)
+    tracker._drain_once()
+    assert client.contexts == [] and tracker._descriptions == [OPENING]  # kept, not dropped
+
+    client._fail = None
+    clock.now = 60.0  # past the backoff
+    tracker._queue.put_nowait(1)
+    tracker._drain_once()
+    assert client.contexts == [("rs_1", OPENING)] and tracker._descriptions == []
+
+
+def test_a_description_waits_for_the_outbox_to_catch_up(tmp_path: Path):
+    client = _Recorder(fail=LiveApiError("http 503", status=503))
+    tracker = _ensured(_tracker(tmp_path, client))
+    _fill(tracker, "case_started")
+    tracker.describe(OPENING)
+    tracker._drain_once()
+    # The batch failed, so the description was not even tried: it would fail
+    # the same way, and it is only sent once.
+    assert client.contexts == [] and tracker._descriptions == [OPENING]
+
+    client._fail = None
+    tracker._queue.put_nowait(1)
+    tracker._drain_once()
+    assert client.order == ["events", "context"]
+    # Under the client id here: this session was never named by the server,
+    # and the server resolves a run by either.
+    assert client.contexts == [("r-1", OPENING)]
+
+
+def test_a_description_the_site_refuses_costs_one_line_and_is_dropped(tmp_path: Path):
+    client = _Recorder(context_fail=LiveApiError("http 400", status=400))
+    tracker = _ensured(_tracker(tmp_path, client))
+    tracker.describe(OPENING)
+    tracker.describe(FINAL)
+    tracker._queue.put_nowait(tracker._stop)
+    assert tracker._drain_once() is False  # nothing raised into the caller
+    assert tracker.notice == "live sync: this run's description was not recorded (http 400)"
+    assert tracker._descriptions == []  # no retry loop and no outbox for it
+    # Progress is unaffected: the tracker is still on and the queue still moves.
+    assert tracker._disabled is False
+    _fill(tracker, "heartbeat")
+    tracker._queue.put_nowait(1)
+    tracker._drain_once()
+    assert len(client.batches) == 1 and client.contexts == []
+
+
+def test_a_rejected_token_on_a_description_retires_the_credential(tmp_path: Path):
+    client = _Recorder(context_fail=LiveApiError("http 401", status=401))
+    tracker = _ensured(_tracker(tmp_path, client))
+    tracker.describe(OPENING)
+    tracker.describe(FINAL)
+    tracker._queue.put_nowait(1)
+    tracker._drain_once()
+    assert client.context_attempts == 1  # the second is not tried: it would be refused the same way
+    assert tracker._disabled is True
+    assert tracker.notice is not None and "rejected" in tracker.notice
+
+
+def test_progress_left_on_disk_outranks_a_description_the_site_refused(tmp_path: Path):
+    client = _Recorder(context_fail=LiveApiError("http 500", status=500))
+    tracker = _ensured(_tracker(tmp_path, client))
+    tracker.describe(OPENING)
+    tracker._queue.put_nowait(1)
+    tracker._drain_once()
+    assert tracker.notice is not None and "description" in tracker.notice
+
+    client._fail = LiveApiError("unreachable")
+    _fill(tracker, "case_started")
+    tracker._thread = object()  # type: ignore[assignment]
+    tracker.close()
+    # The line that says what to do -- run tp sync -- is the one shown.
+    assert tracker.notice is not None and "run tp sync later" in tracker.notice
+
+
+def test_a_description_after_sync_is_off_goes_nowhere(tmp_path: Path):
+    tracker = _tracker(tmp_path)
+    tracker._disable("live sync off: x")
+    tracker.describe(OPENING)
+    assert tracker._queue.empty()
+
+
+def test_the_closing_description_is_flushed_with_the_final_batch(tmp_path: Path):
+    client = _Recorder()
+    tracker = _tracker(tmp_path, client)
+    tracker.start()
+    tracker.describe(OPENING)
+    tracker.on_case_start("c1")
+    tracker.describe(FINAL)
+    tracker.on_run_finished(exit_code=0, cases_done=1)
+    tracker.close()  # one bounded flush, on the real thread
+    assert tracker.notice is None
+    assert client.contexts == [("rs_1", OPENING), ("rs_1", FINAL)]
+    # Every event went, and the closing description went after the batch
+    # that carried run_finished.
+    sent = [event["type"] for batch in client.batches for event in batch]
+    assert sent[-1] == "run_finished"
+    assert client.order[-1] == "context" and client.order.index("events") < client.order.index("context")
+
+
+def test_tp_run_names_the_agent_that_launched_it_and_the_switches_it_ran_with(
+    make_project, runner, monkeypatch
+):
+    from trap.cli import app
+
+    tracker = _FakeTracker()
+    _use_fake_tracker(monkeypatch, tracker)
+    monkeypatch.setenv("TRAP_AGENT", "claude-code")
+    monkeypatch.setenv("TRAP_AGENT_VERSION", "2.1")
+    make_project(cmd="sh -c 'cat'", cases=["c1"], extra_solution={"profile": {"model": "gpt-5"}})
+    assert runner.invoke(app, ["run", "--no-environment", "--no-cost"]).exit_code == 0
+    opening, final = tracker.described
+    assert opening["identity"]["agent"] == {"name": "claude-code", "version": "2.1"}
+    assert opening["model"]["declared"] == [{"model": "gpt-5", "role": "solver", "source": "trap.yaml"}]
+    assert opening["usage"] == {"status": "disabled", "reason": "--no-cost"}
+    assert final["usage"] == {"status": "disabled", "reason": "--no-cost"}
+    assert final["timing"]["started_at"] <= final["timing"]["finished_at"]
+
+
+def test_json_output_still_describes_the_run_but_prints_no_url(make_project, runner, monkeypatch):
+    from trap.cli import app
+
+    tracker = _FakeTracker()
+    _use_fake_tracker(monkeypatch, tracker)
+    make_project(cmd="sh -c 'cat'", cases=["c1"])
+    result = runner.invoke(app, ["run", "--no-environment", "-o", "json"])
+    assert result.exit_code == 0, result.output
+    assert len(tracker.described) == 2
+    assert "live ·" not in result.output  # the JSON stays machine-readable
+
+
+def test_tp_run_describes_the_environment_it_detected(make_project, runner, monkeypatch):
+    from trap.cli import app
+
+    tracker = _FakeTracker()
+    _use_fake_tracker(monkeypatch, tracker)
+    make_project(cmd="sh -c 'cat'", cases=["c1"])
+    assert runner.invoke(app, ["run"]).exit_code == 0
+    opening, _final = tracker.described
+    assert "python" in opening["environment"]["runtime"]

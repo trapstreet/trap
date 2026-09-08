@@ -182,15 +182,31 @@ class LiveClient:
         revision_id: str,
         client_run_id: str,
         runtime: dict[str, Any] | None = None,
+        context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Open a server-graded run. Idempotent on ``client_run_id``: the same id
         opens the same run, so a retry cannot create a second one. ``runtime``
-        declares who is running it -- the same block the session PUT sends."""
-        return self._request(
-            "POST",
-            "/api/v2/evaluations",
-            json={"revision_id": revision_id, "client_run_id": client_run_id, "runtime": runtime or {}},
-        )
+        declares who is running it -- the same block the session PUT sends --
+        and ``context`` is the opening description (see :mod:`trap.live.context`),
+        stored with the run when it is created; a retry never replaces it."""
+        body: dict[str, Any] = {
+            "revision_id": revision_id,
+            "client_run_id": client_run_id,
+            "runtime": runtime or {},
+        }
+        if context is not None:
+            body["context"] = context
+        return self._request("POST", "/api/v2/evaluations", json=body)
+
+    def put_context(self, run_ref: str, patch: dict[str, Any]) -> dict[str, Any]:
+        """Describe a run: merge ``patch`` into what the site knows about it.
+
+        Accepted on both channels (the private local run and the graded one)
+        under the run's server id or its ``client_run_id``. The site answers
+        ``{accepted, ignored, context, run}``; a 400 names a field that is not
+        the client's to send, and is the one answer worth not retrying.
+        """
+        return self._request("POST", f"/api/v2/runs/{run_ref}/context", json=patch)
 
     def submit_answers(self, run_id: str, cases_results: list[dict[str, Any]]) -> dict[str, Any]:
         """Hand in answers for the site to judge, in the report's own ``cases_results`` shape."""

@@ -124,6 +124,8 @@ class SiteGrader:
         self._thread: threading.Thread | None = None
         self._closing = False
         self._summary_line: str | None = None
+        # The run's description, when close() was given one; sender-owned.
+        self._descriptions: list[dict[str, Any]] = []
         # Sender state, owned by the sender thread.
         self._clock = clock
         self._rng = rng
@@ -185,8 +187,15 @@ class SiteGrader:
         except Exception as e:  # pragma: no cover - defensive
             self._stop(f"site grading off ({e.__class__.__name__})")
 
-    def close(self) -> None:
-        """Stop sending after one bounded flush, and say what became of the answers."""
+    def close(self, context: dict[str, Any] | None = None) -> None:
+        """Stop sending after one bounded flush, and say what became of the answers.
+
+        ``context`` is the run's closing description (see :mod:`trap.live.context`),
+        handed to the sender ahead of the stop so it is posted to the graded run
+        -- after whatever answers are still owed -- before the client closes.
+        """
+        if context is not None:
+            self._queue.put_nowait(dict(context))
         in_flight = False
         if self._thread is not None:
             try:
@@ -248,15 +257,19 @@ class SiteGrader:
         if self._off:
             return wake != "stop"
         self._send_pending(force=wake == "stop")
+        self._send_descriptions()
         return wake != "stop"
 
     def _collect(self) -> Wake:
-        """Block for the next wake, then swallow every wake already queued."""
+        """Block for the next wake, then swallow every wake already queued. A
+        description on the queue is kept aside for posting."""
         try:
             item = self._queue.get(timeout=self._wait())
         except queue.Empty:
             return "idle"
         while item is not self._stop_token:
+            if isinstance(item, dict):
+                self._descriptions.append(item)
             try:
                 item = self._queue.get_nowait()
             except queue.Empty:
@@ -287,6 +300,24 @@ class SiteGrader:
             return
         if outcome.remaining:
             self._schedule_retry(now, outcome.error)
+
+    def _send_descriptions(self) -> None:
+        """Post the run's description to the graded run, each once.
+
+        A description is not an answer: nothing on disk depends on it, and the
+        report holds the same facts. So one the site did not take costs one
+        line and never turns grading off -- the answers still go.
+        """
+        if self._off or not self._descriptions:
+            return
+        assert self._graded is not None  # _off guards the None case
+        descriptions, self._descriptions = self._descriptions, []
+        for patch in descriptions:
+            try:
+                self._client.put_context(self._graded.run_id, patch)
+            except LiveApiError as e:
+                if self._notice is None:
+                    self._notice = f"site grading: the run's description was not recorded ({e})"
 
     def _schedule_retry(self, now: float, error: LiveApiError | None) -> None:
         if error is not None and error.retry_after:
@@ -326,6 +357,7 @@ def start_site_grading(
     client_run_id: str | None = None,
     server_override: str | None = None,
     enabled: bool = True,
+    context: dict[str, Any] | None = None,
 ) -> SiteGrader | None:
     """Open a graded run on the site for this task, or return None with nothing said.
 
@@ -334,6 +366,9 @@ def start_site_grading(
     for grading -- all ordinary, none worth a line. A server that *should* have
     answered but could not is the one case worth a note, and even then the run
     is unaffected: site grading is simply off for it.
+
+    ``context`` is the run's opening description (see :mod:`trap.live.context`),
+    stored with the graded run as it is created.
     """
     if not enabled or site_grading_disabled_by_env():
         return None
@@ -356,6 +391,7 @@ def start_site_grading(
         case_ids=list(case_ids),
         client_run_id=f"{client_run_id}-site" if client_run_id else new_client_run_id(),
         user_id=auth.user_id,
+        context=context,
     )
     if grader is None:
         client.close()
@@ -372,6 +408,7 @@ def _open(
     case_ids: list[str],
     client_run_id: str,
     user_id: str | None,
+    context: dict[str, Any] | None = None,
 ) -> SiteGrader | None:
     """Resolve the revision, open the run, write the sidecar, start the sender.
 
@@ -389,7 +426,7 @@ def _open(
 
     try:
         opened = client.open_evaluation(
-            revision_id=revision_id, client_run_id=client_run_id, runtime=tp_runtime()
+            revision_id=revision_id, client_run_id=client_run_id, runtime=tp_runtime(), context=context
         )
     except LiveApiError as e:
         return _unavailable(client, run_dir, _why(e, f"could not open a graded run ({e})"))
