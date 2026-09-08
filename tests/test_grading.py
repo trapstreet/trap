@@ -180,6 +180,16 @@ def _result(case_id: str = "c1", **kwargs) -> CaseResult:
     return CaseResult(**{"case_id": case_id, "metrics": None, **kwargs})
 
 
+def test_the_submission_wire_shape_is_the_report_entry_plus_client_reported():
+    # The contract test checks these keys against the web route; this one
+    # runs everywhere the contract test cannot (no sibling web checkout).
+    wire = SiteGrader._submission(_result("c1", exit_code=0, duration=1.5), "42")
+    assert wire["case_id"] == "c1" and wire["answer"] == "42"
+    assert wire["duration"] == 1.5 and wire["exit_code"] == 0
+    assert isinstance(wire["client_reported"], dict)
+    assert not {"score", "verdict", "passed", "metrics"} & wire.keys()
+
+
 # -- when grading is on -------------------------------------------------------
 
 
