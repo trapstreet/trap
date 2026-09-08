@@ -209,6 +209,51 @@ def test_only_401_and_403_retire_the_credential(status, rejected):
     assert excinfo.value.credential_rejected is rejected
 
 
+_TOO_OLD_BODY = {"code": "CLIENT_TOO_OLD", "error": "Install the pinned tp build: uv tool install --force X"}
+
+
+def test_a_426_is_the_server_refusing_this_build():
+    with pytest.raises(LiveApiError) as excinfo:
+        _live_client(lambda r: httpx.Response(426, json=_TOO_OLD_BODY)).whoami()
+    error = excinfo.value
+    assert error.client_too_old is True and error.credential_rejected is False
+    assert error.server_message == "Install the pinned tp build: uv tool install --force X"
+
+
+def test_the_machine_code_alone_names_a_refused_build():
+    # A proxy that rewrote the status still carries the body's code.
+    assert LiveApiError("http 400", status=400, payload={"code": "CLIENT_TOO_OLD"}).client_too_old is True
+    assert LiveApiError("http 400", status=400, payload={"code": "INVALID_REQUEST"}).client_too_old is False
+
+
+@pytest.mark.parametrize("payload", [{}, {"error": ""}, {"error": 5}])
+def test_a_body_without_words_has_no_server_message(payload):
+    assert LiveApiError("http 426", status=426, payload=payload).server_message is None
+
+
+def test_a_retry_after_in_seconds_is_read():
+    handler = lambda _r: httpx.Response(429, headers={"retry-after": "7"})  # noqa: E731
+    with pytest.raises(LiveApiError) as excinfo:
+        _live_client(handler).whoami()
+    assert excinfo.value.retry_after == 7
+
+
+@pytest.mark.parametrize("value", ["", "Wed, 21 Oct 2026 07:28:00 GMT", "-1"])
+def test_a_retry_after_that_is_not_whole_seconds_is_ignored(value):
+    handler = lambda _r: httpx.Response(503, headers={"retry-after": value})  # noqa: E731
+    with pytest.raises(LiveApiError) as excinfo:
+        _live_client(handler).whoami()
+    assert excinfo.value.retry_after is None
+
+
+def test_the_client_identifies_its_build_in_the_user_agent():
+    from trap import __version__
+
+    client = LiveClient("https://srv", "key", timeout=1.0)
+    assert client._client.headers["user-agent"] == f"tp/{__version__}"
+    client.close()
+
+
 def test_being_offline_is_a_live_api_error_not_a_crash():
     def boom(_request):
         raise httpx.ConnectError("down")
@@ -450,6 +495,30 @@ def test_a_rejected_token_stops_sync_and_says_so_once(tmp_path: Path):
     tracker.close()
     assert tracker.notice is not None
     assert "rejected" in tracker.notice
+
+
+def test_a_server_that_refuses_this_build_stops_sync_with_its_own_words(tmp_path: Path):
+    client = _Recorder(fail=LiveApiError("http 426", status=426, payload=_TOO_OLD_BODY))
+    tracker = _tracker(tmp_path, client)
+    tracker.start()
+    tracker.on_case_start("c1")
+    tracker.close()
+    assert tracker.notice == "live sync off: Install the pinned tp build: uv tool install --force X"
+    assert "run tp sync later" not in tracker.notice
+    # Terminal: the sender is off, so no later wake opens or sends anything,
+    # and the events stay on disk for a newer build to deliver.
+    assert tracker._disabled is True
+    tracker._queue.put_nowait(1)
+    tracker._drain_once()
+    assert client.sessions == [] and client.batches == []
+    assert len(Outbox(tmp_path).read_all()) == 2
+
+
+def test_a_refused_build_on_the_fast_path_says_what_the_server_said(tmp_path: Path):
+    client = _Recorder(fail=LiveApiError("http 426", status=426))
+    tracker = _ensured(_tracker(tmp_path, client))
+    assert tracker._send([{"client_seq": 1}]) is False
+    assert tracker.notice == "live sync off: this server needs a newer tp"
 
 
 def test_being_offline_keeps_the_events_and_says_so_once(tmp_path: Path):
@@ -1370,6 +1439,22 @@ def test_a_server_error_keeps_the_queue_without_calling_it_offline(tmp_path: Pat
     assert "stay on disk" in outcome.message
 
 
+def test_tp_sync_reports_a_refused_build_as_refused_with_the_servers_words(tmp_path: Path, monkeypatch):
+    _queued(tmp_path, run_id=None)
+    client = _SyncClient(ensures=[LiveApiError("http 426", status=426, payload=_TOO_OLD_BODY)])
+    outcome = _run_sync(tmp_path, monkeypatch, client)
+    assert (outcome.status, outcome.remaining, outcome.refused) == ("refused", 2, True)
+    assert outcome.message.startswith("Install the pinned tp build: uv tool install --force X;")
+    assert "2 event(s) stay on disk" in outcome.message
+    assert client.batches == []
+
+
+def test_tp_sync_words_a_bare_426_itself(tmp_path: Path, monkeypatch):
+    _queued(tmp_path)
+    outcome = _run_sync(tmp_path, monkeypatch, _SyncClient(sends=[LiveApiError("http 426", status=426)]))
+    assert outcome.status == "refused" and "this server needs a newer tp" in outcome.message
+
+
 def test_a_rejected_token_partway_through_still_refuses(tmp_path: Path, monkeypatch):
     _queued(tmp_path)
     outcome = _run_sync(tmp_path, monkeypatch, _SyncClient(sends=[LiveApiError("http 401", status=401)]))
@@ -2088,6 +2173,13 @@ def test_ensure_sends_the_whole_description_every_time(tmp_path: Path):
     delivery.ensure()
     assert [e["snapshot"] for e in client.ensured] == [{"cases_total": 1}, {"cases_total": 1}]
     assert client.ensured[0]["runtime"]["orchestrator"] == "tp"
+
+
+def test_the_runtime_block_is_one_value_for_both_calls():
+    from trap import __version__
+    from trap.live.delivery import tp_runtime
+
+    assert tp_runtime() == {"orchestrator": "tp", "executor": "tp", "trap_version": __version__}
 
 
 def test_ensure_persists_the_server_id_once(tmp_path: Path, monkeypatch):

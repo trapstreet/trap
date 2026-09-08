@@ -13,7 +13,7 @@
 > Prefer to drive it yourself:
 >
 > ```bash
-> uv tool install trap-cli && tp auth login
+> uv tool install "git+https://github.com/trapstreet/trap.git" && tp auth login
 > ```
 >
 > [**Quick start**](https://trapstreet.run/docs/quick-start) ·
@@ -36,11 +36,11 @@ trap treats any solution as a black box — it invokes it as a subprocess, captu
 ```bash
 # requires uv — https://docs.astral.sh/uv/getting-started/installation/
 
-# from PyPI
-uv tool install trap-cli
+# main: --server, live progress, site grading (what trapstreet.run's launch pages need)
+uv tool install --force "git+https://github.com/trapstreet/trap.git"
 
-# from git (latest main)
-uv tool install "git+https://github.com/trapstreet/trap.git"
+# stable 0.0.14 from PyPI: no --server / live progress / site grading
+uv tool install trap-cli
 ```
 
 The command is `tp`.

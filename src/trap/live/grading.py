@@ -34,6 +34,7 @@ from typing import Any
 from trap.auth.resolve import ResolvedAuth
 from trap.auth.store import CredentialStore, CredentialStoreError
 from trap.live.client import LiveApiError, LiveClient
+from trap.live.delivery import tp_runtime
 from trap.live.identity import new_client_run_id
 from trap.models.provenance import GitProvenance
 from trap.models.report import SiteGrading
@@ -202,15 +203,17 @@ def _open(
     except LiveApiError as e:
         if e.status == 404:
             return None  # no admitted evaluation for this task: the ordinary case
-        return _unavailable(client, answer_of, f"could not resolve the task ({e})")
+        return _unavailable(client, answer_of, _why(e, f"could not resolve the task ({e})"))
     revision_id = revision.get("revision_id")
     if revision.get("admitted") is not True or not isinstance(revision_id, str):
         return None
 
     try:
-        opened = client.open_evaluation(revision_id=revision_id, client_run_id=client_run_id)
+        opened = client.open_evaluation(
+            revision_id=revision_id, client_run_id=client_run_id, runtime=tp_runtime()
+        )
     except LiveApiError as e:
-        return _unavailable(client, answer_of, f"could not open a graded run ({e})")
+        return _unavailable(client, answer_of, _why(e, f"could not open a graded run ({e})"))
     run = opened.get("run")
     run_id = run.get("id") if isinstance(run, dict) else None
     if not isinstance(run, dict) or not isinstance(run_id, str):
@@ -231,6 +234,14 @@ def _open(
             f"{cases_total} — the graded run stays unfinished until every case is answered"
         )
     return SiteGrader(client=client, run_id=run_id, url=url, answer_of=answer_of, notice=notice)
+
+
+def _why(error: LiveApiError, fallback: str) -> str:
+    """A server that refuses this build says so in its own words -- they name the
+    install command -- and those are worth more than ``http 426``."""
+    if error.client_too_old:
+        return error.server_message or "this server needs a newer tp"
+    return fallback
 
 
 def _unavailable(client: LiveClient, answer_of: Callable[[str], str], reason: str) -> SiteGrader:

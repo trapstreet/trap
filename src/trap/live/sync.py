@@ -367,7 +367,21 @@ def _load_report(run_dir: Path) -> ReportData | None:
 
 
 def _api_failure(error: LiveApiError, *, delivered: int, remaining: int) -> SyncReport:
-    """Turn a failed call into an outcome. Only a rejected credential is an error."""
+    """Turn a failed call into an outcome. A rejected credential, or a build the
+    server will no longer talk to, is an error; everything else is a queue that
+    stays on disk."""
+    if error.client_too_old:
+        # Retrying can never succeed from this build, so this is not "later":
+        # the server's words name the install command.
+        return SyncReport(
+            status="refused",
+            delivered=delivered,
+            remaining=remaining,
+            message=(
+                f"{error.server_message or 'this server needs a newer tp'}; "
+                f"{remaining} event(s) stay on disk for it."
+            ),
+        )
     if error.credential_rejected:
         return SyncReport(
             status="refused",

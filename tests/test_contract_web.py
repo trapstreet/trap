@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -227,3 +228,61 @@ def test_the_evaluation_routes_exist_where_the_cli_calls_them(web_src: Path):
         source = resolve.read_text()
         for name in ("repo", "commit", "path", "revision_id", "cases_total", "admitted"):
             assert name in source, f"resolve route no longer mentions {name}"
+
+
+# -- the CLI floor the web enforces ------------------------------------------
+
+
+_TRAP_VERSION_TS = Path("lib/runs/trap-version.ts")
+
+
+def _version_key(release: tuple[int, int, int], dev: int | None) -> tuple[int, int, int, int, int]:
+    """PEP 440 order for the two shapes hatch-vcs emits here: ``X.Y.Z`` and
+    ``X.Y.Z.devN`` -- a dev build sorts below its release, dev distance ascending."""
+    return (*release, 0 if dev is not None else 1, dev or 0)
+
+
+def _parse_floor(text: str) -> tuple[int, int, int, int, int]:
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:\.dev(\d+))?", text)
+    assert match, f"MIN_TRAP_VERSION {text!r} is not a shape hatch-vcs produces"
+    dev = match.group(4)
+    return _version_key(
+        (int(match.group(1)), int(match.group(2)), int(match.group(3))), int(dev) if dev else None
+    )
+
+
+def _checkout_version() -> tuple[int, int, int, int, int] | None:
+    """What hatch-vcs would call this checkout, from the same ``git describe`` it
+    runs -- not ``trap.__version__``, which is baked at install time and goes stale."""
+    repo = Path(__file__).resolve().parents[1]
+    try:
+        described = subprocess.run(
+            ["git", "describe", "--tags", "--long", "--match", "v*", "HEAD"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)-(\d+)-g[0-9a-f]+", described)
+    if match is None:
+        return None
+    major, minor, patch, distance = (int(group) for group in match.groups())
+    if distance == 0:
+        return _version_key((major, minor, patch), None)
+    return _version_key((major, minor, patch + 1), distance)  # hatch-vcs guesses the next patch
+
+
+def test_the_web_floor_is_not_ahead_of_this_checkout(web_src: Path):
+    """The day someone bumps the web's minimum past what main produces, every
+    paired ``tp run`` starts being refused; this is where that fails first."""
+    source_path = web_src / _TRAP_VERSION_TS
+    if not source_path.is_file():
+        pytest.skip("the web checkout has no CLI floor yet")
+    match = re.search(r'MIN_TRAP_VERSION\s*=\s*"([^"]+)"', source_path.read_text())
+    assert match, "MIN_TRAP_VERSION not found in trap-version.ts"
+    checkout = _checkout_version()
+    if checkout is None:
+        pytest.skip("no git tags to describe this checkout with")
+    assert checkout >= _parse_floor(match.group(1))

@@ -51,6 +51,13 @@ sender emits a heartbeat, so a long case is not shown as lost contact. The run's
 frozen into the sidecar at start from the account id stored at pairing (see `tp auth`) — no
 network call — and only that account may later deliver the queue.
 
+A server may refuse a build of `tp` that is too old for it (`426 CLIENT_TOO_OLD`, on the
+session open or on `tp sync`). That is terminal, not retried: `tp run` prints the server's own
+message — it carries the install command — once, keeps mirroring off for the run, and the
+outbox stays on disk for a newer build; `tp sync` reports it as a refusal (exit `2`). Site
+grading answers the same refusal the same way. Both send `runtime.trap_version` as the build
+reports it, `0.0.0+unknown` included; the server decides.
+
 When a run had a live session, its `report.json` carries the session's `client_run_id`, which
 is how a later `tp submit` lands on the same run page instead of creating a second one.
 Reports from runs without a session — and from older CLIs — simply have no such field and

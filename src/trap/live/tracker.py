@@ -438,6 +438,12 @@ class LiveTracker:
             return False
 
     def _handle_api_error(self, error: LiveApiError) -> None:
+        if error.client_too_old:
+            # The server will not talk to this build at all. Not a retry case:
+            # its answer names the install command, so that is what is shown,
+            # and the outbox is kept for the next build to deliver.
+            self._disable("live sync off: " + (error.server_message or "this server needs a newer tp"))
+            return
         if error.credential_rejected:
             # Stop using a credential the server refused. Deliberately no
             # fallback to another stored credential or another server: the

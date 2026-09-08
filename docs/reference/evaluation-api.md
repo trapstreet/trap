@@ -198,3 +198,4 @@ Machine-readable `code`, human `error`:
 | `CONFLICT` | `ALREADY_ANSWERED` or `STALE_LEASE` |
 | `INVALID_REQUEST` | malformed, too large, or carrying a field that is not yours to send |
 | `RATE_LIMITED` | too many leases held, or too many requests |
+| `CLIENT_TOO_OLD` | `426`: this build of `tp` is older than the server accepts; `error` carries the install command. `tp` prints it once and turns the feature off for the run |

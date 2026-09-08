@@ -15,6 +15,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from trap import __version__
 from trap.live.client import LiveApiError, LiveClient
 from trap.live.grading import SiteGrader, site_grading_disabled_by_env, start_site_grading
 from trap.models.cost import CaseCost, ModelCost
@@ -22,6 +23,7 @@ from trap.models.provenance import GitProvenance
 from trap.models.results import CaseResult
 
 ANCHORED = GitProvenance(repo="https://github.com/org/task", commit="abc123", subdirectory="tasks/a")
+TP_RUNTIME = {"orchestrator": "tp", "executor": "tp", "trap_version": __version__}
 _ADMITTED = {"revision_id": "ev_1", "cases_total": 2, "admitted": True}
 
 
@@ -106,7 +108,7 @@ def test_an_admitted_task_opens_a_graded_run_under_an_id_derived_from_the_live_o
     assert grader.url == "https://srv/runs/rs_9"
     assert grader.notice is None
     assert site.resolved == [{"repo": ANCHORED.repo, "commit": "abc123", "path": "tasks/a"}]
-    assert site.opens == [{"revision_id": "ev_1", "client_run_id": "r-1-site"}]
+    assert site.opens == [{"revision_id": "ev_1", "client_run_id": "r-1-site", "runtime": TP_RUNTIME}]
     summary = grader.summary()
     assert summary is not None and summary.model_dump() == {"run_id": "rs_9", "url": "https://srv/runs/rs_9"}
 
@@ -248,6 +250,40 @@ def test_a_run_the_site_will_not_open_is_reported(monkeypatch):
     assert grader.notice is not None and "could not open a graded run" in grader.notice
 
 
+TOO_OLD = LiveApiError(
+    "http 426",
+    status=426,
+    payload={"code": "CLIENT_TOO_OLD", "error": "Install the pinned tp build: uv tool install --force X"},
+)
+
+
+def test_opening_a_graded_run_reports_the_tp_version(monkeypatch):
+    _grader, site = _start(monkeypatch)
+    assert site.opens[0]["runtime"] == TP_RUNTIME
+    assert site.opens[0]["runtime"]["trap_version"] == __version__
+
+
+def test_a_server_that_refuses_this_build_is_quoted_once_and_grading_is_off(monkeypatch):
+    grader, site = _start(monkeypatch, _Site(opened=TOO_OLD))
+    assert grader is not None and not grader.opened
+    assert grader.notice is not None and "Install the pinned tp build" in grader.notice
+    assert "http 426" not in grader.notice
+    grader.on_case_done(CaseResult(case_id="c1", metrics=None))
+    assert site.submissions == []
+
+
+def test_a_refusal_at_resolve_time_is_quoted_too(monkeypatch):
+    grader, _site = _start(monkeypatch, _Site(resolve=TOO_OLD))
+    assert grader is not None and grader.notice is not None
+    assert "Install the pinned tp build" in grader.notice
+
+
+def test_a_refusal_without_words_still_says_what_it_is(monkeypatch):
+    grader, _site = _start(monkeypatch, _Site(opened=LiveApiError("http 426", status=426)))
+    assert grader is not None and grader.notice is not None
+    assert "this server needs a newer tp" in grader.notice
+
+
 def test_an_answer_without_a_run_id_is_reported(monkeypatch):
     grader, _site = _start(monkeypatch, _Site(opened={"view_url": "https://srv/runs/x"}))
     assert grader is not None and not grader.opened
@@ -343,13 +379,26 @@ def test_open_posts_the_revision_and_the_client_run_id():
         seen.update(method=request.method, path=request.url.path, body=json.loads(request.content))
         return httpx.Response(201, json={"run": {"id": "rs_9"}, "view_url": "https://srv/runs/rs_9"})
 
-    result = _live_client(handler).open_evaluation(revision_id="ev_1", client_run_id="r-1")
+    result = _live_client(handler).open_evaluation(
+        revision_id="ev_1", client_run_id="r-1", runtime=TP_RUNTIME
+    )
     assert result["run"]["id"] == "rs_9"
     assert seen == {
         "method": "POST",
         "path": "/api/v2/evaluations",
-        "body": {"revision_id": "ev_1", "client_run_id": "r-1"},
+        "body": {"revision_id": "ev_1", "client_run_id": "r-1", "runtime": TP_RUNTIME},
     }
+
+
+def test_open_without_a_runtime_sends_an_empty_block():
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(201, json={"run": {"id": "rs_9"}})
+
+    _live_client(handler).open_evaluation(revision_id="ev_1", client_run_id="r-1")
+    assert seen["body"] == {"revision_id": "ev_1", "client_run_id": "r-1", "runtime": {}}
 
 
 def test_submit_posts_cases_results_to_the_runs_submissions():
