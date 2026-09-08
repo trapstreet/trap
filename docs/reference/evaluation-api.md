@@ -151,7 +151,24 @@ they are. It does not claim leases: a case is still answered once per run, a
 case whose `exit_code` is not `0` is **skipped** (left unanswered, not
 submitted empty), and every rule below still holds. The response counts what
 was `accepted`, what was a `duplicate` retry, what was `skipped` and what was
-`rejected`, and says `grading: queued`.
+`rejected`, and says `grading: queued`. Beside the counts it carries a
+**per-case receipt**, `results`, in input order:
+
+```json
+{ "accepted": 1, "duplicates": 0,
+  "skipped": [{ "case": "c2", "reason": "SOLVER_ERRORED" }], "rejected": [],
+  "results": [
+    { "case_id": "c1", "status": "accepted", "digest": "sha256:…" },
+    { "case_id": "c2", "status": "skipped",  "reason": "SOLVER_ERRORED" } ],
+  "grading": "queued" }
+```
+
+`status` is one of `accepted`, `duplicate`, `rejected` or `skipped`; `reason`
+names why (`NO_SUCH_CASE`, `ALREADY_ANSWERED`, `AUTHORITATIVE_FIELD`,
+`ARTIFACT_TOO_LARGE`, `STALE_LEASE`, `SOLVER_ERRORED`, `NO_ANSWER`); `digest`
+is what the site stored. A client that keeps a queue settles each case by its
+receipt — a skipped or rejected case stays unanswered on the site and the run
+does not finalise, so it is worth saying by name rather than resending.
 
 ## The `tp` path
 
@@ -166,11 +183,16 @@ the solver's stdout, as a string — through the bulk call above as the case
 finishes, with the duration, exit code and (when the cost proxy priced it) cost
 as `client_reported`. The local judge still runs; its scores are a preview.
 
-It is fail-open and keeps no queue: an unreachable site at start means the run
-is judged locally and nothing is submitted, then or later; a connection lost
-midway stops further submissions and leaves the site's run unfinished. Neither
-changes the run's exit code. `--no-site-grading` or `TRAP_NO_SITE_GRADING=1`
-turns it off. See [`tp run`](cli.md#tp-run).
+It is fail-open and keeps a queue. An unreachable site at start means the run
+is judged locally and nothing is submitted, then or later. Once a graded run
+is open, every answer is recorded in the run's answers outbox before it is
+sent (a digest and the wire fields — the answer itself stays in the case's
+`stdout`), a request the site did not take is retried with a backoff for as
+long as the run lasts, and the receipt settles each case by name. Whatever is
+still unconfirmed when `tp run` exits is said in one line and left for
+[`tp sync`](cli.md#tp-sync), which resends it to the same graded run. None of
+this changes the run's exit code. `--no-site-grading` or
+`TRAP_NO_SITE_GRADING=1` turns it off. See [`tp run`](cli.md#tp-run).
 
 ## Publishing
 

@@ -217,6 +217,37 @@ def test_a_submission_carries_only_fields_the_bulk_route_reads(web_src: Path):
     assert set(submission["client_reported"]) <= _interface_fields(grading_ts, "ClientReported")
 
 
+def _quoted_union(source: str, name: str) -> set[str] | None:
+    """The string members of ``type NAME = | "a" | "b"`` (or ``NAME: | "a" ...``),
+    read across lines; None when the name is absent."""
+    match = re.search(rf"{name}\s*[=:]\s*((?:\|?\s*\"\w+\"\s*)+)", source)
+    return set(re.findall(r'"(\w+)"', match.group(1))) if match else None
+
+
+def test_every_reason_the_cli_can_quote_is_one_the_bulk_route_gives(web_src: Path):
+    from trap.live.answers import KNOWN_REASONS
+
+    grading_ts = (web_src / "lib/runs/grading.ts").read_text()
+    # The per-case submit errors: the multi-line ``error:`` union of SubmitResult.
+    start = grading_ts.index("SubmitResult")
+    errors = _quoted_union(grading_ts[start:], "error")
+    assert errors, "SubmitResult's error union was not found"
+    skips = set(re.findall(r'reason: "(\w+)"', grading_ts))
+    assert skips, "the bulk route's skip reasons were not found"
+    # WRONG_CHANNEL fails the whole request (a 403), never one case.
+    assert (errors - {"WRONG_CHANNEL"}) | skips == KNOWN_REASONS
+
+
+def test_the_receipt_statuses_are_the_webs(web_src: Path):
+    from trap.live.answers import RECEIPT_STATUSES
+
+    grading_ts = (web_src / "lib/runs/grading.ts").read_text()
+    statuses = _quoted_union(grading_ts, "BulkReceiptStatus")
+    if statuses is None:
+        pytest.skip("the web checkout has no per-case receipt yet (counts only)")
+    assert statuses == RECEIPT_STATUSES
+
+
 def test_the_evaluation_routes_exist_where_the_cli_calls_them(web_src: Path):
     api = web_src / "app/api/v2"
     assert (api / "evaluations/route.ts").is_file()

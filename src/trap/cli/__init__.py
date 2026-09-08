@@ -30,7 +30,6 @@ from trap.live.tracker import LiveTracker, plain_score
 from trap.loader import ConfigError, TrapLoader, TraptaskLoader
 from trap.models import Diagnosis, Provenance, ReportData
 from trap.runner import TaskRunner
-from trap.runner.layout import CaseLayout
 from trap.workspace import SolutionIdentity, Workspace
 
 app = typer.Typer(help="AI prompt / agent / workflow / testing framework.")
@@ -403,10 +402,8 @@ def run(
     # Like the mirror, it is fail-open: None, or a grader that says why not.
     grader = start_site_grading(
         task=provenance.task,
-        cases_total=len(active_cases),
-        answer_of=lambda case_id: CaseLayout.for_case(
-            ws.run_dir(ts), case_id
-        ).solution_capture.stdout.read_text(),
+        case_ids=[case.id for case in active_cases],
+        run_dir=ws.run_dir(ts),
         client_run_id=tracker.client_run_id if tracker is not None else None,
         server_override=server,
         enabled=site_grading,
@@ -491,8 +488,11 @@ def run(
             err_console.print(f"[yellow]{tracker.notice}[/yellow]")
     if grader is not None:
         grader.close()
-        if grader.notice and output == OutputFormat.rich:
-            err_console.print(f"[yellow]{grader.notice}[/yellow]")
+        if output == OutputFormat.rich:
+            if grader.summary_line:
+                console.print(f"[dim]{grader.summary_line}[/dim]")
+            if grader.notice:
+                err_console.print(f"[yellow]{grader.notice}[/yellow]")
 
     if diagnosis.judge_broken:
         first = diagnosis.judge_failures[0]
@@ -676,8 +676,9 @@ def sync(
     # exit code was decided when it ran, and a queue left on disk is not an
     # error — only a refusal (wrong account, wrong server, rejected token) is.
     if outcome.refused:
-        raise _die(outcome.message)
-    console.print(outcome.message)
+        raise _die(outcome.refusal)
+    for line in outcome.lines:
+        console.print(line)
 
 
 # Hidden until the scaffold is implemented — registered but not advertised in `--help`.

@@ -98,11 +98,19 @@ show; treat them as a **preview**. The site's verdicts are the ones that count f
 evaluation, and they appear on that page as each case is graded (the numbers arrive
 together once every case is). The report records the graded run under `site_grading`.
 
-This is fail-open and has no queue. If the site cannot be reached when the run starts, or
-the task is not an admitted evaluation, the run is judged locally and nothing is submitted —
-then or later. If contact is lost midway, the remaining answers are not submitted and the
-site's run stays unfinished; the CLI says so in one line. None of this changes the run's exit
-code. Turn it off for a run with `--no-site-grading`, or everywhere with
+This is fail-open. If the site cannot be reached when the run starts, or the task is not an
+admitted evaluation, the run is judged locally and nothing is submitted — then or later. Once
+the graded run is open, every answer is recorded on disk before it is sent and retried in the
+background if the site does not take it, so a dropped request costs nothing; the site answers
+a receipt per case, and the run ends with one line saying where the answers stand:
+
+```
+site grading: 3 of 4 answer(s) submitted; 1 skipped by the site (c2: SOLVER_ERRORED) — the site's run stays unfinished
+```
+
+Anything still unconfirmed when `tp run` exits stays in the run's answers outbox for
+[`tp sync`](#tp-sync), which resends it to the same graded run. None of this changes the
+run's exit code. Turn it off for a run with `--no-site-grading`, or everywhere with
 `TRAP_NO_SITE_GRADING=1`.
 
 ### Remote sources
@@ -133,8 +141,8 @@ report is saved before exit `3`, so it remains available for diagnosis. See the
 
 ## tp sync
 
-Deliver a tracked run's queued progress after the fact — the network came back, or the run
-finished offline:
+Deliver a tracked run's queued progress — and, for a run graded on the site, the answers the
+site never confirmed — after the fact: the network came back, or the run finished offline:
 
 ```bash
 tp sync                                       # latest run of the first task
@@ -167,6 +175,10 @@ never reached the server), then deliver the queue. Nothing is sent before the se
 `--task` names the alias in your `trap.yaml`, the same one you ran with. It is the solution
 author's own label and need not match the website's task id, so use the same alias for
 `tp run`, `tp sync`, `tp report` and `tp submit`.
+
+A run graded on the site gets the same treatment for its answers: `tp sync` re-reads each
+unconfirmed answer from the run directory, posts it to the same graded run, and prints a
+second line for that half — what was submitted, and anything the site skipped or rejected.
 
 Nothing to send, a run that was never tracked, and no network are all ordinary outcomes: they
 report what happened and exit `0`. Only a trap-level problem — bad arguments, an unreadable

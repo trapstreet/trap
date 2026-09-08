@@ -16,7 +16,10 @@ Undelivered events wait in the run's outbox on disk until `tp sync` sends them.
 
 **`tp run` on an admitted evaluation** (site grading, on by default when paired)
 additionally sends each case's **answer** — the solver's stdout as a string, nothing
-else — with its duration, exit code and cost as self-declared fields.
+else — with its duration, exit code and cost as self-declared fields. An answer the site
+did not confirm is retried during the run and, afterwards, by `tp sync`, which re-reads it
+from the run directory: the queue on disk holds a digest and the wire fields, never a
+second copy of the answer.
 
 **`tp submit`** uploads the whole `report.json`: per-case metrics verbatim from the judge,
 grader output, environment, cost, and the git provenance of the solution and task. It is

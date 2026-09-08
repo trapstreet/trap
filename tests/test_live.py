@@ -20,6 +20,7 @@ import httpx
 import pytest
 
 from trap.auth.store import CredentialStoreError
+from trap.live.answers import GradedRun
 from trap.live.client import LiveApiError, LiveClient
 from trap.live.identity import LiveSession, new_client_run_id
 from trap.live.outbox import Outbox, OutboxError
@@ -1158,8 +1159,11 @@ class _SyncClient:
         checkpoints: list[object] | None = None,
         generation: int | None = 1,
         ensures: list[object] | None = None,
+        answers: list[object] | None = None,
     ) -> None:
         self.server = "https://srv"
+        self._answers = list(answers or [])
+        self.answer_batches: list[tuple[str, list[dict]]] = []
         self._user_id = user_id
         self._whoami_error = whoami_error
         self._sends = list(sends or [])
@@ -1203,6 +1207,17 @@ class _SyncClient:
         if isinstance(answer, LiveApiError):
             raise answer
         return answer
+
+    def submit_answers(self, run_id: str, cases_results: list[dict]):
+        self.answer_batches.append((run_id, cases_results))
+        answer = self._answers.pop(0) if self._answers else None
+        if isinstance(answer, LiveApiError):
+            raise answer
+        if isinstance(answer, dict):
+            return answer
+        return {
+            "results": [{"case_id": c["case_id"], "status": "accepted", "digest": "d"} for c in cases_results]
+        }
 
     def close(self) -> None:
         self.closed = True
@@ -2154,6 +2169,270 @@ def test_a_run_that_loses_one_request_still_ends_fully_acknowledged(tmp_path: Pa
     reloaded = LiveSession.load(tmp_path)
     assert reloaded is not None and reloaded.acked_seq == total
     assert server.stored == set(range(1, total + 1))
+
+
+# -- tp sync: the answers half ---------------------------------------------------
+
+
+def _graded(
+    run_dir: Path,
+    *,
+    user_id: str | None = "usr_a",
+    queued: tuple[str, ...] = ("c1", "c2"),
+    settled: dict[str, str] | None = None,
+) -> GradedRun:
+    """A run directory as a site-graded `tp run` would leave it: the graded-run
+    sidecar, the answers outbox, and each case's stdout to re-read."""
+    from trap.live.answers import AnswerOutbox, AnswerRecord
+    from trap.models.results import CaseResult
+
+    graded = GradedRun(
+        run_id="rs_9",
+        client_run_id="r-1-site",
+        server="https://srv",
+        url="https://srv/runs/rs_9",
+        revision_id="ev_1",
+        user_id=user_id,
+    )
+    graded.save(run_dir)
+    outbox = AnswerOutbox(run_dir)
+    outbox.prepare()
+    for ordinal, case_id in enumerate(queued, start=1):
+        stdout = run_dir / case_id / "solution" / "stdout"
+        stdout.parent.mkdir(parents=True, exist_ok=True)
+        stdout.write_text(f"answer {case_id}")
+        outbox.queue(
+            AnswerRecord.queued(
+                CaseResult(case_id=case_id, metrics=None), ordinal=ordinal, answer=f"answer {case_id}"
+            )
+        )
+    for case_id, state in (settled or {}).items():
+        outbox.settle(case_id, state)  # type: ignore[arg-type]
+    return graded
+
+
+def _answer_states(run_dir: Path) -> dict[str, str]:
+    from trap.live.answers import AnswerOutbox
+
+    return {case_id: record.state for case_id, record in AnswerOutbox(run_dir).latest().items()}
+
+
+def test_tp_sync_resends_unconfirmed_answers_to_the_same_graded_run(tmp_path: Path, monkeypatch):
+    _queued(tmp_path)
+    _graded(tmp_path)
+    client = _SyncClient()
+    outcome = _run_sync(tmp_path, monkeypatch, client)
+    assert outcome.status == "delivered" and outcome.answers is not None
+    assert outcome.answers.status == "delivered" and outcome.answers.delivered == 2
+    assert "https://srv/runs/rs_9" in outcome.answers.message
+    assert [(run_id, [c["case_id"] for c in batch]) for run_id, batch in client.answer_batches] == [
+        ("rs_9", ["c1", "c2"])
+    ]
+    assert client.answer_batches[0][1][0]["answer"] == "answer c1"  # re-read from the case, not copied
+    assert _answer_states(tmp_path) == {"c1": "accepted", "c2": "accepted"}
+    assert outcome.lines == [outcome.message, outcome.answers.message] and outcome.refused is False
+
+
+def test_a_run_graded_on_site_but_never_mirrored_reports_only_its_answers(tmp_path: Path, monkeypatch):
+    _graded(tmp_path)  # no session.json: sync was off, grading was on
+    outcome = _run_sync(tmp_path, monkeypatch, _SyncClient())
+    assert outcome.status == "untracked" and outcome.answers is not None
+    assert outcome.answers.status == "delivered"
+    assert outcome.lines == [outcome.answers.message]  # nothing to say about progress
+    assert outcome.refused is False
+
+
+def test_a_graded_run_with_nothing_queued_is_up_to_date(tmp_path: Path, monkeypatch):
+    _graded(tmp_path, queued=("c1",), settled={"c1": "accepted"})
+    client = _SyncClient()
+    outcome = _run_sync(tmp_path, monkeypatch, client)
+    assert outcome.answers is not None and outcome.answers.status == "up_to_date"
+    assert client.answer_batches == []
+
+
+def test_tp_sync_with_a_missing_graded_run_for_this_account_is_stalled_not_refused(
+    tmp_path: Path, monkeypatch
+):
+    _graded(tmp_path)
+    client = _SyncClient(answers=[LiveApiError("http 404", status=404)])
+    outcome = _run_sync(tmp_path, monkeypatch, client)
+    assert outcome.answers is not None
+    assert (outcome.answers.status, outcome.answers.remaining, outcome.refused) == ("stalled", 2, False)
+    assert outcome.answers.message.startswith(
+        "the site holds no graded run rs_9 for this account; 2 answer(s) stay on disk"
+    )
+
+
+def test_tp_sync_claim_persists_the_id_into_grading_json(tmp_path: Path, monkeypatch):
+    _graded(tmp_path, user_id=None)
+    refused = _run_sync(tmp_path, monkeypatch, _SyncClient(user_id="usr_a"))
+    assert refused.answers is not None and refused.answers.status == "refused"
+    assert "--claim" in refused.answers.message and refused.refused is True
+    assert refused.refusal == refused.answers.message
+    claimed = _run_sync(tmp_path, monkeypatch, _SyncClient(user_id="usr_a"), claim=True)
+    assert claimed.answers is not None and claimed.answers.status == "delivered"
+    reloaded = GradedRun.load(tmp_path)
+    assert reloaded is not None and reloaded.user_id == "usr_a"
+
+
+def test_a_claim_that_cannot_be_written_still_delivers(tmp_path: Path, monkeypatch):
+    _graded(tmp_path, user_id=None)
+
+    def denied(self, run_dir):
+        raise OSError("read-only")
+
+    monkeypatch.setattr(GradedRun, "save", denied)
+    outcome = _run_sync(tmp_path, monkeypatch, _SyncClient(user_id="usr_a"), claim=True)
+    assert outcome.answers is not None and outcome.answers.status == "delivered"
+
+
+def test_a_graded_run_of_another_account_keeps_its_answers(tmp_path: Path, monkeypatch):
+    _graded(tmp_path, user_id="usr_a")
+    client = _SyncClient(user_id="usr_b")
+    outcome = _run_sync(tmp_path, monkeypatch, client)
+    assert outcome.answers is not None and outcome.answers.status == "refused"
+    assert "different account" in outcome.answers.message and client.answer_batches == []
+
+
+def test_a_claim_on_a_graded_run_needs_a_server_that_says_who_we_are(tmp_path: Path, monkeypatch):
+    _graded(tmp_path, user_id=None)
+    outcome = _run_sync(tmp_path, monkeypatch, _SyncClient(user_id=None), claim=True)
+    assert outcome.answers is not None and "did not say which account" in outcome.answers.message
+
+
+def test_the_answers_half_reports_the_servers_refusal_of_this_build(tmp_path: Path, monkeypatch):
+    _graded(tmp_path)
+    client = _SyncClient(answers=[LiveApiError("http 426", status=426, payload=_TOO_OLD_BODY)])
+    outcome = _run_sync(tmp_path, monkeypatch, client)
+    assert outcome.answers is not None and outcome.answers.status == "refused"
+    assert outcome.answers.message.startswith("Install the pinned tp build")
+
+
+def test_a_rejected_token_on_the_answers_half_refuses(tmp_path: Path, monkeypatch):
+    _graded(tmp_path)
+    outcome = _run_sync(tmp_path, monkeypatch, _SyncClient(answers=[LiveApiError("http 401", status=401)]))
+    assert outcome.answers is not None and outcome.answers.status == "refused"
+    assert "no other credential was tried" in outcome.answers.message
+
+
+def test_being_offline_leaves_the_answers_and_is_not_an_error(tmp_path: Path, monkeypatch):
+    _graded(tmp_path)
+    outcome = _run_sync(tmp_path, monkeypatch, _SyncClient(whoami_error=LiveApiError("unreachable")))
+    assert outcome.answers is not None
+    assert (outcome.answers.status, outcome.answers.remaining, outcome.refused) == ("offline", 2, False)
+    assert "back online" in outcome.answers.message
+
+
+def test_a_receipt_that_confirms_only_some_answers_is_partial(tmp_path: Path, monkeypatch):
+    _graded(tmp_path)
+    receipt = {"results": [{"case_id": "c1", "status": "accepted"}]}
+    outcome = _run_sync(tmp_path, monkeypatch, _SyncClient(answers=[receipt]))
+    assert outcome.answers is not None
+    assert (outcome.answers.status, outcome.answers.delivered, outcome.answers.remaining) == ("partial", 1, 1)
+    assert "run tp sync again later" in outcome.answers.message
+
+
+def test_a_site_that_confirms_nothing_stalls_the_answers(tmp_path: Path, monkeypatch):
+    _graded(tmp_path)
+    outcome = _run_sync(tmp_path, monkeypatch, _SyncClient(answers=[{}]))
+    assert outcome.answers is not None and outcome.answers.status == "stalled"
+    assert "confirmed none of this run's 2 queued answer(s)" in outcome.answers.message
+
+
+def test_what_the_site_would_not_take_is_named_in_the_sync_line(tmp_path: Path, monkeypatch):
+    _graded(tmp_path)
+    receipt = {
+        "results": [
+            {"case_id": "c1", "status": "accepted"},
+            {"case_id": "c2", "status": "rejected", "reason": "ARTIFACT_TOO_LARGE"},
+        ]
+    }
+    outcome = _run_sync(tmp_path, monkeypatch, _SyncClient(answers=[receipt]))
+    assert outcome.answers is not None and outcome.answers.status == "delivered"
+    assert "1 rejected (c2: ARTIFACT_TOO_LARGE) — the site's run stays unfinished" in outcome.answers.message
+
+
+def test_a_failure_after_some_answers_landed_is_partial():
+    from trap.live.answers import ResendOutcome
+    from trap.live.sync import _answers_failure
+
+    graded = GradedRun(
+        run_id="rs_9", client_run_id="r-1-site", server="https://srv", url="u", revision_id="ev_1"
+    )
+    outcome = ResendOutcome(delivered=1, remaining=1)
+    report = _answers_failure(LiveApiError("http 503", status=503), graded, outcome)
+    assert (report.status, report.delivered, report.remaining) == ("partial", 1, 1)
+    assert "submitted 1 queued answer(s), then the site refused the answers (http 503)" in report.message
+
+
+def test_a_credential_the_progress_half_refused_is_not_tried_for_the_answers(tmp_path: Path, monkeypatch):
+    _queued(tmp_path, user_id="usr_a")
+    _graded(tmp_path, user_id="usr_a")
+    client = _SyncClient(user_id="usr_b")
+    outcome = _run_sync(tmp_path, monkeypatch, client)
+    assert outcome.status == "refused" and outcome.answers is None
+    assert outcome.refusal == outcome.message and client.answer_batches == []
+
+
+def test_a_graded_only_run_cannot_move_servers_either(tmp_path: Path, monkeypatch):
+    _graded(tmp_path)
+    outcome = _run_sync(tmp_path, monkeypatch, server_override="https://elsewhere")
+    assert outcome.status == "refused" and "created against https://srv" in outcome.message
+
+
+def test_a_graded_only_run_needs_a_credential_for_its_server(tmp_path: Path, monkeypatch):
+    _graded(tmp_path)
+    outcome = _run_sync(tmp_path, monkeypatch, key=None)
+    assert outcome.status == "refused" and "tp auth login --server https://srv" in outcome.message
+
+
+def test_tp_sync_prints_both_halves_and_exits_two_when_the_answers_refuse(make_project, runner, monkeypatch):
+    from trap.cli import app
+
+    run_dir = _a_finished_run(make_project, runner, monkeypatch)
+    _queued(run_dir)
+    _graded(run_dir)
+    monkeypatch.setattr("trap.live.sync.CredentialStore", lambda: _StoreStub(key="k"))
+    monkeypatch.setattr("trap.live.sync.LiveClient", lambda *_a, **_k: _SyncClient())
+    result = runner.invoke(app, ["sync"])
+    assert result.exit_code == 0, result.output
+    assert "delivered 2 queued event(s)" in result.output and "submitted 2 queued answer(s)" in result.output
+
+    _graded(run_dir, queued=("c3",))
+    refusing = _SyncClient(answers=[LiveApiError("http 401", status=401)])
+    monkeypatch.setattr("trap.live.sync.LiveClient", lambda *_a, **_k: refusing)
+    result = runner.invoke(app, ["sync"])
+    assert result.exit_code == 2
+    assert "rejected the CLI token" in result.output
+
+
+# -- verifying an identity, for either sidecar --------------------------------
+
+
+class _Who:
+    def __init__(self, user_id: str | None) -> None:
+        self._user_id = user_id
+
+    def whoami(self) -> str | None:
+        return self._user_id
+
+
+@pytest.mark.parametrize(
+    ("frozen", "claim", "answer", "expected"),
+    [
+        ("usr_a", False, "usr_a", (None, "usr_a")),
+        ("usr_a", True, "usr_a", (None, "usr_a")),
+        ("usr_a", False, "usr_b", ("other_account", None)),
+        ("usr_a", False, None, ("other_account", None)),
+        (None, False, "usr_a", ("unowned", None)),
+        (None, True, "usr_a", (None, "usr_a")),
+        (None, True, None, ("unidentified", None)),
+    ],
+)
+def test_who_may_deliver_a_frozen_queue(frozen, claim, answer, expected):
+    from trap.live.delivery import verify_identity
+
+    assert verify_identity(_Who(answer), frozen_user_id=frozen, claim=claim) == expected  # type: ignore[arg-type]
 
 
 # -- the shared delivery flow ------------------------------------------------
