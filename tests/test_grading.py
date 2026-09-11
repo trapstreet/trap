@@ -963,6 +963,10 @@ def test_tp_run_grades_on_site_and_records_where(make_project, runner, monkeypat
     grader = _FakeGrader(summary_line="site grading: 2 of 2 answer(s) submitted")
     _use_fake_grader(monkeypatch, grader)
     _use_fake_tracker(monkeypatch, _FakeTracker())
+    # The description carries tp's version, and a CI build's is derived from the commit
+    # hash -- which can itself contain "c1" (0.0.0.dev1+gecc179ea4 did). Pinned, so the
+    # leak check below sees only what the run put there.
+    monkeypatch.setattr("trap.cli.__version__", "1.2.3")
     project = make_project(cmd="sh -c 'cat'", stdin="input.txt", cases=["c1", "c2"])
     result = runner.invoke(app, ["run", "--no-environment"])
     assert result.exit_code == 0, result.output
