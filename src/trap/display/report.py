@@ -82,6 +82,10 @@ class RichRenderer(BaseRenderer):
     def _build_table(self, data: ReportData) -> Table:
         metrics_keys = self._get_metrics_keys(data)
         has_cost = any(c.cost is not None for c in data.cases_results)
+        # cache columns only once some case cached, so an uncached run's table is unchanged
+        has_cache = any(
+            c.cost and (c.cost.cache_read_tokens or c.cost.cache_write_tokens) for c in data.cases_results
+        )
         table = Table(box=box.ROUNDED, show_header=True, header_style="bold", expand=True)
         table.add_column("case")
         table.add_column("exit", justify="right")
@@ -90,6 +94,9 @@ class RichRenderer(BaseRenderer):
             table.add_column(f"# {escape(key)}", justify="right", header_style="bold cyan")
         if has_cost:
             table.add_column("prompt_tok", justify="right", style="dim")
+            if has_cache:
+                table.add_column("cache_rd", justify="right", style="dim")
+                table.add_column("cache_wr", justify="right", style="dim")
             table.add_column("compl_tok", justify="right", style="dim")
             table.add_column("cost", justify="right")
         for result in data.cases_results:
@@ -100,10 +107,13 @@ class RichRenderer(BaseRenderer):
             if has_cost:
                 if result.cost:
                     row.append(str(result.cost.prompt_tokens))
+                    if has_cache:
+                        row.append(str(result.cost.cache_read_tokens))
+                        row.append(str(result.cost.cache_write_tokens))
                     row.append(str(result.cost.completion_tokens))
                     row.append(self._render_cost(result.cost.cost_usd))
                 else:
-                    row.extend(["[dim]—[/dim]", "[dim]—[/dim]", "[dim]—[/dim]"])
+                    row.extend(["[dim]—[/dim]"] * (5 if has_cache else 3))
             table.add_row(*row)
         return table
 

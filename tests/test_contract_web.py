@@ -409,6 +409,32 @@ def test_the_group_statuses_tp_declares_are_ones_the_web_knows(context_ts: str):
     assert statuses <= _string_list(context_ts, "COVERAGE_STATUS")
 
 
+def _usage_entry_fields(context_ts: str) -> tuple[set[str], set[str]]:
+    """The web's ``usageEntry`` spec: (every field it keeps, the server-owned ones)."""
+    start = context_ts.index("const usageEntry")
+    block = context_ts[start : context_ts.index("\n};", start)]
+    fields = block[block.index("fields: {") + len("fields: {") : block.index("required:")]
+    server = re.search(r"server:\s*\[([^\]]*)\]", block)
+    assert server, "usageEntry's server-owned fields not found in the web source"
+    return set(re.findall(r"^\s*(\w+):", fields, re.M)), set(re.findall(r'"(\w+)"', server.group(1)))
+
+
+def test_every_usage_count_tp_reports_is_one_the_web_keeps(context_ts: str):
+    """A usage key outside the spec is dropped as ``ignored`` -- silently, from tp's side.
+    The cache counts ride the web's own names (``cache_read`` / ``cache_creation``)."""
+    kept, server_owned = _usage_entry_fields(context_ts)
+    emitted = {
+        key
+        for patch in _every_description()
+        if isinstance(patch.get("usage"), dict)
+        for entry in patch["usage"].get("by_model", [])
+        for key in entry
+    }
+    assert {"input", "output", "cache_read", "cache_creation"} <= emitted
+    assert emitted <= kept
+    assert not emitted & server_owned
+
+
 def test_the_context_route_exists_where_the_cli_posts_to_it(web_src: Path, context_ts: str):
     assert (web_src / "app/api/v2/runs/[id]/context/route.ts").is_file()
     # And the open call takes the opening description in the same body.

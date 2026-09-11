@@ -17,6 +17,11 @@ dependency, tokencost, lagged behind provider releases and silently priced curre
 models at 0 or a stale predecessor's rate): a price update is a data change on the
 server, and :meth:`PriceTable.cost_of` reports an unknown model as ``None``, never
 as a wrong number.
+
+Cache rates follow the same rule. A row may carry its own ``cache_read_per_mtok`` /
+``cache_write_per_mtok``; a row without them falls back to the vendor's documented
+multipliers of its input rate (:data:`CACHE_MULTIPLIERS`), and cached tokens that
+neither can price make the call's cost unknown rather than guessed.
 """
 
 from __future__ import annotations
@@ -26,25 +31,136 @@ import os
 import time
 from importlib.resources import files
 from pathlib import Path
-from typing import Literal
+from typing import Literal, NamedTuple
 
 import httpx
 from pydantic import BaseModel, ValidationError, field_validator
 
+from trap.models.cost import CallUsage
+
+
+class CacheMultipliers(NamedTuple):
+    """A vendor's cache prices as multiples of the model's own input rate."""
+
+    read: float
+    write: float  # a standard cache write (Anthropic: the 5-minute TTL)
+    write_1h: float  # a 1-hour cache write; only Anthropic reports these, elsewhere == write
+
+
+def _reads_at(read: float, write: float = 1.0) -> CacheMultipliers:
+    """A vendor with no 1-hour TTL (every one but Anthropic); ``write=1.0`` = no write fee."""
+    return CacheMultipliers(read=read, write=write, write_1h=write)
+
+
+_ANTHROPIC = CacheMultipliers(read=0.1, write=1.25, write_1h=2.0)
+_ANTHROPIC_5_1 = CacheMultipliers(read=0.025, write=1.25, write_1h=2.0)
+
+# Documented cache prices, per model family, for rows the server serves without cache
+# rates. First prefix wins (so a more specific family precedes the one it extends). A
+# family absent here has no known cache price: cached tokens on it make the cost unknown.
+# Kept to vendors whose rates are documented and uniform per family — the fix for the rest
+# is the server serving the cache columns, not a longer table here.
+CACHE_MULTIPLIERS: tuple[tuple[str, CacheMultipliers], ...] = (
+    # https://platform.claude.com/docs/en/about-claude/pricing — "5m cache writes: 1.25x base
+    # input price · 1h cache writes: 2x · Cache hits & refreshes: 0.1x (0.025x on Claude Fable
+    # 5.1 and Claude Mythos 5.1)". Dotted spellings are OpenRouter's ids for the same models.
+    ("claude-fable-5-1", _ANTHROPIC_5_1),
+    ("claude-fable-5.1", _ANTHROPIC_5_1),
+    ("claude-mythos-5-1", _ANTHROPIC_5_1),
+    ("claude-mythos-5.1", _ANTHROPIC_5_1),
+    ("claude-", _ANTHROPIC),
+    # https://developers.openai.com/api/docs/pricing (cached ÷ input rate) and the prompt-caching
+    # guide: "For GPT-5.6 and later, cache writes cost 1.25x the standard, uncached input-token
+    # rate... subsequent reads cost only 0.1x"; every earlier model has "No additional
+    # cache-write charge". The -pro models have no cached price at all ("GPT-5.5 Pro does not
+    # offer a cached input discount"), so a cached token there is plain input. gpt-realtime is
+    # left out: it prices cached audio (0.0125x) and text (0.1x) apart.
+    ("gpt-6", _reads_at(0.1, write=1.25)),
+    ("gpt-5.6", _reads_at(0.1, write=1.25)),
+    ("gpt-5-pro", _reads_at(1.0)),
+    ("gpt-5.2-pro", _reads_at(1.0)),
+    ("gpt-5.4-pro", _reads_at(1.0)),
+    ("gpt-5.5-pro", _reads_at(1.0)),
+    ("gpt-5", _reads_at(0.1)),
+    ("gpt-4.1", _reads_at(0.25)),
+    ("gpt-4o", _reads_at(0.5)),
+    ("o1-pro", _reads_at(1.0)),
+    ("o3-pro", _reads_at(1.0)),
+    ("o1", _reads_at(0.5)),
+    ("o3-mini", _reads_at(0.5)),
+    ("o3", _reads_at(0.25)),
+    ("o4-mini", _reads_at(0.25)),
+    # https://api-docs.deepseek.com/quick_start/pricing (effective 2026-09-10), USD/Mtok input
+    # cache hit vs miss: deepseek-flash 0.006 vs 0.30, deepseek-v4-pro 0.044 vs 1.32 (off-peak
+    # halves both, keeping the ratio); deepseek-v4-flash is "billed at the Flash price". A miss
+    # is plain input — DeepSeek charges no cache write.
+    ("deepseek-v4-pro", _reads_at(0.044 / 1.32)),
+    ("deepseek-v4-flash", _reads_at(0.006 / 0.30)),
+    ("deepseek-flash", _reads_at(0.006 / 0.30)),
+    # https://platform.kimi.ai/docs/pricing/chat, USD/Mtok cache hit vs miss: kimi-k3 0.30 vs
+    # 3.00, kimi-k2.7-code 0.19 vs 0.95 (-highspeed 0.38 vs 1.90), kimi-k2.6 0.16 vs 0.95; no
+    # cache write or storage fee.
+    ("kimi-k3", _reads_at(0.1)),
+    ("kimi-k2.7-code", _reads_at(0.2)),
+    ("kimi-k2.6", _reads_at(0.16 / 0.95)),
+)
+
+# A routed id ("vendor/model", OpenRouter's shape; "~vendor/…-latest" for its aliases) takes
+# its vendor's multipliers only when the vendor serves its own models, at its own rates.
+# An open-weight model is resold by many hosts at their own cache prices (OpenRouter's
+# deepseek/deepseek-v3.2 reads at 0.5x, not DeepSeek's native ratio), so e.g. a routed
+# deepseek/… id is not priced at DeepSeek's.
+_FIRST_PARTY_ROUTES = frozenset({"anthropic", "openai"})
+
+
+def _cache_multipliers(model: str) -> CacheMultipliers | None:
+    """The documented multipliers for ``model``'s family (lowercased id), or None."""
+    vendor, _, family = model.removeprefix("~").rpartition("/")
+    if vendor and vendor not in _FIRST_PARTY_ROUTES:
+        return None
+    return next((multipliers for prefix, multipliers in CACHE_MULTIPLIERS if family.startswith(prefix)), None)
+
+
+class CallCost(NamedTuple):
+    """What one call cost, in USD. ``cache_usd`` is the part of ``usd`` spent on cache
+    reads and writes — included in ``usd``, not on top of it."""
+
+    usd: float
+    cache_usd: float
+
 
 class PriceRow(BaseModel):
     """One priced model-id prefix. Extra fields on the wire (``provider``, ``note``, …)
-    are ignored — only the prefix and its two rates are used."""
+    are ignored — only the prefix and its rates are used. The two cache rates are
+    optional: a table served before the server priced cache (and any older client,
+    which ignores them) prices without them."""
 
     model_prefix: str
     input_per_mtok: float
     output_per_mtok: float
+    cache_read_per_mtok: float | None = None
+    cache_write_per_mtok: float | None = None  # a standard (Anthropic: 5-minute) cache write
 
     @field_validator("model_prefix")
     @classmethod
     def _normalise(cls, value: str) -> str:
         # matched against a lowercased model id, so store the prefix lowercased
         return value.lower()
+
+    def cache_rates(
+        self, fallback: CacheMultipliers | None
+    ) -> tuple[float | None, float | None, float | None]:
+        """(read, write, 1-hour write) in USD per Mtok: the row's own rate where it has one,
+        else the vendor multiplier of its input rate, else None (unknown)."""
+        base = self.input_per_mtok
+        read, write = self.cache_read_per_mtok, self.cache_write_per_mtok
+        if fallback is None:
+            return read, write, None
+        return (
+            read if read is not None else fallback.read * base,
+            write if write is not None else fallback.write * base,
+            fallback.write_1h * base,
+        )
 
 
 class PriceTable(BaseModel):
@@ -74,19 +190,32 @@ class PriceTable(BaseModel):
     def is_fresh(self, ttl_seconds: float) -> bool:
         return time.time() - self.fetched_at < ttl_seconds
 
-    def cost_of(self, prompt_tokens: int, completion_tokens: int, model: str | None) -> float | None:
-        """The USD cost of one API call against this table, or ``None`` when the model is
-        unknown or absent — an unknown cost is not a zero cost, and is reported as JSON null
-        rather than a misleading number. First matching prefix wins (order is load-bearing;
-        see :meth:`PriceCatalogue._default`)."""
-        if model is None:
+    def cost_of(self, usage: CallUsage) -> CallCost | None:
+        """What one API call cost against this table, or ``None`` when that is unknown —
+        the model is absent or unpriced, or it has cached tokens at a rate neither its row
+        nor its vendor's documented multipliers give. An unknown cost is not a zero cost,
+        and is reported as JSON null rather than a misleading number. First matching prefix
+        wins (order is load-bearing; see :meth:`PriceCatalogue._default`)."""
+        if usage.model is None:
             return None
-        name = model.lower()
-        for row in self.prices:
-            if name.startswith(row.model_prefix):
-                per_mtok = prompt_tokens * row.input_per_mtok + completion_tokens * row.output_per_mtok
-                return per_mtok / 1_000_000
-        return None
+        name = usage.model.lower()
+        row = next((row for row in self.prices if name.startswith(row.model_prefix)), None)
+        if row is None:
+            return None
+        read, write, write_1h = row.cache_rates(_cache_multipliers(name))
+        cache = 0.0
+        for tokens, rate in (
+            (usage.cache_read_tokens, read),
+            (usage.cache_write_tokens - usage.cache_write_1h_tokens, write),
+            (usage.cache_write_1h_tokens, write_1h),
+        ):
+            if not tokens:
+                continue
+            if rate is None:
+                return None
+            cache += tokens * rate
+        plain = usage.prompt_tokens * row.input_per_mtok + usage.completion_tokens * row.output_per_mtok
+        return CallCost(usd=(plain + cache) / 1_000_000, cache_usd=cache / 1_000_000)
 
 
 class PriceCatalogue:
@@ -160,7 +289,8 @@ class PriceCatalogue:
         try:
             path = cls._cache_path()
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(table.model_dump_json(indent=2))
+            # exclude_none: a cache rate the server did not give is left out, not written as null
+            path.write_text(table.model_dump_json(indent=2, exclude_none=True))
         except OSError:
             pass
 

@@ -291,12 +291,44 @@ def test_usage_is_folded_per_provider_and_model_over_the_run():
         "source": "tp-cost-proxy",
         "input": 110,
         "output": 22,
+        "cache_read": 0,
+        "cache_creation": 0,
         "calls": 3,
         "cost_usd_reported": pytest.approx(0.011),
     }
     assert claude["cost_usd_reported"] == pytest.approx(0.002) and claude["calls"] == 1
     # The bucket whose response named no model still spent the tokens.
     assert (unknown["input"], unknown["output"]) == (7, 3)
+
+
+def test_cache_tokens_are_described_in_the_sites_own_split():
+    # The site's usage entry is Anthropic's split -- `input` excludes the cache, which has its
+    # own `cache_read` / `cache_creation` -- the same four disjoint counts the proxy records.
+    def cached(prompt: int, read: int, write: int, usd: float) -> ModelCost:
+        return ModelCost(
+            provider="anthropic",
+            model="claude-opus-5",
+            prompt_tokens=prompt,
+            completion_tokens=10,
+            cache_read_tokens=read,
+            cache_write_tokens=write,
+            cost_usd=usd,
+            cache_cost_usd=usd / 2,
+            calls=1,
+        )
+
+    cases = [
+        CaseResult(case_id="a", metrics=None, cost=CaseCost(by_model=[cached(5, 900, 100, 0.2)])),
+        CaseResult(case_id="b", metrics=None, cost=CaseCost(by_model=[cached(3, 1000, 0, 0.1)])),
+    ]
+    (entry,) = _opening(cases=cases)["usage"]["by_model"]
+    assert (entry["input"], entry["cache_read"], entry["cache_creation"], entry["output"]) == (
+        8,
+        1900,
+        100,
+        20,
+    )
+    assert entry["cost_usd_reported"] == pytest.approx(0.3)  # the whole spend, cache included
 
 
 def test_an_unpriced_call_leaves_the_buckets_cost_unsaid():

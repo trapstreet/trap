@@ -10,7 +10,7 @@ import httpx
 
 from trap.cost.pricing import PriceCatalogue
 from trap.cost.providers import active_provider_configs
-from trap.models.cost import CaseCost, ModelCost, combine_costs
+from trap.models.cost import CallUsage, CaseCost, ModelCost, combine_costs
 
 if TYPE_CHECKING:
     from trap.cost.providers import _ProviderConfig
@@ -44,8 +44,9 @@ class CostProxy:
     def env_overrides(self) -> dict[str, str]:
         """Env vars pointing each provider SDK at its proxy port."""
         return {
-            server.base_env: f"http://127.0.0.1:{server.server_address[1]}"
+            base_env: f"http://127.0.0.1:{server.server_address[1]}"
             for server in self._servers.values()
+            for base_env in server.base_envs
         }
 
     def start(self) -> None:
@@ -61,31 +62,25 @@ class CostProxy:
             self._servers.clear()
             return CaseCost(by_model=list(self._cost_buckets.values()))
 
-    def _accumulate(
-        self, provider: str, prompt_tokens: int, completion_tokens: int, model: str | None
-    ) -> None:
-        if not (prompt_tokens or completion_tokens):
+    def _accumulate(self, provider: str, usage: CallUsage) -> None:
+        if usage.is_empty:
             return
-        call_cost = self._price_table.cost_of(prompt_tokens, completion_tokens, model)
+        priced = self._price_table.cost_of(usage)
+        cost_usd, cache_cost_usd = (priced.usd, priced.cache_usd) if priced is not None else (None, None)
         with self._lock:
-            key = (provider, model)
-            entry = self._cost_buckets.get(key)
-            if entry is None:
-                self._cost_buckets[key] = ModelCost(
-                    provider=provider,
-                    model=model,
-                    prompt_tokens=prompt_tokens,
-                    completion_tokens=completion_tokens,
-                    cost_usd=call_cost,
-                    calls=1,
-                )
-            else:
-                entry.prompt_tokens += prompt_tokens
-                entry.completion_tokens += completion_tokens
-                # unknown is contagious: once a bucket sees an unpriced call its
-                # total is unknown, not a partial sum that understates real spend.
-                entry.cost_usd = combine_costs(entry.cost_usd, call_cost)
-                entry.calls += 1
+            key = (provider, usage.model)
+            entry = self._cost_buckets.setdefault(
+                key, ModelCost(provider=provider, model=usage.model, cost_usd=0.0, cache_cost_usd=0.0)
+            )
+            entry.prompt_tokens += usage.prompt_tokens
+            entry.completion_tokens += usage.completion_tokens
+            entry.cache_read_tokens += usage.cache_read_tokens
+            entry.cache_write_tokens += usage.cache_write_tokens
+            # unknown is contagious: once a bucket sees an unpriced call its
+            # total is unknown, not a partial sum that understates real spend.
+            entry.cost_usd = combine_costs(entry.cost_usd, cost_usd)
+            entry.cache_cost_usd = combine_costs(entry.cache_cost_usd, cache_cost_usd)
+            entry.calls += 1
 
 
 class _ProxyServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
@@ -95,10 +90,10 @@ class _ProxyServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
     def __init__(self, proxy: CostProxy, provider: str, cfg: _ProviderConfig) -> None:
         self.proxy = proxy
-        self.provider = provider
-        self.base_env = cfg.base_env
+        self.provider = cfg.label or provider
+        self.base_envs = cfg.base_envs
         self.style = cfg.style
-        # Capture upstream before env_overrides() redirects base_env to the proxy itself.
+        # Capture upstream before env_overrides() redirects base_envs to the proxy itself.
         self.upstream = cfg.resolve_upstream()
         super().__init__(("127.0.0.1", 0), _ProxyHandler)
 
@@ -147,8 +142,7 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
         body = self._read_body()
         status_code, content_type, chunks = self._relay_to_upstream(self.server.upstream, body)
         if 0 < status_code < 400:
-            prompt_tokens, completion_tokens, model = self.server.style.parse(content_type, b"".join(chunks))
-            proxy._accumulate(self.server.provider, prompt_tokens, completion_tokens, model)
+            proxy._accumulate(self.server.provider, self.server.style.parse(content_type, b"".join(chunks)))
 
     def _read_body(self) -> bytes:
         n = int(self.headers.get("Content-Length", 0))

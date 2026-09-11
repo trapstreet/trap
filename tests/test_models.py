@@ -53,6 +53,76 @@ def test_casecost_aggregates_and_empty():
     assert empty.prompt_tokens == 0 and empty.cost_usd == 0.0
 
 
+def test_casecost_folds_cache_fields_like_prompt_tokens():
+    c = CaseCost(
+        by_model=[
+            ModelCost(
+                provider="anthropic",
+                model="claude-opus-5",
+                prompt_tokens=10,
+                cache_read_tokens=900,
+                cache_write_tokens=100,
+                completion_tokens=5,
+                cost_usd=0.5,
+                cache_cost_usd=0.2,
+                calls=2,
+            ),
+            ModelCost(
+                provider="openai",
+                model="gpt-5.5",
+                prompt_tokens=20,
+                cache_read_tokens=80,
+                cost_usd=0.1,
+                cache_cost_usd=0.01,
+                calls=1,
+            ),
+        ]
+    )
+    assert (c.cache_read_tokens, c.cache_write_tokens) == (980, 100)
+    assert c.cache_cost_usd == pytest.approx(0.21)
+    # the case's cache spend is part of its total, never added on top
+    assert c.cost_usd == pytest.approx(0.6)
+    empty = CaseCost()
+    assert (empty.cache_read_tokens, empty.cache_write_tokens, empty.cache_cost_usd) == (0, 0, 0.0)
+
+
+def test_casecost_cache_cost_unknown_is_contagious():
+    # one unpriced bucket makes the case's cache spend unknown, exactly like cost_usd
+    c = CaseCost(
+        by_model=[
+            ModelCost(provider="openai", model="gpt-5.5", cost_usd=0.1, cache_cost_usd=0.01),
+            ModelCost(provider="openai", model="unpriced-xyz", cache_read_tokens=5),
+        ]
+    )
+    assert c.cost_usd is None and c.cache_cost_usd is None
+
+
+def test_report_without_cache_fields_still_loads():
+    # a report.json written before cache accounting parses; the absent cache spend
+    # reads as unknown (it was never measured), the absent token counts as 0
+    legacy = {
+        "by_model": [
+            {
+                "provider": "openai",
+                "model": "gpt",
+                "prompt_tokens": 3,
+                "completion_tokens": 2,
+                "cost_usd": 0.1,
+            }
+        ],
+        "prompt_tokens": 3,
+        "completion_tokens": 2,
+        "cost_usd": 0.1,
+        "calls": 0,
+    }
+    c = CaseCost.model_validate(legacy)
+    assert (c.cache_read_tokens, c.cache_write_tokens) == (0, 0)
+    assert c.cost_usd == pytest.approx(0.1) and c.cache_cost_usd is None
+    dumped = c.model_dump()
+    assert {"cache_read_tokens", "cache_write_tokens", "cache_cost_usd"} <= set(dumped)
+    assert {"cache_read_tokens", "cache_write_tokens", "cache_cost_usd"} <= set(dumped["by_model"][0])
+
+
 def test_judge_grader_role_defaults():
     assert JudgeConfig(cmd="x").timeout == 300
     assert GraderConfig(cmd="x").timeout == 120
