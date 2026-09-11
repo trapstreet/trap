@@ -247,9 +247,12 @@ def test_accumulate_ignores_a_call_that_reported_no_tokens():
     proxy = CostProxy()
     proxy._accumulate("openai", CallUsage(model="gpt-5.5"))
     assert proxy._cost_buckets == {}
-    # a cache-only call is still a call: all of its input came from the cache
+    # a cache-only call is still a call: all of its input came from the cache ...
     proxy._accumulate("anthropic", CallUsage(model="claude-opus-5", cache_read_tokens=10))
     assert proxy._cost_buckets[("anthropic", "claude-opus-5")].calls == 1
+    # ... or went into it (a billed write, 1.25x on Anthropic)
+    proxy._accumulate("anthropic", CallUsage(model="claude-sonnet-5", cache_write_tokens=10))
+    assert proxy._cost_buckets[("anthropic", "claude-sonnet-5")].cache_write_tokens == 10
 
 
 # -- end to end through a fake upstream --------------------------------------------
