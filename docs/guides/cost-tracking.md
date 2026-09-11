@@ -111,10 +111,17 @@ server — no CLI release. `TRAPSTREET_URL` redirects the fetch (e.g. at UAT),
 
 ### Cache rates
 
-A row may carry `cache_read_per_mtok` and `cache_write_per_mtok` (a standard write —
-Anthropic's 5-minute TTL); both are optional, and a client that predates them ignores
-them. A row without them falls back to the vendor's documented multiples of its input
-rate (`CACHE_MULTIPLIERS` in `pricing.py`, each with its source):
+Cache prices are served like every other price. A row may carry `cache_read_per_mtok`,
+`cache_write_per_mtok` (a standard write — Anthropic's 5-minute TTL) and
+`cache_write_1h_per_mtok` (Anthropic's 1-hour write). All three are optional, and a client
+that predates them ignores them. The CLI parses and computes; it holds no prices of its own.
+
+**Interim fallback.** Until the site serves those columns, a rate a row lacks is filled from
+the vendor's documented multiple of the row's input rate. The table lives in
+`src/trap/cost/interim_cache_rates.py`, each entry with its source, and is deleted once the
+site serves the rates. It fills per rate — a rate the row serves always wins — and only for
+native model ids: a routed id (`vendor/model`, e.g. on OpenRouter) is priced from served
+rates or not at all.
 
 | Model family | Cache read | Cache write |
 |---|---|---|
@@ -127,20 +134,15 @@ rate (`CACHE_MULTIPLIERS` in `pricing.py`, each with its source):
 | DeepSeek (`deepseek-flash`, `-v4-flash`, `-v4-pro`) | 0.02x, 0.02x, 1/30x | no write fee |
 | Kimi (`kimi-k3`, `-k2.7-code`, `-k2.6`) | 0.1x, 0.2x, 0.168x | no write fee |
 
-An OpenRouter id (`anthropic/claude-…`, `openai/gpt-…`) takes its maker's multiples only
-for first-party routes — Anthropic and OpenAI serve their own models at their own rates.
-An open-weight model on OpenRouter is resold by many hosts at their own cache prices, so
-a routed `deepseek/…` or `moonshotai/…` id gets no fallback.
-
 **Unknown is never priced as zero, or as full input.** `cost_usd` is `null` when the model
 is absent from the table (or a local server like Ollama/vLLM), and also when a call used
-the cache on a model with no cache rate — no column, no documented multiple. Either would
+the cache on a model with no cache rate — none served, and no interim multiple. Either would
 be a wrong number, and a wrong number is worse than a missing one; the token counts are
 recorded either way.
 
 Not modelled: DeepSeek's off-peak discount (it halves both rates, so the ratio holds; the
 row's base rate decides), long-context and batch/flex/priority tiers, and the TTL of cache
-writes OpenRouter reports (one total, priced as 5-minute).
+writes OpenRouter reports (one total, priced at the standard write rate).
 
 ## Proxy internals
 

@@ -332,11 +332,11 @@ def test_proxy_meters_the_deepseek_harness_web_search(monkeypatch):
 
 def test_proxy_meters_openrouter_through_litellms_base_var(monkeypatch, tmp_path):
     # a litellm-based solution (Aider) is redirected via OPENROUTER_API_BASE; OpenRouter's
-    # stream opens with keep-alive comments, and its usage chunk still carries a choice
-    _serve_table(
-        tmp_path,
-        {"model_prefix": "anthropic/claude-sonnet-4.6", "input_per_mtok": 3.0, "output_per_mtok": 15.0},
-    )
+    # stream opens with keep-alive comments, and its usage chunk still carries a choice. A
+    # routed id's cache is priced from the served table (OpenRouter's own catalogue rates for
+    # this model: $0.30 read, $3.75 write), never from a CLI fallback.
+    row = {"model_prefix": "anthropic/claude-sonnet-4.6", "input_per_mtok": 3.0, "output_per_mtok": 15.0}
+    _serve_table(tmp_path, row | {"cache_read_per_mtok": 0.30, "cache_write_per_mtok": 3.75})
     monkeypatch.delenv("OPENROUTER_BASE_URL", raising=False)
     usage = {"prompt_tokens": 1_010_000, "completion_tokens": 1000, "total_tokens": 1_011_000, "cost": 1.0}
     usage |= {"prompt_tokens_details": {"cached_tokens": 800_000, "cache_write_tokens": 200_000}}
@@ -359,7 +359,6 @@ def test_proxy_meters_openrouter_through_litellms_base_var(monkeypatch, tmp_path
         800_000,
         200_000,
     )
-    # a first-party route: Anthropic's 0.1x read ($0.30) and 1.25x write ($3.75) of the $3 input rate
     assert entry.cache_cost_usd == pytest.approx(0.8 * 0.30 + 0.2 * 3.75)
     assert cost.cache_cost_usd == entry.cache_cost_usd and cost.cache_read_tokens == 800_000
 

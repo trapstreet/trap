@@ -176,15 +176,17 @@ def test_cache_rate_columns_are_optional_on_the_wire(monkeypatch):
         "prices": [
             {"model_prefix": "a", "input_per_mtok": 1, "output_per_mtok": 2, "cache_read_per_mtok": 0.1},
             {"model_prefix": "b", "input_per_mtok": 1, "output_per_mtok": 2, "cache_write_per_mtok": 1.5},
-            {"model_prefix": "c", "input_per_mtok": 1, "output_per_mtok": 2},
+            {"model_prefix": "c", "input_per_mtok": 1, "output_per_mtok": 2, "cache_write_1h_per_mtok": 2.0},
+            {"model_prefix": "d", "input_per_mtok": 1, "output_per_mtok": 2},
         ],
     }
     _mock_fetch(monkeypatch, payload=payload)
     rows = PriceCatalogue.resolve().prices
-    assert [(r.cache_read_per_mtok, r.cache_write_per_mtok) for r in rows] == [
-        (0.1, None),
-        (None, 1.5),
-        (None, None),
+    assert [(r.cache_read_per_mtok, r.cache_write_per_mtok, r.cache_write_1h_per_mtok) for r in rows] == [
+        (0.1, None, None),
+        (None, 1.5, None),
+        (None, None, 2.0),
+        (None, None, None),
     ]
 
 
@@ -237,117 +239,41 @@ def test_cost_of_cache_tokens_at_an_unknown_rate_is_unknown(counts):
     assert table.cost_of(_usage("mystery-model", prompt=M, **counts)) is None
 
 
-def test_anthropic_rows_without_cache_rates_use_the_documented_multipliers():
-    # https://platform.claude.com/docs/en/about-claude/pricing — cache hits 0.1x base input,
-    # 5-minute writes 1.25x, 1-hour writes 2x. Opus 5 at $5 in: $0.50 / $6.25 / $10.
-    table = _table({"model_prefix": "claude-opus-5", "input_per_mtok": 5.0, "output_per_mtok": 25.0})
-    usage = _usage("claude-opus-5", prompt=M, completion=M, read=M, write=M, write_1h=M // 4)
-    cost = table.cost_of(usage)
-    assert cost is not None
-    assert cost.cache_usd == pytest.approx(0.50 + 0.75 * 6.25 + 0.25 * 10.0)
-    assert cost.usd == pytest.approx(5.0 + 25.0 + cost.cache_usd)
-
-
-def test_fable_and_mythos_5_1_read_the_cache_at_a_quarter_of_the_usual_rate():
-    # same page: "Cache hits and refreshes on Claude Fable 5.1 and Claude Mythos 5.1 are priced
-    # at 0.025x the base input price" ($10 in → $0.25); writes keep 1.25x / 2x
+def test_a_served_1h_write_rate_prices_the_1h_slice_of_the_writes():
+    # Anthropic prices a 1-hour cache write apart from a 5-minute one, and so can the table
     table = _table(
-        {"model_prefix": "claude-fable-5", "input_per_mtok": 10.0, "output_per_mtok": 50.0},
-        {"model_prefix": "anthropic/claude-fable-5", "input_per_mtok": 10.0, "output_per_mtok": 50.0},
+        {
+            "model_prefix": "mystery-model",
+            "input_per_mtok": 2.0,
+            "output_per_mtok": 8.0,
+            "cache_write_per_mtok": 2.5,
+            "cache_write_1h_per_mtok": 4.0,
+        }
     )
-    for model in ("claude-fable-5-1", "anthropic/claude-fable-5.1"):
-        cost = table.cost_of(_usage(model, read=M, write=M))
-        assert cost is not None and cost.cache_usd == pytest.approx(0.25 + 12.5), model
-    fable_5 = table.cost_of(_usage("claude-fable-5", read=M))
-    assert fable_5 is not None and fable_5.cache_usd == pytest.approx(1.0)  # 0.1x on the non-.1 model
+    cost = table.cost_of(_usage("mystery-model", write=M, write_1h=M // 4))
+    assert cost is not None and cost.cache_usd == pytest.approx(0.75 * 2.5 + 0.25 * 4.0)
 
 
-def test_deepseek_rows_without_cache_rates_use_the_documented_hit_price():
-    # https://api-docs.deepseek.com/quick_start/pricing (from 2026-09-10): a cache hit costs
-    # 0.006 vs a 0.30 miss on deepseek-flash (v4-flash is billed as flash), 0.044 vs 1.32 on
-    # deepseek-v4-pro — the same ratio peak and off-peak. A miss is plain input: no write fee.
-    table = _table(
-        {"model_prefix": "deepseek-flash", "input_per_mtok": 0.30, "output_per_mtok": 1.20},
-        {"model_prefix": "deepseek-v4-flash", "input_per_mtok": 0.30, "output_per_mtok": 1.20},
-        {"model_prefix": "deepseek-v4-pro", "input_per_mtok": 1.32, "output_per_mtok": 3.96},
-    )
-    for model, hit in [("deepseek-flash", 0.006), ("deepseek-v4-flash", 0.006), ("deepseek-v4-pro", 0.044)]:
-        cost = table.cost_of(_usage(model, prompt=M, read=M))
-        assert cost is not None and cost.cache_usd == pytest.approx(hit), model
-
-
-@pytest.mark.parametrize(
-    ("model", "read", "write"),
-    [
-        # https://developers.openai.com/api/docs/pricing (cached ÷ input) and the prompt-caching
-        # guide: "For GPT-5.6 and later, cache writes cost 1.25x the standard, uncached input-token
-        # rate... subsequent reads cost only 0.1x"; earlier models have "No additional cache-write
-        # charge", so a write there is plain input.
-        ("gpt-6-astra", 0.1, 1.25),
-        ("gpt-5.6-sol", 0.1, 1.25),
-        ("gpt-5.6", 0.1, 1.25),
-        ("gpt-5.5", 0.1, 1.0),
-        ("gpt-5.4-mini", 0.1, 1.0),
-        ("gpt-5.1-codex-max", 0.1, 1.0),
-        ("gpt-5-nano", 0.1, 1.0),
-        ("gpt-4.1-mini", 0.25, 1.0),
-        ("gpt-4o", 0.5, 1.0),
-        ("gpt-4o-mini", 0.5, 1.0),
-        ("o1", 0.5, 1.0),
-        ("o3-mini", 0.5, 1.0),
-        ("o3", 0.25, 1.0),
-        ("o4-mini", 0.25, 1.0),
-        ("openai/gpt-5.5", 0.1, 1.0),  # OpenRouter's first-party route
-        # "GPT-5.5 Pro does not offer a cached input discount": a cached token costs full input
-        ("gpt-5.5-pro", 1.0, 1.0),
-        ("gpt-5-pro", 1.0, 1.0),
-        ("o1-pro", 1.0, 1.0),
-        ("o3-pro", 1.0, 1.0),
-        # https://platform.kimi.ai/docs/pricing/chat — cache hit vs miss: kimi-k3 0.30 vs 3.00,
-        # kimi-k2.7-code(-highspeed) 0.19 vs 0.95 (0.38 vs 1.90), kimi-k2.6 0.16 vs 0.95; no write fee
-        ("kimi-k3", 0.1, 1.0),
-        ("kimi-k2.7-code-highspeed", 0.2, 1.0),
-        ("kimi-k2.7-code", 0.2, 1.0),
-        ("kimi-k2.6", 0.16 / 0.95, 1.0),
-    ],
-)
-def test_openai_and_kimi_rows_without_cache_rates_use_the_documented_multipliers(model, read, write):
-    table = _table({"model_prefix": model, "input_per_mtok": 2.0, "output_per_mtok": 8.0})
-    cost = table.cost_of(_usage(model, read=M, write=M))
-    assert cost is not None and cost.cache_usd == pytest.approx(2.0 * (read + write)), model
-
-
-@pytest.mark.parametrize("model", ["gpt-realtime-2.1", "codex-mini-latest", "mistral-large-2512"])
-def test_families_without_one_documented_cache_rate_are_unknown(model):
-    # gpt-realtime prices cached audio (0.0125x) and text (0.1x) apart, and the proxy cannot
-    # tell them apart; Mistral's -90% is documented, but its native ids share no prefix scheme
-    table = _table({"model_prefix": model, "input_per_mtok": 2.0, "output_per_mtok": 8.0})
-    assert table.cost_of(_usage(model, prompt=M, read=1)) is None
-
-
-def test_a_rows_own_cache_rate_beats_the_vendor_multiplier():
+def test_each_cache_rate_is_the_served_one_else_the_interim_multiple():
+    # per rate, not per row: a Claude row that serves read and write but not yet the 1-hour
+    # rate (the likely first shape the site ships) still prices a 1-hour write, at the
+    # interim 2x; the two rates it does serve beat the interim 0.1x / 1.25x
     row = {"model_prefix": "claude-opus-5", "input_per_mtok": 5.0, "output_per_mtok": 25.0}
-    table = _table(row | {"cache_read_per_mtok": 0.4})
-    cost = table.cost_of(_usage("claude-opus-5", read=M, write=M))
-    assert cost is not None and cost.cache_usd == pytest.approx(0.4 + 6.25)  # served read, 1.25x write
+    table = _table(row | {"cache_read_per_mtok": 0.4, "cache_write_per_mtok": 6.0})
+    cost = table.cost_of(_usage("claude-opus-5", read=M, write=M, write_1h=M // 2))
+    assert cost is not None
+    assert cost.cache_usd == pytest.approx(0.4 + 0.5 * 6.0 + 0.5 * 10.0)
 
 
-def test_routed_ids_take_vendor_rates_only_from_first_party_routes():
-    # OpenRouter serves anthropic/ and openai/ models only at their makers' cache rates, so
-    # those routed ids take the vendor multipliers ...
-    table = _table(
-        {"model_prefix": "anthropic/claude-sonnet-4.6", "input_per_mtok": 3.0, "output_per_mtok": 15.0},
-        {"model_prefix": "~anthropic/claude-opus-latest", "input_per_mtok": 5.0, "output_per_mtok": 25.0},
-        {"model_prefix": "deepseek/deepseek-v4-flash", "input_per_mtok": 0.07, "output_per_mtok": 0.14},
-    )
-    sonnet = table.cost_of(_usage("anthropic/claude-sonnet-4.6", read=M))
-    latest = table.cost_of(_usage("~anthropic/claude-opus-latest", read=M))
-    assert sonnet is not None and sonnet.cache_usd == pytest.approx(0.3)
-    assert latest is not None and latest.cache_usd == pytest.approx(0.5)
-    # ... but an open-weight model is resold by many hosts at their own cache prices
-    # (OpenRouter's deepseek/deepseek-v3.2 reads at 0.5x, not DeepSeek's), so a routed
-    # deepseek/ id is not priced at DeepSeek's native ratio: its cache hits are unknown
-    assert table.cost_of(_usage("deepseek/deepseek-v4-flash", prompt=M, read=M)) is None
+def test_routed_ids_price_their_cache_from_the_served_table_only():
+    # a routed id ("vendor/model", OpenRouter's shape) pays what the route charges, which only
+    # the served table knows: with served rates it is priced ...
+    routed = {"model_prefix": "anthropic/claude-sonnet-4.6", "input_per_mtok": 3.0, "output_per_mtok": 15.0}
+    served = _table(routed | {"cache_read_per_mtok": 0.3, "cache_write_per_mtok": 3.75})
+    cost = served.cost_of(_usage("anthropic/claude-sonnet-4.6", read=M, write=M))
+    assert cost is not None and cost.cache_usd == pytest.approx(0.3 + 3.75)
+    # ... and without them its cache tokens are unknown: no interim fallback for a route
+    assert _table(routed).cost_of(_usage("anthropic/claude-sonnet-4.6", prompt=M, read=M)) is None
 
 
 def test_cost_of_unknown_model_is_none():
