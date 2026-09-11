@@ -87,8 +87,12 @@ POST /api/v2/runs/{run}/context
   "timing": { "started_at": "…", "finished_at": "…", "solver_ms": 41200 },
   "usage": { "by_model": [ { "model": "gpt-5", "provider": "openai",
                              "input": 12000, "output": 900, "calls": 12,
+                             "cache_read": 56000, "cache_creation": 0,
                              "cost_usd_reported": 0.031 } ] } }
 ```
+
+`input` is the uncached input; tokens read from or written to the prompt cache go in
+`cache_read` / `cache_creation`, not in `input`.
 
 ### 2. Claim a case
 

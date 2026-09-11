@@ -17,6 +17,12 @@ dependency, tokencost, lagged behind provider releases and silently priced curre
 models at 0 or a stale predecessor's rate): a price update is a data change on the
 server, and :meth:`PriceTable.cost_of` reports an unknown model as ``None``, never
 as a wrong number.
+
+Cache rates are served the same way: ``cache_read_per_mtok``, ``cache_write_per_mtok`` and
+``cache_write_1h_per_mtok`` on a row. A rate a row does not serve yet is filled from the
+INTERIM fallback in :mod:`trap.cost.interim_cache_rates` (a stopgap, deleted once the site
+serves them), and cached tokens neither can price make the call's cost unknown rather than
+guessed. This module parses and computes; it holds no prices of its own.
 """
 
 from __future__ import annotations
@@ -26,25 +32,59 @@ import os
 import time
 from importlib.resources import files
 from pathlib import Path
-from typing import Literal
+from typing import Literal, NamedTuple
 
 import httpx
 from pydantic import BaseModel, ValidationError, field_validator
 
+from trap.cost.interim_cache_rates import CacheMultipliers, interim_multiples
+from trap.models.cost import CallUsage
+
+
+class CallCost(NamedTuple):
+    """What one call cost, in USD. ``cache_usd`` is the part of ``usd`` spent on cache
+    reads and writes — included in ``usd``, not on top of it."""
+
+    usd: float
+    cache_usd: float
+
 
 class PriceRow(BaseModel):
     """One priced model-id prefix. Extra fields on the wire (``provider``, ``note``, …)
-    are ignored — only the prefix and its two rates are used."""
+    are ignored — only the prefix and its rates are used. The cache rates are optional:
+    a table served before the site priced cache prices without them, and an older client
+    ignores them."""
 
     model_prefix: str
     input_per_mtok: float
     output_per_mtok: float
+    cache_read_per_mtok: float | None = None
+    cache_write_per_mtok: float | None = None  # a standard (Anthropic: 5-minute) cache write
+    cache_write_1h_per_mtok: float | None = None  # a 1-hour cache write (Anthropic)
 
     @field_validator("model_prefix")
     @classmethod
     def _normalise(cls, value: str) -> str:
         # matched against a lowercased model id, so store the prefix lowercased
         return value.lower()
+
+    def cache_rates(
+        self, fallback: CacheMultipliers | None
+    ) -> tuple[float | None, float | None, float | None]:
+        """(read, write, 1-hour write) in USD per Mtok. Each is the rate the row serves, else
+        the interim ``fallback`` multiple of the row's input rate, else None (unknown)."""
+        base = self.input_per_mtok
+
+        def rate(served: float | None, multiple: float | None) -> float | None:
+            if served is not None:
+                return served
+            return None if multiple is None else multiple * base
+
+        return (
+            rate(self.cache_read_per_mtok, fallback and fallback.read),
+            rate(self.cache_write_per_mtok, fallback and fallback.write),
+            rate(self.cache_write_1h_per_mtok, fallback and fallback.write_1h),
+        )
 
 
 class PriceTable(BaseModel):
@@ -74,19 +114,32 @@ class PriceTable(BaseModel):
     def is_fresh(self, ttl_seconds: float) -> bool:
         return time.time() - self.fetched_at < ttl_seconds
 
-    def cost_of(self, prompt_tokens: int, completion_tokens: int, model: str | None) -> float | None:
-        """The USD cost of one API call against this table, or ``None`` when the model is
-        unknown or absent — an unknown cost is not a zero cost, and is reported as JSON null
-        rather than a misleading number. First matching prefix wins (order is load-bearing;
-        see :meth:`PriceCatalogue._default`)."""
-        if model is None:
+    def cost_of(self, usage: CallUsage) -> CallCost | None:
+        """What one API call cost against this table, or ``None`` when that is unknown —
+        the model is absent or unpriced, or it has cached tokens at a rate neither its row
+        nor its vendor's documented multipliers give. An unknown cost is not a zero cost,
+        and is reported as JSON null rather than a misleading number. First matching prefix
+        wins (order is load-bearing; see :meth:`PriceCatalogue._default`)."""
+        if usage.model is None:
             return None
-        name = model.lower()
-        for row in self.prices:
-            if name.startswith(row.model_prefix):
-                per_mtok = prompt_tokens * row.input_per_mtok + completion_tokens * row.output_per_mtok
-                return per_mtok / 1_000_000
-        return None
+        name = usage.model.lower()
+        row = next((row for row in self.prices if name.startswith(row.model_prefix)), None)
+        if row is None:
+            return None
+        read, write, write_1h = row.cache_rates(interim_multiples(name))
+        cache = 0.0
+        for tokens, rate in (
+            (usage.cache_read_tokens, read),
+            (usage.cache_write_tokens - usage.cache_write_1h_tokens, write),
+            (usage.cache_write_1h_tokens, write_1h),
+        ):
+            if not tokens:
+                continue
+            if rate is None:
+                return None
+            cache += tokens * rate
+        plain = usage.prompt_tokens * row.input_per_mtok + usage.completion_tokens * row.output_per_mtok
+        return CallCost(usd=(plain + cache) / 1_000_000, cache_usd=cache / 1_000_000)
 
 
 class PriceCatalogue:
@@ -160,7 +213,8 @@ class PriceCatalogue:
         try:
             path = cls._cache_path()
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(table.model_dump_json(indent=2))
+            # exclude_none: a cache rate the server did not give is left out, not written as null
+            path.write_text(table.model_dump_json(indent=2, exclude_none=True))
         except OSError:
             pass
 

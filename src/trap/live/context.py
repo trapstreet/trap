@@ -197,13 +197,16 @@ def _usage_entry(provider: str, model: str, costs: Sequence[ModelCost]) -> dict[
     """One bucket. The reported cost is the proxy's own pricing, and it is only
     a sum when every call in the bucket was priced -- an unknown is not a zero,
     so one unpriced call leaves the bucket's cost unsaid (the site prices the
-    tokens itself either way)."""
+    tokens itself either way). The token counts are the site's own split, which is
+    the proxy's: ``input`` is the uncached input, the cache has its own two counts."""
     entry: dict[str, Any] = {
         "model": model,
         "provider": provider,
         "source": USAGE_SOURCE,
         "input": sum(cost.prompt_tokens for cost in costs),
         "output": sum(cost.completion_tokens for cost in costs),
+        "cache_read": sum(cost.cache_read_tokens for cost in costs),
+        "cache_creation": sum(cost.cache_write_tokens for cost in costs),
         "calls": sum(cost.calls for cost in costs),
     }
     reported = combine_costs(*(cost.cost_usd for cost in costs))
