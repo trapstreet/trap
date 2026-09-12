@@ -44,8 +44,11 @@ def _error_from(error: Any) -> AcpError:
     it: a bare value is the message, and a missing or non-integer code is INTERNAL_ERROR."""
     err = error if isinstance(error, dict) else {"message": error}
     code = err.get("code")
-    valid = isinstance(code, int) and not isinstance(code, bool)
-    return AcpError(code if valid else INTERNAL_ERROR, str(err.get("message") or "error"), err.get("data"))
+    return AcpError(
+        code if isinstance(code, int) and not isinstance(code, bool) else INTERNAL_ERROR,
+        str(err.get("message") or "error"),
+        err.get("data"),
+    )
 
 
 class Pending:
