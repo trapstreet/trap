@@ -1182,6 +1182,7 @@ def test_bridge_points_codex_at_the_proxy_under_an_api_key_login(fake, tmp_path,
     codex_home.mkdir()
     (codex_home / "auth.json").write_text(json.dumps({"auth_mode": "apikey"}))
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.delenv("CODEX_CONFIG", raising=False)  # one exported by the developer is not the bridge's
     monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:9")
     code = bridge.main(
         ["--agent-cmd", shlex.join(AGENT), "--agent-id", "codex-acp", "--model", "haiku", "--deadline", "20"]
@@ -1199,6 +1200,7 @@ def test_bridge_does_not_point_codex_at_the_proxy_under_a_chatgpt_login(fake, tm
     codex_home.mkdir()
     (codex_home / "auth.json").write_text(json.dumps({"auth_mode": "chatgpt"}))
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.delenv("CODEX_CONFIG", raising=False)  # one exported by the developer is not the bridge's
     monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:9")
     code = bridge.main(
         ["--agent-cmd", shlex.join(AGENT), "--agent-id", "codex-acp", "--model", "haiku", "--deadline", "20"]
