@@ -243,3 +243,9 @@ def active_provider_configs() -> dict[str, _ProviderConfig]:
     return {
         name: cfg for name, cfg in _CONFIGS.items() if os.environ.get(cfg.key_env) or cfg.always_intercept
     }
+
+
+def provider_config(name: str) -> _ProviderConfig:
+    """One provider's registry entry, for code that calls the provider itself
+    (``tp shape direct``) and must find its key and base URL the way the proxy does."""
+    return _CONFIGS[name]
