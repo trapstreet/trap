@@ -184,3 +184,14 @@ def _case(cid: str, skip: tuple[str, ...], tags: dict[str, list[str]] | None) ->
     if tags and cid in tags:
         case["tags"] = tags[cid]
     return case
+
+
+def case_capture(sol: Path, case: str = "c1") -> tuple[str, dict]:
+    """The newest run's solution stdout and meta.json for ``case`` under ``sol``'s workspace."""
+    captures = sorted(
+        p
+        for p in (sol / ".trap").rglob("stdout")
+        if p.parent.name == "solution" and p.parent.parent.name == case
+    )
+    stdout = captures[-1]
+    return stdout.read_text(), json.loads((stdout.parent / "meta.json").read_text())

@@ -37,6 +37,27 @@ from trap.workspace import SolutionIdentity, Workspace
 app = typer.Typer(help="AI prompt / agent / workflow / testing framework.")
 app.add_typer(auth_app, name="auth")
 
+# Built-in solution programs (trap.shapes), run as a trap.yaml `cmd:`. Hidden: they are
+# solutions, not something a person types; docs/guides/built-in-shapes.md documents them.
+shape_app = typer.Typer(help="Built-in solution programs, run as a trap.yaml `cmd:`.")
+app.add_typer(shape_app, name="shape", hidden=True)
+
+# argparse owns each shape's arguments, --help included; click passes everything through.
+_PASSTHROUGH = {"allow_extra_args": True, "ignore_unknown_options": True, "help_option_names": []}
+
+
+@shape_app.callback()
+def _shape() -> None:
+    """Built-in solution programs (see docs/guides/built-in-shapes.md)."""
+
+
+@shape_app.command("cmd", context_settings=_PASSTHROUGH)
+def shape_cmd(ctx: typer.Context) -> None:
+    """Run a one-line command template for one case."""
+    from trap.shapes.command import main
+
+    raise typer.Exit(code=main(ctx.args))
+
 
 def _version_callback(value: bool) -> None:
     if value:
