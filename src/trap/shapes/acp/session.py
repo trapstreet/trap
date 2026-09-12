@@ -93,13 +93,16 @@ def reported_no_model_use(result: Mapping[str, Any]) -> bool:
     """True when the agent says outright that no model answered this turn. codex-acp
     answered a 401 with ``end_turn`` and the error text as its message (probe,
     2026-09-12); the tell was an absent usage with an empty ``model_usage``. An agent
-    that reports no usage at all is not accused."""
+    that reports no usage at all is not accused. Token counts decide when there are any;
+    a usage without them says nothing, and the quota is asked instead."""
     usage = result.get("usage")
     if isinstance(usage, dict):
         counts = [v for k, v in usage.items() if k.endswith("Tokens") and isinstance(v, int | float)]
-        return bool(counts) and sum(counts) == 0
-    quota = (result.get("_meta") or {}).get("quota") or {}
-    return quota.get("model_usage") == []
+        if counts:
+            return sum(counts) == 0
+    meta = result.get("_meta")
+    quota = meta.get("quota") if isinstance(meta, dict) else None
+    return isinstance(quota, dict) and quota.get("model_usage") == []
 
 
 def grant_once(notes: list[str]) -> Callable[[str, dict[str, Any]], dict[str, Any]]:
@@ -129,12 +132,31 @@ def grant_once(notes: list[str]) -> Callable[[str, dict[str, Any]], dict[str, An
 def option_values(option: Mapping[str, Any]) -> list[str]:
     """A select option's values, flattened when the agent groups them."""
     values: list[str] = []
-    for entry in option.get("options") or []:
+    entries = option.get("options")
+    for entry in entries if isinstance(entries, list) else []:
         if isinstance(entry, dict) and isinstance(entry.get("options"), list):
             values += [str(v.get("value")) for v in entry["options"] if isinstance(v, dict)]
         elif isinstance(entry, dict):
             values.append(str(entry.get("value")))
     return values
+
+
+def _objects(entries: list[Any]) -> list[dict[str, Any]]:
+    """The entries of a ``configOptions`` list that are objects; anything else in it is
+    not an option, and is skipped rather than tripped over."""
+    return [e for e in entries if isinstance(e, dict)]
+
+
+def config_options(session: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """``session/new``'s ``configOptions``. Absent or null is no options; a value that is
+    not a list is not the protocol — a TypeError, which callers report as an agent error
+    rather than as an agent that offers no model."""
+    found = session.get("configOptions")
+    if found is None:
+        return []
+    if not isinstance(found, list):
+        raise TypeError(f"configOptions is not a list (it is a {type(found).__name__})")
+    return _objects(found)
 
 
 def _readback(config_options: list[dict[str, Any]]) -> dict[str, str]:
@@ -185,7 +207,7 @@ def apply_config(
         )
         echoed = reply.get("configOptions")
         if isinstance(echoed, list):
-            now = _readback(echoed)
+            now = _readback(_objects(echoed))
             if now.get(str(option["id"])) != value:
                 raise ConfigMismatch(
                     f"{option['id']} stayed {now.get(str(option['id']))!r} after setting {value!r}"
@@ -264,7 +286,7 @@ def _converse(
         ran_with = apply_config(
             conn,
             session_id,
-            session.get("configOptions") or [],
+            config_options(session),
             model=model,
             options=options,
             timeout=deadline.remaining(),
@@ -337,5 +359,5 @@ def describe_agent(
             "current": o.get("currentValue"),
             "values": option_values(o),
         }
-        for o in session.get("configOptions") or []
+        for o in config_options(session)
     ]

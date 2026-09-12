@@ -79,7 +79,7 @@ def _describe(agent: list[str], agent_id: str | None, env: Mapping[str, str]) ->
     cwd = Path(tempfile.mkdtemp(prefix="trap-describe-")).resolve()
     try:
         options = describe_agent(agent, env=env, cwd=cwd, meta=session_meta(agent_id))
-    except (AcpError, TimeoutError, KeyError) as e:
+    except (AcpError, TimeoutError, KeyError, TypeError) as e:  # TypeError: a reply not shaped like ACP
         return fail(ShapeError(ShapeExit.AGENT_ERROR, f"could not open a session: {e}"))
     except OSError as e:
         return _agent_start_failed(e)

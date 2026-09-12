@@ -13,12 +13,13 @@ import pytest
 from trap.cli import app
 from trap.shapes._case import Deadline, ShapeError, ShapeExit
 from trap.shapes.acp import bridge, hints
-from trap.shapes.acp.connection import AGENT_EXITED, AcpConnection, AcpError
+from trap.shapes.acp.connection import AGENT_EXITED, AcpConnection, AcpError, Pending
 from trap.shapes.acp.session import (
     ConfigMismatch,
     MessageCollector,
     _open_session,
     apply_config,
+    config_options,
     describe_agent,
     grant_once,
     option_values,
@@ -355,6 +356,11 @@ def test_a_lone_chunk_with_no_message_id_still_starts_its_own_message():
         ({"stopReason": "end_turn", "usage": {"inputTokens": 0, "outputTokens": 0, "totalTokens": 0}}, True),
         ({"stopReason": "end_turn", "usage": None, "_meta": {"quota": {"model_usage": []}}}, True),
         ({"stopReason": "end_turn"}, False),  # an agent that reports nothing is not accused
+        # a usage with no token counts says nothing, so the quota still decides
+        ({"stopReason": "end_turn", "usage": {}, "_meta": {"quota": {"model_usage": []}}}, True),
+        ({"stopReason": "end_turn", "usage": {"note": "n/a"}}, False),
+        ({"stopReason": "end_turn", "_meta": "x"}, False),
+        ({"stopReason": "end_turn", "_meta": {"quota": ["x"]}}, False),
     ],
 )
 def test_reported_no_model_use(result, none):
@@ -681,6 +687,83 @@ def test_an_unmapped_stop_reason_is_an_agent_error(fake, tmp_path):
     out = _run(tmp_path)
     assert out.exit_code == ShapeExit.AGENT_ERROR
     assert any("unexpected stopReason" in n for n in out.notes)
+
+
+# --- a reply shaped unlike the protocol is an agent error, never a traceback -----------
+
+
+@pytest.mark.parametrize(
+    ("error", "code", "message"),
+    [
+        ("boom", -32603, "boom"),
+        (None, -32603, "error"),
+        ({"code": "E1", "message": "bad code"}, -32603, "bad code"),
+        ({"code": True, "message": "bool code"}, -32603, "bool code"),
+        ({"code": -32001, "message": "no session"}, -32001, "no session"),
+    ],
+)
+def test_any_error_reply_becomes_an_acp_error(error, code, message):
+    pending = Pending()
+    pending.resolve({"jsonrpc": "2.0", "id": 1, "error": error})
+    with pytest.raises(AcpError) as e:
+        pending.wait(1)
+    assert (e.value.code, e.value.message) == (code, message)
+
+
+@pytest.mark.parametrize("result", [["end_turn"], "done", 7, None])
+def test_a_result_that_is_not_an_object_reads_as_empty(result):
+    pending = Pending()
+    pending.resolve({"jsonrpc": "2.0", "id": 1, "result": result})
+    assert pending.wait(1) == {}
+
+
+@pytest.mark.parametrize(
+    ("mode", "note"),
+    [
+        ("error_string", "could not open a session: boom"),
+        ("dict_config", "configOptions is not a list"),
+        ("list_result", "unexpected stopReason None"),
+    ],
+)
+def test_a_reply_shaped_unlike_the_protocol_ends_the_case_promptly_as_agent_error(fake, tmp_path, mode, note):
+    fake(mode)
+    started = time.monotonic()
+    out = _run(tmp_path)
+    assert (out.answer, out.exit_code) == ("", ShapeExit.AGENT_ERROR)
+    assert any(note in n for n in out.notes), out.notes
+    assert time.monotonic() - started < 5
+
+
+def test_config_entries_that_are_not_objects_are_skipped(fake, tmp_path):
+    fake("junk_config")
+    out = _run(tmp_path)
+    assert (out.answer, out.exit_code) == ("42", ShapeExit.OK)
+
+
+def test_configoptions_absent_or_null_means_the_agent_offers_none():
+    assert config_options({"sessionId": "s1"}) == config_options({"configOptions": None}) == []
+
+
+def test_echoed_config_entries_that_are_not_objects_are_skipped():
+    class _JunkEcho:
+        def call(self, method, params, timeout):
+            return {"configOptions": ["model", 7, *_options(model=params["value"])]}
+
+    ran = apply_config(_JunkEcho(), "s1", _options(), model="haiku", options={}, timeout=5)
+    assert ran == {"model": "haiku", "effort": "default"}
+
+
+def test_option_values_of_an_option_whose_values_are_not_a_list():
+    assert option_values({"options": 5}) == []
+
+
+@pytest.mark.parametrize("mode", ["error_string", "dict_config"])
+def test_describe_exits_23_on_a_reply_shaped_unlike_the_protocol(fake, capsys, mode):
+    fake(mode)
+    code = bridge.main(["--agent-cmd", shlex.join(AGENT), "--describe"])
+    captured = capsys.readouterr()
+    assert code == ShapeExit.AGENT_ERROR
+    assert (captured.out, captured.err.startswith("[trap] could not open a session")) == ("", True)
 
 
 # --- Coverage: branches no scripted-agent conversation reaches on its own --------------

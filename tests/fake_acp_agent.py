@@ -6,10 +6,16 @@ a subprocess.
 
 ``garbage`` and ``stray`` exist only to drive lines of trap.shapes.acp.connection that
 no protocol-shaped conversation reaches on its own (a non-JSON stdout line, a JSON
-scalar, a response for an id nobody asked for, a message with neither ``method`` nor
-``id``) — coverage, not protocol behaviour. ``permission_no_once``,
-``permission_none_offered``, ``null_chunk``, ``unknown_stop``, ``bad_session_new`` and
-``hang_handshake`` exist the same way, for trap.shapes.acp.session."""
+scalar, JSON nested too deep to parse, a response for an id nobody asked for, a message
+with neither ``method`` nor ``id``) — coverage, not protocol behaviour.
+``permission_no_once``, ``permission_none_offered``, ``null_chunk``, ``unknown_stop``,
+``bad_session_new`` and ``hang_handshake`` exist the same way, for
+trap.shapes.acp.session.
+
+``error_string``, ``list_result``, ``dict_config`` and ``junk_config`` answer with
+replies shaped unlike the protocol — an error that is a bare string, a prompt result
+that is a list, configOptions that is an object, configOptions padded with non-objects —
+so the tests can check none of them escapes the shape as a traceback."""
 
 from __future__ import annotations
 
@@ -114,7 +120,7 @@ def permission_prompt(rid: object, sid: str, options: list[dict]) -> None:
 
 
 def prompt(rid: object, sid: str) -> None:
-    if MODE in ("ok", "garbage", "stray"):
+    if MODE in ("ok", "garbage", "stray", "junk_config"):
         say(sid, "Let me read the file first.", "m1")
         tool(sid, "Read question.txt")
         say(sid, "4", "m2")
@@ -192,6 +198,9 @@ def prompt(rid: object, sid: str) -> None:
     elif MODE == "unknown_stop":
         say(sid, "done, sort of", "m1")
         result(rid, {"stopReason": "something_else", "usage": USAGE})
+    elif MODE == "list_result":
+        say(sid, "4", "m1")
+        send({"jsonrpc": "2.0", "id": rid, "result": ["end_turn"]})
 
 
 def main() -> None:
@@ -200,10 +209,11 @@ def main() -> None:
         child = subprocess.Popen(["sleep", "60"])
         log({"child_pid": child.pid})
     if MODE == "garbage":
-        # Neither valid JSON nor, on the second line, a JSON object — both must be
-        # skipped rather than kill the reader thread reading this agent's stdout.
+        # Not valid JSON, not a JSON object, and JSON nested too deep for the parser —
+        # each must be skipped rather than kill the reader thread reading this stdout.
         sys.stdout.write("this is not json\n")
         sys.stdout.write(json.dumps([1, 2, 3]) + "\n")
+        sys.stdout.write("[" * 100_000 + "]" * 100_000 + "\n")
         sys.stdout.flush()
     log({"cwd": os.getcwd(), "files": sorted(os.listdir(".")), "tree": tree(), "env": dict(os.environ)})
     while (message := read()) is not None:
@@ -226,6 +236,12 @@ def main() -> None:
                         "error": {"code": -32001, "message": "cannot create session"},
                     }
                 )
+            elif MODE == "error_string":
+                send({"jsonrpc": "2.0", "id": rid, "error": "boom"})
+            elif MODE == "dict_config":
+                result(rid, {"sessionId": "s1", "configOptions": {o["id"]: o for o in config_options()}})
+            elif MODE == "junk_config":
+                result(rid, {"sessionId": "s1", "configOptions": ["model", 7, None, *config_options()]})
             else:
                 result(rid, {"sessionId": "s1", "configOptions": config_options()})
         elif method == "session/set_config_option":

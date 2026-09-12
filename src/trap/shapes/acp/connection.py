@@ -25,6 +25,8 @@ from trap.shapes._case import kill_group
 #: Our own error code for "the agent's stdout closed with this request unanswered" — or,
 #: more generally, "this connection is done and will not answer anything else".
 AGENT_EXITED = -32099
+#: JSON-RPC's "internal error": the code an error reply gets when it carries no usable one.
+INTERNAL_ERROR = -32603
 
 
 class AcpError(Exception):
@@ -37,10 +39,23 @@ class AcpError(Exception):
         self.data = data
 
 
+def _error_from(error: Any) -> AcpError:
+    """The AcpError a JSON-RPC ``error`` member stands for, whatever shape the agent gave
+    it: a bare value is the message, and a missing or non-integer code is INTERNAL_ERROR."""
+    err = error if isinstance(error, dict) else {"message": error}
+    code = err.get("code")
+    valid = isinstance(code, int) and not isinstance(code, bool)
+    return AcpError(code if valid else INTERNAL_ERROR, str(err.get("message") or "error"), err.get("data"))
+
+
 class Pending:
     """One request in flight. ``wait`` may time out and be called again: the response
     stays in the box until someone takes it, which is how a cancelled prompt's final
-    ``cancelled`` answer is still collected."""
+    ``cancelled`` answer is still collected.
+
+    What ``wait`` hands back is always protocol-shaped — a result object (``{}`` when the
+    agent sent something else) or an AcpError — so a malformed reply reaches the caller
+    as an agent error, never as an AttributeError somewhere downstream."""
 
     def __init__(self) -> None:
         self._box: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=1)
@@ -54,9 +69,9 @@ class Pending:
         except queue.Empty:
             raise TimeoutError from None
         if "error" in message:
-            err = message["error"] or {}
-            raise AcpError(int(err.get("code", -32603)), str(err.get("message", "error")), err.get("data"))
-        return message.get("result") or {}
+            raise _error_from(message["error"])
+        result = message.get("result")
+        return result if isinstance(result, dict) else {}
 
 
 class AcpConnection:
@@ -158,8 +173,8 @@ class AcpConnection:
             for raw in self._stdout:
                 try:
                     message = json.loads(raw)
-                except ValueError:
-                    continue  # a banner on stdout; the protocol is JSON lines
+                except (ValueError, RecursionError):
+                    continue  # a banner on stdout, or JSON nested too deep to parse
                 if not isinstance(message, dict):
                     continue  # e.g. a bare JSON scalar — not a JSON-RPC message either
                 try:
