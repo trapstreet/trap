@@ -1,7 +1,8 @@
 """A scripted ACP agent for the bridge tests: JSON-RPC over stdio, one behaviour per
-FAKE_ACP_MODE. What it receives — plus its cwd, files and environment at startup — is
-appended to FAKE_ACP_LOG as JSON lines, so a test can check what the bridge sent it.
-Not a test module: tests start it as a subprocess.
+FAKE_ACP_MODE. What it receives — plus its cwd, files, a full text dump of everything
+under that cwd, and its environment at startup — is appended to FAKE_ACP_LOG as JSON
+lines, so a test can check what the bridge sent it. Not a test module: tests start it as
+a subprocess.
 
 ``garbage`` and ``stray`` exist only to drive lines of trap.shapes.acp.connection that
 no protocol-shaped conversation reaches on its own (a non-JSON stdout line, a JSON
@@ -18,12 +19,28 @@ import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 MODE = os.environ.get("FAKE_ACP_MODE", "ok")
 LOG = os.environ.get("FAKE_ACP_LOG")
 STATE = {"model": "default", "effort": "default"}
 USAGE = {"inputTokens": 10, "outputTokens": 3, "totalTokens": 13}
 PENDING: dict[str, object] = {}
+
+
+def tree() -> dict[str, str]:
+    """Every text file under the cwd, keyed by its POSIX-style relative path — so a test
+    can check not just that a file landed somewhere, but that it landed at the right
+    depth with the right content. Skips anything that isn't decodable text rather than
+    fail the whole startup log over one binary file."""
+    found: dict[str, str] = {}
+    for p in Path().rglob("*"):
+        if p.is_file():
+            try:
+                found[p.as_posix()] = p.read_text()
+            except (UnicodeDecodeError, OSError):
+                pass
+    return found
 
 
 def log(entry: dict) -> None:
@@ -188,7 +205,7 @@ def main() -> None:
         sys.stdout.write("this is not json\n")
         sys.stdout.write(json.dumps([1, 2, 3]) + "\n")
         sys.stdout.flush()
-    log({"cwd": os.getcwd(), "files": sorted(os.listdir(".")), "env": dict(os.environ)})
+    log({"cwd": os.getcwd(), "files": sorted(os.listdir(".")), "tree": tree(), "env": dict(os.environ)})
     while (message := read()) is not None:
         log({"received": message})
         method, rid, params = message.get("method"), message.get("id"), message.get("params") or {}

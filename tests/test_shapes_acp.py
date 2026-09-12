@@ -752,7 +752,8 @@ def test_a_skill_goes_where_claude_loads_project_skills(tmp_path):
     work = tmp_path / "work"
     work.mkdir()
     hints.install_skill("claude-acp", skill, work)
-    assert (work / ".claude" / "skills" / "my-skill" / "SKILL.md").is_file()
+    installed = work / ".claude" / "skills" / "my-skill" / "SKILL.md"
+    assert installed.read_text() == "---\nname: my-skill\n---\n"
     with pytest.raises(ShapeError):
         hints.install_skill("codex-acp", skill, work)
 
@@ -959,8 +960,10 @@ def test_bridge_installs_a_skill_for_claude_acp(fake, tmp_path, monkeypatch):
     assert code == ShapeExit.OK
     # The case's sandbox (the agent's cwd) is gone by the time main() returns — sandbox.close()
     # runs before this assertion — so what the agent saw at startup is only in its own log.
+    # Checked by content and full path, not just "something landed under .claude": a skill
+    # installed at the wrong depth, flattened, or truncated must fail this.
     start = next(e for e in _log(log) if "cwd" in e)
-    assert ".claude" in start["files"]
+    assert start["tree"][".claude/skills/my-skill/SKILL.md"] == "hello skill"
 
 
 def test_bridge_refuses_a_skill_for_an_unsupported_agent(fake, tmp_path, monkeypatch, capsys):
