@@ -5,7 +5,9 @@ current Python interpreter, never `uv` or the network."""
 from __future__ import annotations
 
 import json
+import os
 import sys
+import time
 from pathlib import Path
 
 import httpx
@@ -13,6 +15,20 @@ import pytest
 from typer.testing import CliRunner
 
 PY = sys.executable
+
+
+def process_gone(pid: int, timeout: float = 3.0) -> bool:
+    """Poll for ``pid`` to disappear — for tests that kill a process group and need to
+    know the signal actually reached a grandchild, not just the direct child."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
 
 # A judge that scores stdout == expected/answer.txt (1.0 / 0.0).
 JUDGE_SCORE = """

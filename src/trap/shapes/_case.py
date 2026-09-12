@@ -1,0 +1,231 @@
+"""What every shape does around its one case: a work directory holding a copy of the
+case's inputs, an environment with the task checkout scrubbed out of it, a deadline, and
+the exit codes a shape reports through.
+
+A shape is a solution under trap's IO contract (docs/reference/io-contract.md): the
+runner starts it with ``TRAP_MANIFEST`` set, keeps its stdout as the answer and its exit
+code as the case's."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from enum import IntEnum
+from pathlib import Path
+from typing import NoReturn
+
+
+class ShapeExit(IntEnum):
+    """How a shape ends. TIMEOUT is the runner's own 124, so a shape that stopped at its
+    deadline reads like a solution the runner killed; the rest stay clear of 124-127
+    (timeout, judge-without-JSON, and the shell's two)."""
+
+    OK = 0
+    REFUSAL = 20
+    MAX_TOKENS = 21
+    MAX_TURNS = 22
+    AGENT_ERROR = 23
+    CONFIG_ERROR = 24
+    TIMEOUT = 124
+
+
+class ShapeError(Exception):
+    """The shape cannot produce an answer; ``code`` is what it exits with."""
+
+    def __init__(self, code: ShapeExit, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def fail(error: ShapeError) -> int:
+    """Say why on stderr (the runner keeps it with the case) and return the exit code."""
+    print(f"[trap] {error}", file=sys.stderr)
+    return int(error.code)
+
+
+class Deadline:
+    """The case's wall-clock budget. A shape stops itself before the runner's timeout so it
+    can take its children down too: the runner kills only its direct child, and an agent
+    left behind keeps running and spending."""
+
+    def __init__(self, seconds: float) -> None:
+        self._end = time.monotonic() + seconds
+
+    def remaining(self) -> float:
+        return max(0.0, self._end - time.monotonic())
+
+
+@dataclass
+class CaseSandbox:
+    """The case's inputs, copied into a fresh directory outside the task checkout and
+    outside ``.trap/``. Task prompts say the files are "in the current directory"; a work
+    directory beside ``expected/`` would be one ``ls ..`` from the answers."""
+
+    inputs_dir: Path
+    prompt_file: str
+    workdir: Path
+
+    @classmethod
+    def open(cls, *, manifest_envvar: str, prompt_file: str, environ: Mapping[str, str]) -> CaseSandbox:
+        raw = environ.get(manifest_envvar)
+        if not raw:
+            raise ShapeError(
+                ShapeExit.CONFIG_ERROR, f"${manifest_envvar} is not set — run this shape under `tp run`"
+            )
+        try:
+            inputs_dir = Path(json.loads(raw)["inputs_dir"])
+        except (ValueError, KeyError, TypeError) as e:
+            raise ShapeError(
+                ShapeExit.CONFIG_ERROR, f"${manifest_envvar} is not a trap manifest ({e})"
+            ) from None
+        if not (inputs_dir / prompt_file).is_file():
+            raise ShapeError(
+                ShapeExit.CONFIG_ERROR, f"this case has no {prompt_file} (looked in {inputs_dir})"
+            )
+        workdir = Path(tempfile.mkdtemp(prefix="trap-case-")).resolve()
+        shutil.copytree(inputs_dir, workdir, dirs_exist_ok=True)
+        return cls(inputs_dir=inputs_dir, prompt_file=prompt_file, workdir=workdir)
+
+    @property
+    def prompt_path(self) -> Path:
+        return self.workdir / self.prompt_file
+
+    @property
+    def question(self) -> str:
+        return self.prompt_path.read_text()
+
+    def extra_inputs(self) -> list[str]:
+        """The case's input files other than the prompt, relative to its directory."""
+        prompt = Path(self.prompt_file)
+        return sorted(
+            p.relative_to(self.inputs_dir).as_posix()
+            for p in self.inputs_dir.rglob("*")
+            if p.is_file() and p.relative_to(self.inputs_dir) != prompt
+        )
+
+    def close(self) -> None:
+        shutil.rmtree(self.workdir, ignore_errors=True)
+
+
+#: Never scrubbed by value: a child cannot start without them, and a broad ``--scrub`` (a
+#: repo root that also holds a venv) must not take PATH with it. HOME LOGNAME PATH SHELL
+#: TERM USER is the ACP/MCP SDKs' default inherited set; TMPDIR and LANG are added here.
+ESSENTIAL_ENV = frozenset({"PATH", "HOME", "TMPDIR", "LANG", "SHELL", "TERM", "USER", "LOGNAME"})
+
+
+def scrubbed_env(
+    environ: Mapping[str, str], *, manifest_envvar: str, prefixes: Sequence[Path]
+) -> dict[str, str]:
+    """``environ`` minus the manifest and every variable whose value names one of
+    ``prefixes`` (ESSENTIAL_ENV excepted). The manifest points at inputs/ and the answers
+    sit beside it: a session that inherited it once read expected/ in one step
+    (session_memory_recall's README). Matched by value too, because a task can rename the
+    manifest variable."""
+    names = {"TRAP_MANIFEST", manifest_envvar}
+    needles = [str(Path(p).resolve()) for p in prefixes]
+    return {
+        k: v
+        for k, v in environ.items()
+        if k not in names and (k in ESSENTIAL_ENV or not any(n in v for n in needles))
+    }
+
+
+class ShapeParser(argparse.ArgumentParser):
+    """An ``argparse.ArgumentParser`` for a shape's own CLI. Bad arguments are a config
+    error like any other the shape can hit — a missing ``--agent-cmd`` should exit 24 like
+    every other config problem, not argparse's own 2, so the runner and a human reading
+    exit codes see one config-error code everywhere."""
+
+    def error(self, message: str) -> NoReturn:
+        self.print_usage(sys.stderr)
+        self.exit(int(ShapeExit.CONFIG_ERROR), f"[trap] {self.prog}: {message}\n")
+
+
+def add_case_args(parser: argparse.ArgumentParser) -> None:
+    """The arguments every shape takes about its case."""
+    parser.add_argument("--prompt-file", default="question.txt", help="the case file holding the question")
+    parser.add_argument(
+        "--manifest-envvar", default="TRAP_MANIFEST", help="trap.yaml's manifest_envvar, if it changes it"
+    )
+    parser.add_argument(
+        "--deadline",
+        type=float,
+        default=570.0,
+        help="seconds this shape allows itself per case; keep it below trap.yaml's timeout",
+    )
+    parser.add_argument(
+        "--scrub",
+        action="append",
+        default=[],
+        type=Path,
+        metavar="PATH",
+        help="also drop env vars whose value names PATH (e.g. the task checkout); repeatable",
+    )
+
+
+def open_case(
+    args: argparse.Namespace, environ: Mapping[str, str] | None = None
+) -> tuple[CaseSandbox, dict[str, str]]:
+    """The case's sandbox and the environment its child may see."""
+    environ = os.environ if environ is None else environ
+    sandbox = CaseSandbox.open(
+        manifest_envvar=args.manifest_envvar, prompt_file=args.prompt_file, environ=environ
+    )
+    env = scrubbed_env(
+        environ, manifest_envvar=args.manifest_envvar, prefixes=[sandbox.inputs_dir.parent, *args.scrub]
+    )
+    return sandbox, env
+
+
+def kill_group(proc: subprocess.Popen, grace: float = 2.0) -> None:
+    """Take down ``proc`` and everything it started — it was spawned as a session leader,
+    so its pid is the group id. TERM, a moment to exit, then KILL whatever is left."""
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(proc.pid, sig)
+        except ProcessLookupError:
+            return
+        try:
+            proc.wait(timeout=grace)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def run_group(
+    argv: Sequence[str], *, cwd: Path, env: Mapping[str, str], stdin: str | None, deadline: Deadline
+) -> tuple[str, str, int]:
+    """Run ``argv`` in its own process group and collect its output. At the deadline the
+    group is killed and the exit code is TIMEOUT, with whatever output there was."""
+    proc = subprocess.Popen(
+        list(argv),
+        cwd=cwd,
+        env=dict(env),
+        stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        out, err = proc.communicate(input=stdin, timeout=deadline.remaining())
+    except subprocess.TimeoutExpired:
+        kill_group(proc)
+        try:
+            out, err = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            out, err = "", ""
+        return (
+            out or "",
+            (err or "") + "\n[trap] deadline reached; process group killed\n",
+            int(ShapeExit.TIMEOUT),
+        )
+    return out, err, proc.returncode
