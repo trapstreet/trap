@@ -418,3 +418,83 @@ def test_a_max_tokens_cutoff_with_no_text_prints_nothing(tmp_path, monkeypatch, 
     assert code == ShapeExit.MAX_TOKENS
     assert captured.out == ""
     assert "output ceiling" in captured.err
+
+
+# A --system-file that reads() but isn't valid text, an OpenAI-compatible reply whose
+# message.content isn't a plain string, and a reply shaped so unlike a real one that
+# parsing itself blows up: none of these may reach the caller as a bare traceback, and a
+# vendor's own refusal field must count as a refusal even when nothing else says so.
+
+
+def test_a_non_utf8_system_file_is_a_config_error_not_a_traceback(tmp_path, monkeypatch, capsys):
+    _case(tmp_path, monkeypatch, {"question.txt": "Q?"})
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    bad = tmp_path / "not-utf8.md"
+    bad.write_bytes(b"\xff\xfe not valid utf-8")
+    assert direct.main(["--model", "gpt-test", "--system-file", str(bad)]) == ShapeExit.CONFIG_ERROR
+    err = capsys.readouterr().err
+    assert err.startswith("[trap]") and "not-utf8.md" in err
+
+
+@pytest.mark.parametrize(
+    ("content", "text"),
+    [
+        ("plain string", "plain string"),
+        ([{"type": "thinking", "thinking": "hmm"}, {"type": "text", "text": "answer"}], "answer"),
+        (["raw chunk", {"type": "thinking", "thinking": "x"}], ""),
+        (None, ""),
+    ],
+)
+def test_openai_style_content_is_always_read_as_a_plain_string(content, text):
+    # Mistral's reasoning models (magistral-, routed to "mistral" by infer_provider) send
+    # message.content as a list of thinking/text parts rather than a plain string.
+    data = {"choices": [{"message": {"content": content}, "finish_reason": "stop"}], "usage": {}}
+    assert direct.parse_reply("mistral", data).text == text
+
+
+def test_an_openai_refusal_field_is_read_as_a_refusal():
+    data = {
+        "choices": [
+            {"message": {"content": None, "refusal": "I can't help with that."}, "finish_reason": "stop"}
+        ],
+        "usage": {},
+    }
+    assert direct.parse_reply("openai", data) == direct.Reply("I can't help with that.", "refusal", {})
+
+
+def test_an_openai_refusal_field_is_printed_and_exits_20(tmp_path, monkeypatch, capsys):
+    refusal = {
+        "choices": [
+            {"message": {"content": None, "refusal": "I can't help with that."}, "finish_reason": "stop"}
+        ],
+        "usage": {},
+    }
+    srv, url = _vendor(refusal)
+    try:
+        _case(tmp_path, monkeypatch, {"question.txt": "Q?"})
+        monkeypatch.setenv("OPENAI_API_KEY", "k")
+        monkeypatch.setenv("OPENAI_BASE_URL", url)
+        code = direct.main(["--model", "gpt-test"])
+    finally:
+        srv.shutdown()
+    captured = capsys.readouterr()
+    assert code == ShapeExit.REFUSAL
+    assert captured.out == "I can't help with that.\n"
+    assert "the model refused" in captured.err
+
+
+def test_a_reply_shaped_nothing_like_the_api_is_an_agent_error(tmp_path, monkeypatch, capsys):
+    # A 200 body whose "choices" entries are plain strings, not message objects — not
+    # anything a real vendor sends, but parse_reply must not let it become a traceback.
+    srv, url = _vendor({"choices": ["x"], "usage": {}})
+    try:
+        _case(tmp_path, monkeypatch, {"question.txt": "Q?"})
+        monkeypatch.setenv("OPENAI_API_KEY", "k")
+        monkeypatch.setenv("OPENAI_BASE_URL", url)
+        code = direct.main(["--model", "gpt-test"])
+    finally:
+        srv.shutdown()
+    captured = capsys.readouterr()
+    assert code == ShapeExit.AGENT_ERROR
+    assert captured.out == ""
+    assert "the reply was not in the expected format" in captured.err

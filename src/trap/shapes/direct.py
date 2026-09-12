@@ -105,8 +105,28 @@ def parse_reply(provider: str, data: dict[str, Any]) -> Reply:
         text = "".join(b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text")
         return Reply(text, data.get("stop_reason"), data.get("usage") or {})
     choice = (data.get("choices") or [{}])[0]
-    text = (choice.get("message") or {}).get("content") or ""
-    return Reply(text, choice.get("finish_reason"), data.get("usage") or {})
+    message = choice.get("message") or {}
+    usage = data.get("usage") or {}
+    refusal = message.get("refusal")
+    if isinstance(refusal, str) and refusal:
+        # OpenAI's own refusal field, not a stop reason: reported through the same
+        # "refusal" path exit_for already gives a vendor's stop_reason/finish_reason.
+        return Reply(refusal, "refusal", usage)
+    return Reply(_openai_text(message.get("content")), choice.get("finish_reason"), usage)
+
+
+def _openai_text(content: Any) -> str:
+    """An OpenAI-compatible message's visible text. Usually a plain string; a reasoning
+    model (Mistral's magistral-, say) can send a list of content parts instead, only some
+    of which are the answer. Anything else is not text at all, and must never reach
+    ``print()`` as a case's answer."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text"
+        )
+    return ""
 
 
 def exit_for(reply: Reply) -> tuple[ShapeExit, str | None]:
@@ -151,8 +171,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         if args.system_file:
             try:
-                system = args.system_file.read_text()
-            except OSError as e:
+                system = args.system_file.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as e:
                 raise ShapeError(
                     ShapeExit.CONFIG_ERROR, f"cannot read --system-file {args.system_file}: {e}"
                 ) from None
@@ -195,7 +215,10 @@ def _call(
         raise ShapeError(ShapeExit.AGENT_ERROR, "the reply was not JSON") from None
     if not isinstance(data, dict):
         raise ShapeError(ShapeExit.AGENT_ERROR, "the reply was not a JSON object")
-    return parse_reply(provider, data)
+    try:
+        return parse_reply(provider, data)
+    except (AttributeError, TypeError, IndexError):
+        raise ShapeError(ShapeExit.AGENT_ERROR, "the reply was not in the expected format") from None
 
 
 if __name__ == "__main__":
