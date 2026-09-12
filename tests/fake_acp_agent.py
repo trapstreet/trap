@@ -6,7 +6,9 @@ Not a test module: tests start it as a subprocess.
 ``garbage`` and ``stray`` exist only to drive lines of trap.shapes.acp.connection that
 no protocol-shaped conversation reaches on its own (a non-JSON stdout line, a JSON
 scalar, a response for an id nobody asked for, a message with neither ``method`` nor
-``id``) — coverage, not protocol behaviour."""
+``id``) — coverage, not protocol behaviour. ``permission_no_once``,
+``permission_none_offered``, ``null_chunk``, ``unknown_stop``, ``bad_session_new`` and
+``hang_handshake`` exist the same way, for trap.shapes.acp.session."""
 
 from __future__ import annotations
 
@@ -86,6 +88,14 @@ def config_options() -> list[dict]:
     ]
 
 
+def permission_prompt(rid: object, sid: str, options: list[dict]) -> None:
+    params = {"sessionId": sid, "toolCall": {"toolCallId": "t1", "title": "Run ls"}, "options": options}
+    send({"jsonrpc": "2.0", "id": "perm-1", "method": "session/request_permission", "params": params})
+    log({"permission_reply": read()})
+    say(sid, "perm-ok", "m1")
+    result(rid, {"stopReason": "end_turn", "usage": USAGE})
+
+
 def prompt(rid: object, sid: str) -> None:
     if MODE in ("ok", "garbage", "stray"):
         say(sid, "Let me read the file first.", "m1")
@@ -130,22 +140,40 @@ def prompt(rid: object, sid: str) -> None:
         say(sid, "I can't help with that.", "m1")
         result(rid, {"stopReason": "refusal", "usage": USAGE})
     elif MODE == "permission":
-        options = [
-            {"optionId": "always", "name": "Always", "kind": "allow_always"},
-            {"optionId": "once", "name": "Once", "kind": "allow_once"},
-            {"optionId": "no", "name": "No", "kind": "reject_once"},
-        ]
-        params = {"sessionId": sid, "toolCall": {"toolCallId": "t1", "title": "Run ls"}, "options": options}
-        send({"jsonrpc": "2.0", "id": "perm-1", "method": "session/request_permission", "params": params})
-        log({"permission_reply": read()})
-        say(sid, "perm-ok", "m1")
-        result(rid, {"stopReason": "end_turn", "usage": USAGE})
+        permission_prompt(
+            rid,
+            sid,
+            [
+                {"optionId": "always", "name": "Always", "kind": "allow_always"},
+                {"optionId": "once", "name": "Once", "kind": "allow_once"},
+                {"optionId": "no", "name": "No", "kind": "reject_once"},
+            ],
+        )
+    elif MODE == "permission_no_once":
+        permission_prompt(
+            rid,
+            sid,
+            [
+                {"optionId": "always", "name": "Always", "kind": "allow_always"},
+                {"optionId": "no", "name": "No", "kind": "reject_once"},
+            ],
+        )
+    elif MODE == "permission_none_offered":
+        permission_prompt(rid, sid, [{"optionId": "always", "name": "Always", "kind": "allow_always"}])
     elif MODE in ("hang", "hang_hard"):
         say(sid, "partial", "m1")
         PENDING["prompt"] = rid
     elif MODE == "crash":
         say(sid, "about to crash", "m1")
         sys.exit(3)
+    elif MODE == "null_chunk":
+        # A chunk whose content.text is null: malformed, and must fail the case promptly
+        # rather than being silently swallowed or hanging until the deadline.
+        update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": None}})
+        result(rid, {"stopReason": "end_turn", "usage": USAGE})
+    elif MODE == "unknown_stop":
+        say(sid, "done, sort of", "m1")
+        result(rid, {"stopReason": "something_else", "usage": USAGE})
 
 
 def main() -> None:
@@ -170,7 +198,18 @@ def main() -> None:
         if method == "initialize":
             result(rid, {"protocolVersion": 1, "agentCapabilities": {}, "authMethods": []})
         elif method == "session/new":
-            result(rid, {"sessionId": "s1", "configOptions": config_options()})
+            if MODE == "hang_handshake":
+                pass  # never respond; the caller must hit its own deadline
+            elif MODE == "bad_session_new":
+                send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": rid,
+                        "error": {"code": -32001, "message": "cannot create session"},
+                    }
+                )
+            else:
+                result(rid, {"sessionId": "s1", "configOptions": config_options()})
         elif method == "session/set_config_option":
             oid, value = params.get("configId"), params.get("value")
             allowed = {o["id"]: [v["value"] for v in o["options"]] for o in config_options()}
