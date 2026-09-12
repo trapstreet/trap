@@ -59,6 +59,14 @@ def shape_cmd(ctx: typer.Context) -> None:
     raise typer.Exit(code=main(ctx.args))
 
 
+@shape_app.command("acp", context_settings=_PASSTHROUGH)
+def shape_acp(ctx: typer.Context) -> None:
+    """Drive an ACP agent (Claude Code, Codex, Gemini CLI, ...) for one case."""
+    from trap.shapes.acp.bridge import main
+
+    raise typer.Exit(code=main(ctx.args))
+
+
 def _version_callback(value: bool) -> None:
     if value:
         console.print(f"tp {__version__}")

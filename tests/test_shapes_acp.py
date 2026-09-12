@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import time
 from pathlib import Path
 
 import pytest
 
-from trap.shapes._case import Deadline, ShapeExit
+from trap.cli import app
+from trap.shapes._case import Deadline, ShapeError, ShapeExit
+from trap.shapes.acp import bridge, hints
 from trap.shapes.acp.connection import AGENT_EXITED, AcpConnection, AcpError
 from trap.shapes.acp.session import (
     ConfigMismatch,
@@ -23,7 +26,7 @@ from trap.shapes.acp.session import (
     run_case,
 )
 
-from .conftest import PY, process_gone
+from .conftest import JUDGE_SCORE, PY, case_capture, process_gone
 
 FAKE = Path(__file__).with_name("fake_acp_agent.py")
 AGENT = [PY, str(FAKE)]
@@ -711,3 +714,334 @@ def test_apply_config_raises_when_the_agent_has_no_model_option_at_all():
     with pytest.raises(ConfigMismatch) as e:
         apply_config(_Conn(), "s1", no_model, model="haiku", options={}, timeout=5)
     assert "offers no model option" in str(e.value)
+
+
+# --- what tp knows about particular agents (hints.py) -----------------------------------
+
+
+def test_claude_is_kept_away_from_the_runners_own_settings():
+    assert hints.session_meta("claude-acp") == {"claudeCode": {"options": {"settingSources": ["project"]}}}
+    assert hints.session_meta("codex-acp") is None
+    assert hints.session_meta(None) is None
+
+
+@pytest.mark.parametrize(
+    ("auth", "key", "proxied"),
+    [
+        ({"auth_mode": "chatgpt"}, "sk", False),
+        ({"auth_mode": "apikey"}, None, True),
+        (None, "sk", True),
+        (None, None, False),
+    ],
+)
+def test_codex_is_pointed_at_the_proxy_only_under_an_api_key_login(tmp_path, auth, key, proxied):
+    auth_file = tmp_path / "auth.json"
+    if auth is not None:
+        auth_file.write_text(json.dumps(auth))
+    env = {"OPENAI_BASE_URL": "http://127.0.0.1:9", **({"OPENAI_API_KEY": key} if key else {})}
+    got = hints.extra_env("codex-acp", env, codex_auth=auth_file)
+    expected = {"CODEX_CONFIG": json.dumps({"openai_base_url": "http://127.0.0.1:9"})} if proxied else {}
+    assert got == expected
+    assert hints.extra_env("claude-acp", env, codex_auth=auth_file) == {}
+
+
+def test_a_skill_goes_where_claude_loads_project_skills(tmp_path):
+    skill = tmp_path / "my-skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("---\nname: my-skill\n---\n")
+    work = tmp_path / "work"
+    work.mkdir()
+    hints.install_skill("claude-acp", skill, work)
+    assert (work / ".claude" / "skills" / "my-skill" / "SKILL.md").is_file()
+    with pytest.raises(ShapeError):
+        hints.install_skill("codex-acp", skill, work)
+
+
+def test_install_skill_requires_a_skill_md(tmp_path):
+    skill = tmp_path / "empty-skill"
+    skill.mkdir()
+    work = tmp_path / "work"
+    work.mkdir()
+    with pytest.raises(ShapeError) as e:
+        hints.install_skill("claude-acp", skill, work)
+    assert "SKILL.md" in str(e.value)
+
+
+# --- tp shape acp: end to end, the way a trap.yaml `cmd:` line actually runs it ---------
+
+
+def _bridge_cmd(*extra: str) -> str:
+    return shlex.join(
+        [
+            PY,
+            "-m",
+            "trap.shapes.acp",
+            "--agent-cmd",
+            shlex.join(AGENT),
+            "--model",
+            "haiku",
+            "--deadline",
+            "30",
+            *extra,
+        ]
+    )
+
+
+def test_the_bridge_is_a_solution_like_any_other(make_project, runner, fake, tmp_path, monkeypatch):
+    log = fake("ok")
+    monkeypatch.setenv("POINTER", str(tmp_path / "task"))
+    sol = make_project(
+        cmd=_bridge_cmd("--scrub", str(tmp_path / "task")),
+        inputs={"c1": {"question.txt": "what is 6*7?", "notes.txt": "n"}},
+        expected={"c1": {"answer.txt": "42"}},
+        judge_src=JUDGE_SCORE,
+    )
+    res = runner.invoke(app, ["run", "--task", "t", "--no-environment"])
+    assert res.exit_code == 0, res.output
+    out, meta = case_capture(sol)
+    assert (out.strip(), meta["exit_code"]) == ("42", 0)
+    start = next(e for e in _log(log) if "cwd" in e)
+    assert not Path(start["cwd"]).is_relative_to(tmp_path.resolve())
+    assert start["files"] == ["notes.txt", "question.txt"]
+    assert "TRAP_MANIFEST" not in start["env"] and "POINTER" not in start["env"]
+    stderr = (next((sol / ".trap").rglob("c1/solution/stderr"))).read_text()
+    assert "agent config: effort=default, model=haiku" in stderr
+    report = json.loads(next((sol / ".trap").rglob("report.json")).read_text())
+    assert report["cases_results"][0]["metrics"] == {"score": 1.0}
+
+
+def test_a_turn_that_is_not_an_answer_leaves_stdout_empty(make_project, runner, fake):
+    fake("no_model_use")
+    sol = make_project(cmd=_bridge_cmd(), inputs={"c1": {"question.txt": "q"}})
+    res = runner.invoke(app, ["run", "--task", "t", "--no-environment"])
+    assert res.exit_code == 0, res.output
+    out, meta = case_capture(sol)
+    assert (out, meta["exit_code"]) == ("", ShapeExit.AGENT_ERROR)
+
+
+def test_tp_shape_acp_describe_prints_the_values_model_accepts(runner, fake):
+    fake("ok")
+    res = runner.invoke(app, ["shape", "acp", "--agent-cmd", shlex.join(AGENT), "--describe"])
+    assert res.exit_code == 0, res.output
+    options = json.loads(res.stdout)
+    assert options[0] == {
+        "id": "model",
+        "category": "model",
+        "current": "default",
+        "values": ["default", "sonnet", "haiku"],
+    }
+
+
+def test_tp_shape_acp_without_a_model_says_where_to_find_one(runner):
+    res = runner.invoke(app, ["shape", "acp", "--agent-cmd", shlex.join(AGENT)])
+    assert res.exit_code == ShapeExit.CONFIG_ERROR
+    assert "--describe" in res.stderr
+
+
+def test_a_missing_agent_cmd_exits_24(runner):
+    res = runner.invoke(app, ["shape", "acp"])
+    assert res.exit_code == ShapeExit.CONFIG_ERROR
+    assert "--agent-cmd" in res.stderr
+
+
+def test_an_empty_agent_cmd_is_a_config_error(runner):
+    res = runner.invoke(app, ["shape", "acp", "--agent-cmd", "   "])
+    assert res.exit_code == ShapeExit.CONFIG_ERROR
+    assert "cannot parse --agent-cmd" in res.stderr
+
+
+# --- coverage: bridge.main run in-process, against a case built under tmp_path ----------
+#
+# The tests above run the bridge only inside `tp run` subprocesses (a real `tp shape acp`
+# or `python -m trap.shapes.acp` child), which pytest-cov cannot see. These call main()
+# directly, with TRAP_MANIFEST set via monkeypatch to a manifest for a case built under
+# tmp_path — the pattern tests/test_shapes_case.py uses for CaseSandbox.
+
+
+def _case_dir(tmp_path: Path, files: dict[str, str]) -> Path:
+    case = tmp_path / "task" / "inputs" / "c1"
+    for name, text in files.items():
+        (case / name).parent.mkdir(parents=True, exist_ok=True)
+        (case / name).write_text(text)
+    case.mkdir(parents=True, exist_ok=True)
+    return case
+
+
+def _set_manifest(monkeypatch: pytest.MonkeyPatch, case: Path) -> None:
+    monkeypatch.setenv("TRAP_MANIFEST", json.dumps({"inputs_dir": str(case), "outputs_dir": "/nowhere"}))
+
+
+def test_a_non_executable_agent_is_a_config_error(tmp_path, monkeypatch, capsys):
+    case = _case_dir(tmp_path, {"question.txt": "q"})
+    _set_manifest(monkeypatch, case)
+    agent_path = tmp_path / "not-executable"
+    agent_path.write_text("#!/bin/sh\necho hi\n")
+    agent_path.chmod(0o644)
+    code = bridge.main(["--agent-cmd", str(agent_path), "--model", "haiku", "--deadline", "5"])
+    assert code == ShapeExit.CONFIG_ERROR
+    assert "cannot start the agent" in capsys.readouterr().err
+
+
+def test_describe_with_a_broken_agent_command_is_a_config_error(tmp_path, capsys):
+    agent_path = tmp_path / "not-executable"
+    agent_path.write_text("#!/bin/sh\n")
+    agent_path.chmod(0o644)
+    code = bridge.main(["--agent-cmd", str(agent_path), "--describe"])
+    assert code == ShapeExit.CONFIG_ERROR
+    assert "cannot start the agent" in capsys.readouterr().err
+
+
+def test_describe_reports_a_broken_handshake_as_agent_error(fake, capsys):
+    fake("bad_session_new")
+    code = bridge.main(["--agent-cmd", shlex.join(AGENT), "--describe"])
+    assert code == ShapeExit.AGENT_ERROR
+    assert "could not open a session" in capsys.readouterr().err
+
+
+def test_a_malformed_option_is_a_config_error(capsys):
+    code = bridge.main(["--agent-cmd", shlex.join(AGENT), "--model", "haiku", "--option", "bad"])
+    assert code == ShapeExit.CONFIG_ERROR
+    assert "ID=VALUE" in capsys.readouterr().err
+
+
+def test_bridge_prints_nothing_when_the_turn_is_not_an_answer(fake, tmp_path, monkeypatch, capsys):
+    fake("no_model_use")
+    case = _case_dir(tmp_path, {"question.txt": "q"})
+    _set_manifest(monkeypatch, case)
+    code = bridge.main(["--agent-cmd", shlex.join(AGENT), "--model", "haiku", "--deadline", "20"])
+    assert code == ShapeExit.AGENT_ERROR
+    assert capsys.readouterr().out == ""
+
+
+def test_bridge_gives_claude_acp_its_meta(fake, tmp_path, monkeypatch):
+    log = fake("ok")
+    case = _case_dir(tmp_path, {"question.txt": "q"})
+    _set_manifest(monkeypatch, case)
+    code = bridge.main(
+        ["--agent-cmd", shlex.join(AGENT), "--agent-id", "claude-acp", "--model", "haiku", "--deadline", "20"]
+    )
+    assert code == ShapeExit.OK
+    new = _sent(log, "session/new")[0]["params"]
+    assert new["_meta"] == {"claudeCode": {"options": {"settingSources": ["project"]}}}
+
+
+def test_bridge_omits_meta_for_an_agent_with_no_hints(fake, tmp_path, monkeypatch):
+    log = fake("ok")
+    case = _case_dir(tmp_path, {"question.txt": "q"})
+    _set_manifest(monkeypatch, case)
+    code = bridge.main(["--agent-cmd", shlex.join(AGENT), "--model", "haiku", "--deadline", "20"])
+    assert code == ShapeExit.OK
+    new = _sent(log, "session/new")[0]["params"]
+    assert "_meta" not in new
+
+
+def test_bridge_installs_a_skill_for_claude_acp(fake, tmp_path, monkeypatch):
+    log = fake("ok")
+    case = _case_dir(tmp_path, {"question.txt": "q"})
+    _set_manifest(monkeypatch, case)
+    skill = tmp_path / "my-skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("hello skill")
+    code = bridge.main(
+        [
+            "--agent-cmd",
+            shlex.join(AGENT),
+            "--agent-id",
+            "claude-acp",
+            "--model",
+            "haiku",
+            "--skill",
+            str(skill),
+            "--deadline",
+            "20",
+        ]
+    )
+    assert code == ShapeExit.OK
+    # The case's sandbox (the agent's cwd) is gone by the time main() returns — sandbox.close()
+    # runs before this assertion — so what the agent saw at startup is only in its own log.
+    start = next(e for e in _log(log) if "cwd" in e)
+    assert ".claude" in start["files"]
+
+
+def test_bridge_refuses_a_skill_for_an_unsupported_agent(fake, tmp_path, monkeypatch, capsys):
+    fake("ok")
+    case = _case_dir(tmp_path, {"question.txt": "q"})
+    _set_manifest(monkeypatch, case)
+    skill = tmp_path / "my-skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("hi")
+    code = bridge.main(
+        [
+            "--agent-cmd",
+            shlex.join(AGENT),
+            "--agent-id",
+            "codex-acp",
+            "--model",
+            "haiku",
+            "--skill",
+            str(skill),
+            "--deadline",
+            "20",
+        ]
+    )
+    assert code == ShapeExit.CONFIG_ERROR
+    assert "installing a skill is supported for" in capsys.readouterr().err
+
+
+def test_bridge_sets_a_named_option(fake, tmp_path, monkeypatch):
+    log = fake("ok")
+    case = _case_dir(tmp_path, {"question.txt": "q"})
+    _set_manifest(monkeypatch, case)
+    code = bridge.main(
+        ["--agent-cmd", shlex.join(AGENT), "--model", "haiku", "--option", "effort=high", "--deadline", "20"]
+    )
+    assert code == ShapeExit.OK
+    sets = [(m["params"]["configId"], m["params"]["value"]) for m in _sent(log, "session/set_config_option")]
+    assert ("effort", "high") in sets
+
+
+def test_bridge_points_codex_at_the_proxy_under_an_api_key_login(fake, tmp_path, monkeypatch):
+    log = fake("ok")
+    case = _case_dir(tmp_path, {"question.txt": "q"})
+    _set_manifest(monkeypatch, case)
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_text(json.dumps({"auth_mode": "apikey"}))
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:9")
+    code = bridge.main(
+        ["--agent-cmd", shlex.join(AGENT), "--agent-id", "codex-acp", "--model", "haiku", "--deadline", "20"]
+    )
+    assert code == ShapeExit.OK
+    start = next(e for e in _log(log) if "cwd" in e)
+    assert "CODEX_CONFIG" in start["env"]
+
+
+def test_bridge_does_not_point_codex_at_the_proxy_under_a_chatgpt_login(fake, tmp_path, monkeypatch):
+    log = fake("ok")
+    case = _case_dir(tmp_path, {"question.txt": "q"})
+    _set_manifest(monkeypatch, case)
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_text(json.dumps({"auth_mode": "chatgpt"}))
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:9")
+    code = bridge.main(
+        ["--agent-cmd", shlex.join(AGENT), "--agent-id", "codex-acp", "--model", "haiku", "--deadline", "20"]
+    )
+    assert code == ShapeExit.OK
+    start = next(e for e in _log(log) if "cwd" in e)
+    assert "CODEX_CONFIG" not in start["env"]
+
+
+def test_describe_does_not_leak_the_manifest(fake, monkeypatch):
+    log = fake("ok")
+    monkeypatch.setenv("TRAP_MANIFEST", json.dumps({"inputs_dir": "/somewhere", "outputs_dir": "/nowhere"}))
+    code = bridge.main(["--agent-cmd", shlex.join(AGENT), "--describe"])
+    assert code == 0
+    start = next(e for e in _log(log) if "cwd" in e)
+    assert "TRAP_MANIFEST" not in start["env"]
+
+
+def test_acp_main_module_imports_cleanly():
+    import trap.shapes.acp.__main__  # noqa: F401
