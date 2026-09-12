@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import signal
+import subprocess
 import time
 from pathlib import Path
 
@@ -27,7 +29,18 @@ from trap.shapes.acp.session import (
     run_case,
 )
 
-from .conftest import JUDGE_SCORE, PY, case_capture, process_gone
+from .conftest import (
+    INTERRUPTS,
+    JUDGE_SCORE,
+    PY,
+    case_capture,
+    process_gone,
+    reap,
+    signal_main_thread_when,
+    wait_until,
+)
+
+pytestmark = pytest.mark.usefixtures("signal_handlers_unchanged")
 
 FAKE = Path(__file__).with_name("fake_acp_agent.py")
 AGENT = [PY, str(FAKE)]
@@ -1131,3 +1144,92 @@ def test_describe_does_not_leak_the_manifest(fake, monkeypatch):
 
 def test_acp_main_module_imports_cleanly():
     import trap.shapes.acp.__main__  # noqa: F401
+
+
+# --- an interrupt takes the agent's whole group down before the shape goes -------------
+#
+# hang_hard ignores SIGTERM and starts a child of its own: only a SIGKILL to the group,
+# sent at once, takes both down inside the 0.25 s the runner gives a shape after Ctrl-C.
+
+
+def _started(log: Path) -> tuple[int, int, Path]:
+    """The hang_hard agent's pid, its child's pid, and its cwd (the case's work dir)."""
+    entries = _log(log)
+    start = next(e for e in entries if "cwd" in e)
+    child = next(e["child_pid"] for e in entries if "child_pid" in e)
+    return start["pid"], child, Path(start["cwd"])
+
+
+def test_an_interrupted_acp_case_takes_the_agent_its_child_and_the_work_dir_down(fake, tmp_path):
+    log = fake("hang_hard")
+    case = _case_dir(tmp_path, {"question.txt": "q"})
+    env = {**os.environ, "TRAP_MANIFEST": json.dumps({"inputs_dir": str(case), "outputs_dir": "/nowhere"})}
+    shape = subprocess.Popen(
+        [
+            PY,
+            "-m",
+            "trap.shapes.acp",
+            "--agent-cmd",
+            shlex.join(AGENT),
+            "--model",
+            "haiku",
+            "--deadline",
+            "30",
+        ],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert wait_until(lambda: _sent(log, "session/prompt")), "the question never reached the agent"
+        agent, child, workdir = _started(log)
+        shape.send_signal(signal.SIGINT)
+        _, err = shape.communicate(timeout=5)
+        assert process_gone(agent, timeout=1.0), "the agent outlived the shape"
+        assert process_gone(child, timeout=1.0), "the agent's child outlived the shape"
+    finally:
+        shape.kill()
+        for pid in [e.get("pid") or e.get("child_pid") for e in _log(log)]:
+            if pid:
+                reap(pid)
+    assert shape.returncode == 128 + signal.SIGINT
+    assert not workdir.exists(), "the work directory was left behind"
+    assert "Traceback" not in err
+
+
+def test_an_interrupt_in_process_kills_the_agent_group_and_puts_the_handlers_back(
+    fake, tmp_path, monkeypatch, stray_signals
+):
+    log = fake("hang_hard")
+    case = _case_dir(tmp_path, {"question.txt": "q"})
+    _set_manifest(monkeypatch, case)
+    signal_main_thread_when(lambda: _sent(log, "session/prompt"), signal.SIGINT)
+    try:
+        with pytest.raises(SystemExit) as e:
+            bridge.main(["--agent-cmd", shlex.join(AGENT), "--model", "haiku", "--deadline", "30"])
+        agent, child, workdir = _started(log)
+        assert e.value.code == 128 + signal.SIGINT
+        assert process_gone(agent, timeout=1.0) and process_gone(child, timeout=1.0)
+        assert not workdir.exists()
+    finally:
+        for pid in [e.get("pid") or e.get("child_pid") for e in _log(log)]:
+            if pid:
+                reap(pid)
+    assert all(signal.getsignal(s) is stray_signals for s in INTERRUPTS), "the old handlers were not put back"
+
+
+def test_an_interrupted_describe_kills_the_agent_group(fake, stray_signals):
+    log = fake("hang_handshake")
+    signal_main_thread_when(lambda: _sent(log, "session/new"), signal.SIGTERM)
+    try:
+        with pytest.raises(SystemExit) as e:
+            bridge.main(["--agent-cmd", shlex.join(AGENT), "--describe"])
+        start = next(e for e in _log(log) if "cwd" in e)
+        assert e.value.code == 128 + signal.SIGTERM
+        assert process_gone(start["pid"], timeout=1.0)
+        assert not Path(start["cwd"]).exists()
+    finally:
+        for pid in [e.get("pid") for e in _log(log)]:
+            if pid:
+                reap(pid)

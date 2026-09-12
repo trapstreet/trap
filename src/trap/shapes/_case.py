@@ -16,11 +16,14 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import IntEnum
 from pathlib import Path
+from types import FrameType
 from typing import NoReturn
 
 
@@ -204,18 +207,59 @@ def open_case(
     return sandbox, env
 
 
+def kill_now(pgid: int) -> None:
+    """SIGKILL the process group ``pgid`` at once: one system call and no waiting, so it
+    is fit for a signal handler. A group already gone needs nothing — nor one left with
+    only unreaped children, which macOS refuses to signal (EPERM)."""
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
 def kill_group(proc: subprocess.Popen, grace: float = 2.0) -> None:
     """Take down ``proc`` and everything it started — it was spawned as a session leader,
     so its pid is the group id. TERM, a moment to exit, then KILL whatever is left."""
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
             os.killpg(proc.pid, sig)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):  # gone, or only unreaped (see kill_now)
             return
         try:
             proc.wait(timeout=grace)
         except subprocess.TimeoutExpired:
             pass
+
+
+@contextmanager
+def kill_on_interrupt(pgid: int) -> Iterator[None]:
+    """While the body runs, SIGINT or SIGTERM SIGKILLs process group ``pgid`` right away
+    and then ends the shape with ``SystemExit(128 + signal)``.
+
+    Right away, in the handler, because nothing else would: the group runs in its own
+    session, so the terminal's Ctrl-C never reaches it, and under ``tp run`` the runner
+    SIGKILLs the shape itself 0.25 s after a Ctrl-C — too soon for kill_group's grace
+    period. SystemExit, because it still runs every ``finally`` on the way out (the work
+    directory's removal among them) and ends the process with the status a shell reports
+    for the signal, without a traceback.
+
+    Only the main thread can own signal handlers; anywhere else this does nothing. The
+    handlers it replaced come back when the body ends, however it ends."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def on_interrupt(signum: int, frame: FrameType | None) -> NoReturn:
+        kill_now(pgid)
+        raise SystemExit(128 + signum)
+
+    previous = {sig: signal.signal(sig, on_interrupt) for sig in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        yield
+    finally:
+        for sig, handler in previous.items():
+            # None: the old handler was not set from Python and cannot be put back as it was.
+            signal.signal(sig, handler if handler is not None else signal.SIG_DFL)
 
 
 def run_group(
@@ -238,17 +282,24 @@ def run_group(
         errors="replace",
         start_new_session=True,
     )
-    try:
-        out, err = proc.communicate(input=stdin, timeout=deadline.remaining())
-    except subprocess.TimeoutExpired:
-        kill_group(proc)
+    with kill_on_interrupt(proc.pid):
         try:
-            out, err = proc.communicate(timeout=5)
+            out, err = proc.communicate(input=stdin, timeout=deadline.remaining())
         except subprocess.TimeoutExpired:
-            out, err = "", ""
-        return (
-            out or "",
-            (err or "") + "\n[trap] deadline reached; process group killed\n",
-            int(ShapeExit.TIMEOUT),
-        )
+            kill_group(proc)
+            try:
+                out, err = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                out, err = "", ""
+            return (
+                out or "",
+                (err or "") + "\n[trap] deadline reached; process group killed\n",
+                int(ShapeExit.TIMEOUT),
+            )
+        except BaseException:
+            # An interrupt, or anything else unwinding through here: no one will read the
+            # output, so the group goes at once rather than after kill_group's grace.
+            kill_now(proc.pid)
+            proc.wait()
+            raise
     return out, err, proc.returncode

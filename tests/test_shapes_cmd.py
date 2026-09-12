@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import shutil
 import signal
+import subprocess
 import sys
 from pathlib import Path
 
@@ -15,7 +17,19 @@ from trap.cli import app
 from trap.shapes._case import ShapeError, ShapeExit
 from trap.shapes.command import expand, main
 
-from .conftest import JUDGE_SCORE, PY, case_capture
+from .conftest import (
+    INTERRUPTS,
+    JUDGE_SCORE,
+    PY,
+    case_capture,
+    process_gone,
+    reap,
+    signal_main_thread_when,
+    sleeper,
+    wait_until,
+)
+
+pytestmark = pytest.mark.usefixtures("signal_handlers_unchanged")
 
 TOOL = """
 import os, sys
@@ -249,6 +263,48 @@ def test_main_relays_output_that_is_not_utf8_instead_of_crashing(tmp_path, monke
     code = main(["--template", f"{PY} {program}", "--deadline", "30"])
     assert code == 0
     assert capsys.readouterr().out.startswith("ok ")
+
+
+@pytest.mark.parametrize("sig", INTERRUPTS)
+def test_an_interrupted_cmd_takes_its_program_and_its_work_dir_down(tmp_path, sig):
+    case = _case_dir(tmp_path, {"question.txt": "hi"})
+    pidfile, cwdfile = tmp_path / "pid", tmp_path / "cwd"
+    program = shlex.join(["sh", "-c", f"pwd > {cwdfile}; " + sleeper(pidfile)[2]])
+    env = {**os.environ, "TRAP_MANIFEST": json.dumps({"inputs_dir": str(case), "outputs_dir": "/nowhere"})}
+    shape = subprocess.Popen(
+        [PY, "-m", "trap.shapes.command", "--template", program, "--deadline", "30"],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert wait_until(pidfile.exists), "the program never started"
+        shape.send_signal(sig)
+        _, err = shape.communicate(timeout=5)
+        assert process_gone(int(pidfile.read_text()), timeout=1.0), "the program outlived the shape"
+    finally:
+        shape.kill()
+        if pidfile.exists():
+            reap(int(pidfile.read_text()))
+    assert shape.returncode == 128 + sig
+    assert not Path(cwdfile.read_text().strip()).exists(), "the work directory was left behind"
+    assert "Traceback" not in err
+
+
+def test_tp_shape_cmd_exits_130_on_ctrl_c(runner, tmp_path, monkeypatch, stray_signals):
+    case = _case_dir(tmp_path, {"question.txt": "hi"})
+    _set_manifest(monkeypatch, case)
+    pidfile = tmp_path / "pid"
+    signal_main_thread_when(pidfile.exists, signal.SIGINT)
+    try:
+        res = runner.invoke(
+            app, ["shape", "cmd", "--template", shlex.join(sleeper(pidfile)), "--deadline", "30"]
+        )
+        assert res.exit_code == 128 + signal.SIGINT
+        assert process_gone(int(pidfile.read_text()), timeout=1.0)
+    finally:
+        reap(int(pidfile.read_text()))
 
 
 def test_main_reports_a_bad_template_as_a_config_error_in_process(tmp_path, monkeypatch, capsys):

@@ -6,9 +6,11 @@ import argparse
 import json
 import locale
 import os
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -23,12 +25,15 @@ from trap.shapes._case import (
     add_case_args,
     fail,
     kill_group,
+    kill_now,
     open_case,
     run_group,
     scrubbed_env,
 )
 
-from .conftest import process_gone
+from .conftest import INTERRUPTS, process_gone, reap, signal_main_thread_when, sleeper, wait_until
+
+pytestmark = pytest.mark.usefixtures("signal_handlers_unchanged")
 
 
 def _case(tmp_path: Path, files: dict[str, str]) -> Path:
@@ -309,3 +314,75 @@ def test_run_group_gives_up_if_the_kill_never_frees_the_pipes(monkeypatch, tmp_p
     assert out == ""
     assert err == "\n[trap] deadline reached; process group killed\n"
     assert code == ShapeExit.TIMEOUT
+
+
+# --- an interrupt takes the child's whole group down before the shape goes -------------
+#
+# The child runs in its own session, so the terminal's Ctrl-C never reaches it, and under
+# tp run the runner SIGKILLs the shape 0.25 s after that Ctrl-C: whatever the shape does
+# about its child must happen at once, in the signal handler.
+
+
+@pytest.mark.parametrize("sig", INTERRUPTS)
+def test_an_interrupt_kills_the_group_at_once_and_exits_128_plus_the_signal(tmp_path, stray_signals, sig):
+    pidfile = tmp_path / "pid"
+    signal_main_thread_when(pidfile.exists, sig)
+    try:
+        with pytest.raises(SystemExit) as e:
+            run_group(sleeper(pidfile), cwd=tmp_path, env=os.environ, stdin=None, deadline=Deadline(20))
+        assert e.value.code == 128 + sig
+        assert process_gone(int(pidfile.read_text()), timeout=1.0), "the grandchild outlived the interrupt"
+    finally:
+        reap(int(pidfile.read_text()))
+    assert all(signal.getsignal(s) is stray_signals for s in INTERRUPTS), "the old handlers were not put back"
+
+
+def test_run_group_kills_the_group_whatever_exception_stops_it(tmp_path, monkeypatch):
+    pidfile = tmp_path / "pid"
+
+    def interrupted(self, input=None, timeout=None):
+        assert wait_until(pidfile.exists)
+        raise KeyboardInterrupt  # not from a signal: the handler never ran, run_group must still kill
+
+    monkeypatch.setattr(subprocess.Popen, "communicate", interrupted)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            run_group(sleeper(pidfile), cwd=tmp_path, env=os.environ, stdin=None, deadline=Deadline(20))
+        assert process_gone(int(pidfile.read_text()), timeout=1.0)
+    finally:
+        reap(int(pidfile.read_text()))
+
+
+def test_off_the_main_thread_run_group_leaves_signal_handlers_alone(tmp_path):
+    seen: dict[str, object] = {}
+
+    def work() -> None:
+        seen["result"] = run_group(
+            ["sh", "-c", "echo hi"], cwd=tmp_path, env=os.environ, stdin=None, deadline=Deadline(10)
+        )
+
+    before = {s: signal.getsignal(s) for s in INTERRUPTS}
+    worker = threading.Thread(target=work)
+    worker.start()
+    worker.join(timeout=10)
+    assert seen["result"] == ("hi\n", "", 0)
+    assert {s: signal.getsignal(s) for s in INTERRUPTS} == before
+
+
+def test_kill_group_tolerates_a_group_with_only_an_unreaped_child_left(tmp_path):
+    proc = subprocess.Popen(["sh", "-c", "exit 0"], cwd=tmp_path, start_new_session=True)
+    assert wait_until(lambda: _is_zombie(proc.pid))
+    kill_group(proc)  # macOS refuses to signal a zombie-only group with EPERM; that is "gone" too
+    proc.wait(timeout=5)
+
+
+def test_kill_now_is_a_noop_once_the_group_is_gone(tmp_path):
+    proc = subprocess.Popen(["sh", "-c", "exit 0"], cwd=tmp_path, start_new_session=True)
+    proc.wait()
+    kill_now(proc.pid)
+
+
+def _is_zombie(pid: int) -> bool:
+    """True once ``pid`` has exited but has not been waited for."""
+    state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout
+    return state.strip().startswith("Z")

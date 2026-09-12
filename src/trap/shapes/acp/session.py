@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from trap.shapes._case import Deadline, ShapeExit
+from trap.shapes._case import Deadline, ShapeExit, kill_on_interrupt
 from trap.shapes.acp.connection import AcpConnection, AcpError
 
 PROTOCOL_VERSION = 1
@@ -249,18 +249,20 @@ def run_case(
     cancel_grace: float = CANCEL_GRACE,
 ) -> CaseOutcome:
     """Start the agent in ``workdir``, ask ``question`` once, and return its last message
-    with the exit code the turn earned. The agent's process group is gone on return."""
+    with the exit code the turn earned. The agent's process group is gone on return — and
+    on an interrupt, before the shape exits."""
     notes: list[str] = []
     collector = MessageCollector()
     conn = AcpConnection(
         argv, env=env, cwd=workdir, on_update=collector.on_update, on_request=grant_once(notes)
     )
-    try:
-        outcome = _converse(
-            conn, collector, notes, workdir, question, model, options, meta, deadline, cancel_grace
-        )
-    finally:
-        conn.close()
+    with kill_on_interrupt(conn.pid):
+        try:
+            outcome = _converse(
+                conn, collector, notes, workdir, question, model, options, meta, deadline, cancel_grace
+            )
+        finally:
+            conn.close()
     if collector.cost is not None:
         outcome.notes.append(f"agent self-reported session cost: {collector.cost}")
     return outcome
@@ -348,10 +350,11 @@ def describe_agent(
     """The agent's config options — what ``--model`` and ``--option`` may say. Opens a
     session and closes it without asking anything, so it costs no tokens."""
     conn = AcpConnection(argv, env=env, cwd=cwd, on_update=lambda update: None, on_request=grant_once([]))
-    try:
-        session = _open_session(conn, workdir=cwd, meta=meta, timeout=timeout)
-    finally:
-        conn.close()
+    with kill_on_interrupt(conn.pid):
+        try:
+            session = _open_session(conn, workdir=cwd, meta=meta, timeout=timeout)
+        finally:
+            conn.close()
     return [
         {
             "id": o.get("id"),

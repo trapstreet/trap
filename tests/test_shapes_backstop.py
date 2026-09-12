@@ -23,6 +23,8 @@ from trap.shapes.acp import bridge
 
 from .conftest import PY
 
+pytestmark = pytest.mark.usefixtures("signal_handlers_unchanged")
+
 FAKE_AGENT = shlex.join([PY, str(Path(__file__).with_name("fake_acp_agent.py"))])
 EXITS = {int(code) for code in ShapeExit}
 NOT_UTF8 = "import sys; sys.stdout.buffer.write(bytes([111, 107, 32, 255, 254]))"

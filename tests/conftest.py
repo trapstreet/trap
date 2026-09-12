@@ -6,8 +6,11 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import sys
+import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
@@ -28,6 +31,81 @@ def process_gone(pid: int, timeout: float = 3.0) -> bool:
             return True
         time.sleep(0.05)
     return False
+
+
+def wait_until(ready: Callable[[], object], timeout: float = 10.0) -> bool:
+    """Poll ``ready()`` until it is truthy; False if it never was within ``timeout``."""
+    deadline = time.monotonic() + timeout
+    while not ready():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.02)
+    return True
+
+
+INTERRUPTS = (signal.SIGINT, signal.SIGTERM)
+
+
+def sleeper(pidfile: Path) -> list[str]:
+    """argv for a child that starts ``sleep 60`` in its own process group, writes the
+    sleep's pid to ``pidfile`` (whole, by a rename), and waits on it — a grandchild for
+    tests to check a group kill reached."""
+    return ["sh", "-c", f"sleep 60 & echo $! > {pidfile}.tmp && mv {pidfile}.tmp {pidfile}; wait"]
+
+
+def reap(pid: int) -> None:
+    """SIGKILL ``pid``'s process group if a failing test left it running — never the
+    group this test process belongs to."""
+    try:
+        group = os.getpgid(pid)
+        if group != os.getpgrp():
+            os.killpg(group, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+class StraySignal(Exception):
+    """A signal a test sent itself reached a test-owned handler instead of the shape's."""
+
+
+@pytest.fixture
+def stray_signals():
+    """For tests that signal this very process while a shape runs in-process: SIGINT and
+    SIGTERM get test-owned handlers first, so a signal the shape failed to catch fails
+    the test (raising StraySignal) instead of stopping pytest — or, for SIGTERM, killing
+    it. Yields the handler, so a test can check the shape put it back."""
+
+    def stray(signum: int, frame: object) -> None:
+        raise StraySignal(signal.Signals(signum).name)
+
+    previous = {sig: signal.signal(sig, stray) for sig in INTERRUPTS}
+    try:
+        yield stray
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
+def signal_main_thread_when(ready: Callable[[], object], sig: int) -> threading.Thread:
+    """From a helper thread, once ``ready()``, send ``sig`` to this process's main thread
+    — where a shape running in-process sits blocked, the way it does under ``tp run``."""
+
+    def send() -> None:
+        if wait_until(ready):
+            signal.pthread_kill(threading.main_thread().ident or 0, sig)
+
+    thread = threading.Thread(target=send, daemon=True)
+    thread.start()
+    return thread
+
+
+@pytest.fixture
+def signal_handlers_unchanged():
+    """Fails a test that leaves SIGINT or SIGTERM handled differently than it found them —
+    a shape installs its own while a child runs and must always put the old ones back."""
+    before = {sig: signal.getsignal(sig) for sig in INTERRUPTS}
+    yield
+    assert {sig: signal.getsignal(sig) for sig in INTERRUPTS} == before, "signal handlers were left altered"
 
 
 # A judge that scores stdout == expected/answer.txt (1.0 / 0.0).

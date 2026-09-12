@@ -215,7 +215,15 @@ def main() -> None:
         sys.stdout.write(json.dumps([1, 2, 3]) + "\n")
         sys.stdout.write("[" * 100_000 + "]" * 100_000 + "\n")
         sys.stdout.flush()
-    log({"cwd": os.getcwd(), "files": sorted(os.listdir(".")), "tree": tree(), "env": dict(os.environ)})
+    log(
+        {
+            "pid": os.getpid(),
+            "cwd": os.getcwd(),
+            "files": sorted(os.listdir(".")),
+            "tree": tree(),
+            "env": dict(os.environ),
+        }
+    )
     while (message := read()) is not None:
         log({"received": message})
         method, rid, params = message.get("method"), message.get("id"), message.get("params") or {}

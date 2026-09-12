@@ -114,6 +114,11 @@ class AcpConnection:
         self._failure: AcpError | None = None
         threading.Thread(target=self._read, daemon=True).start()
 
+    @property
+    def pid(self) -> int:
+        """The agent's pid — its process group's id too, as it leads its own session."""
+        return self._proc.pid
+
     def request(self, method: str, params: dict[str, Any]) -> Pending:
         pending = Pending()
         with self._lock:
