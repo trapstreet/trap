@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import time
 from pathlib import Path
 
@@ -233,7 +232,10 @@ def test_a_response_for_an_unknown_id_and_a_bare_message_are_ignored(fake, tmp_p
         conn.close()
 
 
-def test_writes_after_the_agent_exited_are_swallowed_not_raised(fake, tmp_path):
+def test_a_write_after_close_hits_a_closed_file(fake, tmp_path):
+    """close() closes our end cleanly (the agent is still alive, just told to stop via
+    EOF), so a write after that lands on an already-closed file: _send's ValueError
+    branch, not the broken-pipe OSError branch below."""
     fake("ok")
     conn = _connect(tmp_path, [])
     try:
@@ -248,27 +250,23 @@ def test_writes_after_the_agent_exited_are_swallowed_not_raised(fake, tmp_path):
     assert e.value.message == "the agent exited"
 
 
-def test_close_tolerates_a_missing_stdin_and_a_stdin_that_wont_close(tmp_path):
-    # Neither branch is reachable through a real AcpConnection (its Popen is always
-    # created with stdin=PIPE), so exercise close() directly against a couple of
-    # already-dead real processes standing in for a Popen with no/broken stdin.
-    no_stdin = subprocess.Popen(["sh", "-c", "exit 0"], start_new_session=True)
-    no_stdin.wait()
-    assert no_stdin.stdin is None
-    conn = object.__new__(AcpConnection)
-    conn._proc = no_stdin
-    conn.close(grace=0.5)  # the "if stdin is not None" branch is False; nothing to close
-
-    class _UnclosableStdin:
-        def close(self) -> None:
-            raise OSError("simulated: the pipe cannot be closed")
-
-    broken_stdin = subprocess.Popen(["sh", "-c", "exit 0"], start_new_session=True)
-    broken_stdin.wait()
-    broken_stdin.stdin = _UnclosableStdin()
-    conn2 = object.__new__(AcpConnection)
-    conn2._proc = broken_stdin
-    conn2.close(grace=0.5)  # the OSError from closing stdin is swallowed
+def test_close_tolerates_a_broken_pipe_from_a_write_after_the_agent_crashed(fake, tmp_path):
+    """The crashed agent's process (and its end of the stdin pipe) is gone once the
+    reader thread notices, but our own stdin is still open: notify() after that hits a
+    broken pipe — _send's OSError branch, not the closed-file one above — and, since the
+    write's bytes never left our buffer, close() then re-attempts the same failing flush
+    and must swallow the OSError that comes out of *its* stdin.close() too."""
+    fake("crash")
+    conn = _connect(tmp_path, [])
+    try:
+        conn.call("initialize", {"protocolVersion": 1, "clientCapabilities": {}}, 10)
+        conn.call("session/new", {"cwd": str(tmp_path), "mcpServers": []}, 10)
+        with pytest.raises(AcpError) as e:
+            conn.call("session/prompt", {"sessionId": "s1", "prompt": [{"type": "text", "text": "q"}]}, 10)
+        assert e.value.code == AGENT_EXITED
+        conn.notify("session/cancel", {"sessionId": "s1"})  # writes into the broken pipe; must not raise
+    finally:
+        conn.close()  # must not raise either, despite the unflushed bytes from notify()
 
 
 def test_close_escalates_to_sigkill_for_an_agent_that_ignores_sigterm(fake, tmp_path):

@@ -18,7 +18,7 @@ import subprocess
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 from trap.shapes._case import kill_group
 
@@ -81,6 +81,12 @@ class AcpConnection:
             cwd=cwd,
             start_new_session=True,
         )
+        # Captured once, non-optional from here on: stdin=PIPE/stdout=PIPE above means
+        # Popen always gives us real pipes, never None — checking "is not None" anywhere
+        # else in this class would be a branch nothing can ever take the other side of.
+        assert self._proc.stdin is not None and self._proc.stdout is not None
+        self._stdin: IO[bytes] = self._proc.stdin
+        self._stdout: IO[bytes] = self._proc.stdout
         self._on_update = on_update
         self._on_request = on_request
         self._lock = threading.Lock()
@@ -115,9 +121,10 @@ class AcpConnection:
         """End the session: close the agent's stdin, give it ``grace`` to exit, then kill
         its process group."""
         try:
-            if self._proc.stdin is not None:
-                self._proc.stdin.close()
+            self._stdin.close()
         except OSError:
+            # e.g. a broken pipe with unflushed bytes still queued from a write made
+            # after the agent had already gone — see _send below.
             pass
         try:
             self._proc.wait(timeout=grace)
@@ -129,11 +136,14 @@ class AcpConnection:
         line = (json.dumps(message) + "\n").encode()
         with self._lock:
             try:
-                assert self._proc.stdin is not None
-                self._proc.stdin.write(line)
-                self._proc.stdin.flush()
+                self._stdin.write(line)
+                self._stdin.flush()
             except (OSError, ValueError):
-                pass  # the agent is gone; the reader fails every pending request
+                # OSError: the agent exited and its end of the pipe is gone (a broken
+                # pipe), possibly with these bytes never leaving our own buffer.
+                # ValueError: we already closed our end ourselves, in close().
+                # Either way the agent is gone; the reader fails every pending request.
+                pass
 
     def _failure_reply(self) -> dict[str, Any]:
         """The JSON-RPC error to hand a pending (or new) request once the connection is
@@ -143,10 +153,9 @@ class AcpConnection:
         return {"error": {"code": failure.code, "message": failure.message}}
 
     def _read(self) -> None:
-        assert self._proc.stdout is not None
         failure: AcpError | None = None
         try:
-            for raw in self._proc.stdout:
+            for raw in self._stdout:
                 try:
                     message = json.loads(raw)
                 except ValueError:
