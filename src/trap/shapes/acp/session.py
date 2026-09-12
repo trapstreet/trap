@@ -8,6 +8,7 @@ stderr."""
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -44,15 +45,27 @@ class CaseOutcome:
 class MessageCollector:
     """Splits the streamed reply into the agent's separate messages and keeps them all;
     the answer is the last. A new message starts when ``messageId`` changes, or — for an
-    agent that sends none — after a tool call. Joining every chunk would put "let me read
-    the file first…" in front of the answer, and a judge that wants three letters marks
-    that wrong."""
+    agent that sends none — after a tool call, which closes the running no-id message
+    right away: a turn that ends on a tool call answers with "", not with whatever it
+    said before the tool call. Joining every chunk would put "let me read the file
+    first…" in front of the answer, and a judge that wants three letters marks that
+    wrong."""
 
     def __init__(self) -> None:
         self.messages: list[str] = []
         self.cost: dict[str, Any] | None = None
         self._current: object = None
         self._boundary = True
+
+    def _start_new_segment(self, mid: object) -> None:
+        """Open a fresh message for ``mid`` to append to — reusing the last one if a
+        tool call already opened it and nothing has filled it yet, so a tool call
+        followed immediately by another (or by nothing) never leaves a stray empty
+        message in the middle of ``messages``."""
+        if not self.messages or self.messages[-1] != "":
+            self.messages.append("")
+        self._current = mid
+        self._boundary = False
 
     def on_update(self, update: dict[str, Any]) -> None:
         kind = update.get("sessionUpdate")
@@ -62,11 +75,11 @@ class MessageCollector:
             mid = update.get("messageId")
             starts = (mid is not None and mid != self._current) or (mid is None and self._boundary)
             if starts or not self.messages:
-                self.messages.append("")
-                self._current = mid
-                self._boundary = False
+                self._start_new_segment(mid)
             self.messages[-1] += text
         elif kind in ("tool_call", "tool_call_update"):
+            if self._current is None and self.messages and self.messages[-1]:
+                self._start_new_segment(None)
             self._boundary = True
         elif kind == "usage_update" and isinstance(update.get("cost"), dict):
             self.cost = update["cost"]
@@ -141,7 +154,10 @@ def apply_config(
 ) -> dict[str, str]:
     """Set the model (the option whose ``category`` is ``model`` — its id is the agent's
     choice), then each named option, changing only what differs. Returns every option's
-    value afterwards: what the case actually ran with."""
+    value afterwards: what the case actually ran with. ``timeout`` is a total budget
+    across every ``session/set_config_option`` call this makes, not a fresh allowance for
+    each one — a case that already spent most of its deadline on the handshake must not
+    get a full new timeout per option it sets."""
     model_option = next((o for o in config_options if o.get("category") == "model"), None)
     if model_option is None:
         raise ConfigMismatch("the agent offers no model option (no configOption with category 'model')")
@@ -153,6 +169,7 @@ def apply_config(
             raise ConfigMismatch(f"the agent has no option {option_id!r}; it has: {ids}")
         wanted.append((option, value))
     now = _readback(config_options)
+    end = time.monotonic() + timeout
     for option, value in wanted:
         values = option_values(option)
         if value not in values:
@@ -164,7 +181,7 @@ def apply_config(
         reply = conn.call(
             "session/set_config_option",
             {"sessionId": session_id, "configId": option["id"], "value": value},
-            timeout,
+            max(0.0, end - time.monotonic()),
         )
         echoed = reply.get("configOptions")
         if isinstance(echoed, list):
@@ -181,11 +198,20 @@ def apply_config(
 def _open_session(
     conn: AcpConnection, *, workdir: Path, meta: Mapping[str, Any] | None, timeout: float
 ) -> dict[str, Any]:
-    conn.call("initialize", {"protocolVersion": PROTOCOL_VERSION, "clientCapabilities": {}}, timeout)
+    """``timeout`` is a total budget for both calls (``initialize`` then ``session/new``),
+    not a fresh allowance for each — else the second call can still be waiting long after
+    the deadline that was meant to bound the whole handshake has passed, orphaning the
+    agent once the runner's own timeout kills only this shape."""
+    end = time.monotonic() + timeout
+    conn.call(
+        "initialize",
+        {"protocolVersion": PROTOCOL_VERSION, "clientCapabilities": {}},
+        max(0.0, end - time.monotonic()),
+    )
     params: dict[str, Any] = {"cwd": str(workdir), "mcpServers": []}
     if meta:
         params["_meta"] = dict(meta)
-    return conn.call("session/new", params, timeout)
+    return conn.call("session/new", params, max(0.0, end - time.monotonic()))
 
 
 def run_case(

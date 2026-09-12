@@ -14,6 +14,7 @@ from trap.shapes.acp.connection import AGENT_EXITED, AcpConnection, AcpError
 from trap.shapes.acp.session import (
     ConfigMismatch,
     MessageCollector,
+    _open_session,
     apply_config,
     describe_agent,
     grant_once,
@@ -140,7 +141,7 @@ def test_a_timed_out_wait_can_still_collect_the_late_response(fake, tmp_path):
         conn.close()
 
 
-# --- Ruling 1: the reader thread must never die silently -------------------------------
+# --- the reader thread never dies silently: a handler bug fails every pending request --
 
 
 def test_an_on_update_that_raises_fails_the_in_flight_request_promptly(fake, tmp_path):
@@ -295,7 +296,7 @@ def test_close_escalates_to_sigkill_for_an_agent_that_ignores_sigterm(fake, tmp_
     assert process_gone(child_pid), "the agent's own child outlived close()"
 
 
-# --- Task 4: one case over ACP ---------------------------------------------------------
+# --- one case over ACP: config, the last-message answer, permissions, the deadline -----
 
 
 def _chunk(text: str, mid: str | None = None) -> dict:
@@ -322,6 +323,17 @@ def test_without_message_ids_a_tool_call_starts_a_new_message():
     for u in [_chunk("thinking "), _chunk("aloud"), {"sessionUpdate": "tool_call"}, _chunk("final")]:
         c.on_update(u)
     assert c.messages == ["thinking aloud", "final"]
+
+
+def test_a_turn_that_ends_right_after_a_tool_call_has_an_empty_answer():
+    """A no-messageId turn that ends on a tool call, with no text after it, must answer
+    with "" — not with whatever it said before the tool call. The tool call closes that
+    message immediately rather than waiting for a chunk that never comes."""
+    c = MessageCollector()
+    for u in [_chunk("thinking "), _chunk("aloud"), {"sessionUpdate": "tool_call"}]:
+        c.on_update(u)
+    assert c.messages == ["thinking aloud", ""]
+    assert c.final == ""
 
 
 def test_a_lone_chunk_with_no_message_id_still_starts_its_own_message():
@@ -429,6 +441,38 @@ def test_apply_config_reads_back_echoed_values_when_they_do_take():
     assert ran == {"model": "haiku", "effort": "default"}
 
 
+# --- timeout is a total budget across a function's calls, not a fresh one per call -----
+
+
+class _SlowConn:
+    """A recording conn (like ``_Conn``) that takes a moment to answer, so a caller that
+    treats ``timeout`` as a total budget must pass its second call a smaller value than
+    its first — one that already spent some of the budget waiting for the first reply."""
+
+    def __init__(self, delay: float) -> None:
+        self.timeouts: list[float] = []
+        self._delay = delay
+
+    def call(self, method, params, timeout):
+        self.timeouts.append(timeout)
+        time.sleep(self._delay)
+        return {}
+
+
+def test_apply_config_treats_timeout_as_a_total_budget_not_per_call():
+    conn = _SlowConn(0.2)
+    apply_config(conn, "s1", _options(), model="haiku", options={"effort": "low"}, timeout=5)
+    assert len(conn.timeouts) == 2
+    assert conn.timeouts[1] < conn.timeouts[0]
+
+
+def test_open_session_treats_timeout_as_a_total_budget_not_per_call(tmp_path):
+    conn = _SlowConn(0.2)
+    _open_session(conn, workdir=tmp_path, meta=None, timeout=5)
+    assert len(conn.timeouts) == 2
+    assert conn.timeouts[1] < conn.timeouts[0]
+
+
 def _run(
     tmp_path: Path, *, model: str = "haiku", options=None, deadline: float = 20.0, cancel_grace: float = 0.5
 ):
@@ -510,8 +554,8 @@ def test_an_unlisted_model_fails_before_the_prompt(fake, tmp_path):
 
 
 def test_at_the_deadline_the_session_is_cancelled(fake, tmp_path):
-    # Ruling 2: 1s for the whole spawn+handshake+prompt risks a flake on a slow runner;
-    # 3s gives real headroom while still finishing well under a human-noticeable wait.
+    # 1s for the whole spawn+handshake+prompt risks a flake on a slow runner; 3s gives
+    # real headroom while still finishing well under a human-noticeable wait.
     log = fake("hang")
     started = time.monotonic()
     out = _run(tmp_path, deadline=3.0)
@@ -538,7 +582,7 @@ def test_describe_lists_the_options_without_prompting(fake, tmp_path):
     assert _sent(log, "session/prompt") == []
 
 
-# --- Ruling 3: meta must be tested ------------------------------------------------------
+# --- meta reaches session/new as _meta, present or absent ------------------------------
 
 
 def test_meta_reaches_session_new_as_meta(fake, tmp_path):
@@ -585,17 +629,17 @@ def test_describe_agent_passes_meta_too(fake, tmp_path):
     assert params["_meta"] == {"run_id": "r2"}
 
 
-# --- Ruling 4: a malformed agent message ends the case at ShapeExit.AGENT_ERROR --------
+# --- a malformed agent message ends the case at ShapeExit.AGENT_ERROR ------------------
 
 
 def test_a_malformed_update_ends_the_case_promptly_as_agent_error(fake, tmp_path):
     """``null_chunk``'s ``content.text: null`` makes MessageCollector.on_update raise
     (``None`` is not a str to concatenate) — deliberately: the collector stays strict
-    about shape instead of silently swallowing a bad field. AcpConnection's reader
-    thread (Task 3) turns that raise into an AcpError that fails the in-flight
-    session/prompt; this test is not about the collector but about proving _converse
-    maps *that* AcpError to AGENT_ERROR, promptly, like any other agent-side failure —
-    not into a hang until the deadline, and not mislabelled as the agent having crashed."""
+    about shape instead of silently swallowing a bad field. AcpConnection's reader thread
+    turns that raise into an AcpError that fails the in-flight session/prompt; this test
+    is not about the collector but about proving _converse maps *that* AcpError to
+    AGENT_ERROR, promptly, like any other agent-side failure — not into a hang until the
+    deadline, and not mislabelled as the agent having crashed."""
     fake("null_chunk")
     started = time.monotonic()
     out = _run(tmp_path, deadline=20.0)
@@ -605,7 +649,8 @@ def test_a_malformed_update_ends_the_case_promptly_as_agent_error(fake, tmp_path
     assert any("trap could not handle a message from the agent" in n for n in out.notes)
 
 
-# --- Ruling 5: coverage for session-open error paths and describe_agent errors ----------
+# --- session-open error paths (config mismatch, timeout, agent error) and describe_agent
+# errors -------------------------------------------------------------------------------
 
 
 def test_a_session_new_that_fails_is_an_agent_error(fake, tmp_path):
