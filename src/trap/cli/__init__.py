@@ -34,7 +34,11 @@ from trap.models import Diagnosis, Provenance, ReportData
 from trap.runner import TaskRunner
 from trap.workspace import SolutionIdentity, Workspace
 
-app = typer.Typer(help="AI prompt / agent / workflow / testing framework.")
+# A traceback's locals can hold request headers — an API key among them (tp shape direct
+# builds them). Said here, not left to typer: older typer releases print locals by default.
+app = typer.Typer(
+    help="AI prompt / agent / workflow / testing framework.", pretty_exceptions_show_locals=False
+)
 app.add_typer(auth_app, name="auth")
 
 # Built-in solution programs (trap.shapes), run as a trap.yaml `cmd:`. Hidden: they are

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
+import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -501,6 +503,101 @@ def test_an_openai_refusal_field_is_printed_and_exits_20(tmp_path, monkeypatch, 
     assert code == ShapeExit.REFUSAL
     assert captured.out == "I can't help with that.\n"
     assert "the model refused" in captured.err
+
+
+# A key or base URL that cannot even make a request, and replies shaped so unlike the
+# API that parsing or classifying them used to raise: each ends in a ShapeExit code, and
+# nothing on the way out prints the key.
+
+
+@pytest.mark.parametrize("key", ["sk-café-secret", "sk-secret\n"])
+def test_a_key_no_http_header_can_carry_is_a_config_error_that_hides_it(tmp_path, monkeypatch, capsys, key):
+    srv, url = _vendor(OPENAI_OK)
+    try:
+        _case(tmp_path, monkeypatch, {"question.txt": "Q?"})
+        monkeypatch.setenv("OPENAI_API_KEY", key)
+        monkeypatch.setenv("OPENAI_BASE_URL", url)
+        code = direct.main(["--model", "gpt-test"])
+    finally:
+        srv.shutdown()
+    err = capsys.readouterr().err
+    assert code == ShapeExit.CONFIG_ERROR
+    assert "OPENAI_API_KEY" in err and "secret" not in err
+    assert srv.requests == []
+
+
+@pytest.mark.parametrize("base", ["http://127.0.0.1:abc", "localhost:8080", "ftp://127.0.0.1/"])
+def test_a_base_url_httpx_cannot_use_is_a_config_error(tmp_path, monkeypatch, capsys, base):
+    _case(tmp_path, monkeypatch, {"question.txt": "Q?"})
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setenv("OPENAI_BASE_URL", base)
+    assert direct.main(["--model", "gpt-test"]) == ShapeExit.CONFIG_ERROR
+    assert "base URL" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("provider", "data"),
+    [
+        ("openai", {"choices": {"0": {"message": {"content": "hi"}}}}),
+        ("anthropic", {"content": [{"type": "text", "text": "hi"}], "stop_reason": ["end_turn"]}),
+        ("openai", {"choices": [{"message": {"content": "hi"}, "finish_reason": {"why": "stop"}}]}),
+    ],
+)
+def test_a_reply_that_is_the_wrong_shape_inside_is_an_agent_error(
+    tmp_path, monkeypatch, capsys, provider, data
+):
+    srv, url = _vendor(data)
+    try:
+        _case(tmp_path, monkeypatch, {"question.txt": "Q?"})
+        key_env, base_env = ("OPENAI_API_KEY", "OPENAI_BASE_URL")
+        if provider == "anthropic":
+            key_env, base_env = ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL")
+        monkeypatch.setenv(key_env, "k")
+        monkeypatch.setenv(base_env, url)
+        code = direct.main(["--model", "claude-x" if provider == "anthropic" else "gpt-test"])
+    finally:
+        srv.shutdown()
+    captured = capsys.readouterr()
+    assert code == ShapeExit.AGENT_ERROR
+    assert captured.out == ""
+    assert captured.err.splitlines()[-1].startswith("[trap]")
+
+
+def test_a_stop_reason_is_always_read_as_text_or_none():
+    assert (
+        direct.parse_reply("anthropic", {"content": [], "stop_reason": ["end_turn"]}).stop == "['end_turn']"
+    )
+    assert direct.parse_reply("openai", {"choices": [{"message": {}, "finish_reason": 7}]}).stop == "7"
+    assert direct.parse_reply("anthropic", {"content": []}).stop is None
+
+
+def test_a_crash_under_tp_never_prints_local_variables(tmp_path):
+    """A traceback's locals can hold request headers, and so an API key. tp must say so
+    itself rather than lean on typer's default: pyproject allows typer>=0.12, and older
+    releases printed locals by default — which the script below restores before importing
+    tp. The secret is read from the environment so it cannot appear in the traceback's
+    source lines; only a locals dump could print it."""
+    script = tmp_path / "crash.py"
+    script.write_text(
+        "import os\n"
+        "import typer\n\n"
+        "_init = typer.Typer.__init__\n\n"
+        "def _old_default(self, *args, pretty_exceptions_show_locals=True, **kwargs):\n"
+        "    _init(self, *args, pretty_exceptions_show_locals=pretty_exceptions_show_locals, **kwargs)\n\n"
+        "typer.Typer.__init__ = _old_default\n\n"
+        "from trap.cli import app\n\n"
+        "@app.command('crash-for-test')\n"
+        "def crash() -> None:\n"
+        "    headers = {'x-api-key': os.environ['KEY_FOR_TEST']}\n"
+        "    raise RuntimeError(f'failed with {len(headers)} header')\n\n"
+        "app(['crash-for-test'], prog_name='tp')\n"
+    )
+    env = {k: v for k, v in os.environ.items() if k != "_TYPER_STANDARD_TRACEBACK"}
+    env["KEY_FOR_TEST"] = "sk-must-never-print"
+    res = subprocess.run([PY, str(script)], capture_output=True, text=True, env=env, timeout=60)
+    assert res.returncode == 1
+    assert "RuntimeError" in res.stderr
+    assert "sk-must-never-print" not in res.stderr
 
 
 def test_a_reply_shaped_nothing_like_the_api_is_an_agent_error(tmp_path, monkeypatch, capsys):

@@ -81,6 +81,13 @@ def build_request(
     key = os.environ.get(config.key_env)
     if not key:
         raise ShapeError(ShapeExit.CONFIG_ERROR, f"{config.key_env} is not set")
+    if not (key.isascii() and key.isprintable()):
+        # Said without the key: httpx and h11 both quote a bad header value when they refuse it.
+        raise ShapeError(
+            ShapeExit.CONFIG_ERROR,
+            f"{config.key_env} holds a character an HTTP header cannot carry (non-ASCII, or a control "
+            "character such as a trailing newline)",
+        )
     url = config.resolve_upstream().rstrip("/") + spec.path
     user = {"role": "user", "content": question}
     if spec.anthropic:
@@ -103,7 +110,7 @@ def parse_reply(provider: str, data: dict[str, Any]) -> Reply:
     if PROVIDERS[provider].anthropic:
         blocks = data.get("content") or []
         text = "".join(b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text")
-        return Reply(text, data.get("stop_reason"), data.get("usage") or {})
+        return Reply(text, _stop(data.get("stop_reason")), data.get("usage") or {})
     choice = (data.get("choices") or [{}])[0]
     message = choice.get("message") or {}
     usage = data.get("usage") or {}
@@ -112,7 +119,13 @@ def parse_reply(provider: str, data: dict[str, Any]) -> Reply:
         # OpenAI's own refusal field, not a stop reason: reported through the same
         # "refusal" path exit_for already gives a vendor's stop_reason/finish_reason.
         return Reply(refusal, "refusal", usage)
-    return Reply(_openai_text(message.get("content")), choice.get("finish_reason"), usage)
+    return Reply(_openai_text(message.get("content")), _stop(choice.get("finish_reason")), usage)
+
+
+def _stop(reason: Any) -> str | None:
+    """A vendor's stop reason as text, or None when it gave none — so an odd value (a
+    list, an object) is an unexpected stop reason in exit_for, not an unhashable one."""
+    return None if reason is None else str(reason)
 
 
 def _openai_text(content: Any) -> str:
@@ -205,6 +218,8 @@ def _call(
         resp = httpx.post(url, headers=headers, json=body, timeout=max(deadline.remaining(), 1.0))
     except httpx.TimeoutException:
         raise ShapeError(ShapeExit.TIMEOUT, "the model did not answer before the deadline") from None
+    except (httpx.InvalidURL, httpx.UnsupportedProtocol) as e:  # InvalidURL is no HTTPError
+        raise ShapeError(ShapeExit.CONFIG_ERROR, f"the provider's base URL cannot be used: {e}") from None
     except httpx.HTTPError as e:
         raise ShapeError(ShapeExit.AGENT_ERROR, f"the request failed: {e}") from None
     if resp.status_code >= 400:
@@ -217,7 +232,7 @@ def _call(
         raise ShapeError(ShapeExit.AGENT_ERROR, "the reply was not a JSON object")
     try:
         return parse_reply(provider, data)
-    except (AttributeError, TypeError, IndexError):
+    except (AttributeError, TypeError, LookupError):  # LookupError: a list index or a dict key
         raise ShapeError(ShapeExit.AGENT_ERROR, "the reply was not in the expected format") from None
 
 
