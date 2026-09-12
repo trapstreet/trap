@@ -217,13 +217,14 @@ Built-in solution programs, run as a `trap.yaml` `cmd:` rather than typed. Hidde
 `tp --help`. See [Built-in shapes](../guides/built-in-shapes.md) for flags and behaviour.
 
 ```
-tp shape acp --agent-cmd CMD --model VALUE [--agent-id ID] [--option ID=VALUE] [--skill DIR] [--describe]
+tp shape acp --agent-cmd CMD [--model VALUE] [--agent-id ID] [--option ID=VALUE] [--skill DIR] [--describe]
 tp shape direct --model ID [--provider NAME] [--system-file PATH]
 tp shape cmd --template TEMPLATE [--repo PATH]
 ```
 
-Every shape also takes `--prompt-file` (default `question.txt`), `--manifest-envvar`,
-`--deadline` (seconds, default 570) and `--scrub PATH`.
+`tp shape acp` requires `--model` unless it is given `--describe`. Every shape also takes
+`--prompt-file` (default `question.txt`), `--manifest-envvar`, `--deadline` (seconds,
+default 570) and `--scrub PATH`.
 
 ## tp report
 

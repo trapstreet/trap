@@ -65,7 +65,7 @@ def shape_cmd(ctx: typer.Context) -> None:
 
 @shape_app.command("acp", context_settings=_PASSTHROUGH)
 def shape_acp(ctx: typer.Context) -> None:
-    """Drive an ACP agent (Claude Code, Codex, Gemini CLI, ...) for one case."""
+    """Drive an ACP agent (Claude Code and Codex are verified) for one case."""
     from trap.shapes.acp.bridge import main
 
     raise typer.Exit(code=main(ctx.args))

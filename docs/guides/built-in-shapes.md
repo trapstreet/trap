@@ -18,17 +18,20 @@ tasks:
 
 | Shape | Tests | Needs |
 |---|---|---|
-| `tp shape acp` | an agent that speaks the [Agent Client Protocol](https://agentclientprotocol.com) — Claude Code, Codex, Gemini CLI, Cursor, … | the agent installed and logged in (or runnable through `npx`) |
+| `tp shape acp` | an agent that speaks the [Agent Client Protocol](https://agentclientprotocol.com) and offers a model option — verified with Claude Code (`claude-acp`) and Codex (`codex-acp`); other agents are not verified yet | the agent installed and logged in (or runnable through `npx`) |
 | `tp shape direct` | a model on its own: the question, once, no tools | the provider's API key |
 | `tp shape cmd` | any program, through a one-line command template | the program |
 
 ## What every shape does
 
-- **Reads the question** from the case's `question.txt` (`--prompt-file` to change it).
+- **Reads the question** from the case's `question.txt` (`--prompt-file` to change it),
+  as UTF-8 whatever the locale; a question that isn't valid UTF-8 is a configuration
+  error (exit 24).
 - **Works in a copy.** The case's input files are copied to a fresh temporary directory
   outside the task checkout and `.trap/`; the program under test runs there and the
   directory is removed afterwards. Task questions that say "the file is in the current
-  directory" work as written.
+  directory" work as written. Inputs that can't be copied (a dangling symlink, an
+  unreadable file) are a configuration error (exit 24), and nothing is left behind.
 - **Scrubs the environment before starting a child.** `cmd` and `acp` pass a scrubbed
   copy of the environment to the program or agent they start: it never sees
   `TRAP_MANIFEST` (it points at `inputs/`, and `expected/` sits next to it), your
@@ -39,11 +42,16 @@ tasks:
   `TMPDIR`, `LANG`, `SHELL`, `TERM`, `USER` and `LOGNAME` are never dropped, whatever
   they contain — so that a broad `--scrub` (a repo root that also holds a venv, say)
   can't take `PATH` with it. `HOME`, `LOGNAME`, `PATH`, `SHELL`, `TERM` and `USER` are
-  the ACP/MCP SDKs' default inherited set; `TMPDIR` and `LANG` are added to it.
+  the ACP/MCP SDKs' default inherited set; `TMPDIR` and `LANG` are added to it. The
+  scrub keeps the task's paths from being found by accident; it does not stop an agent
+  that goes looking (see **Permissions** under `tp shape acp`).
 - **Stops itself.** `--deadline` (seconds, default 570) must sit below `trap.yaml`'s
   `timeout`: at the deadline the shape stops what it started — the child process (and
   everything it spawned), or the API call — and exits 124. The runner alone would kill
-  only the shape and leave an agent running.
+  only the shape and leave an agent running. Interrupted (Ctrl-C, or `SIGTERM`) while
+  its program or agent runs, `cmd` and `acp` kill it and everything it started at once,
+  remove the work directory, and exit 128 + the signal number — 130 for Ctrl-C, 143 for
+  `SIGTERM`.
 - **Exits with a code that says how the case ended:**
 
   | Exit | Meaning |
@@ -57,21 +65,28 @@ tasks:
   | 124 | the deadline (a partial answer, if any) |
 
   Like any solution's exit code these are facts about the case; they never fail `tp run`.
-  `tp shape cmd` only ever produces 24 (its own configuration errors — an unset or
-  unreadable manifest, an unparseable or empty template, `{repo}` with no `--repo`, a
-  command that can't be found) or 124 (the deadline) itself — any other code is whatever
-  the wrapped program exited with.
+  `tp shape cmd` itself only ever produces 24 — its own configuration errors: an unset or
+  unreadable manifest, a question that isn't UTF-8, inputs that can't be copied, an
+  unparseable or empty template, `{repo}` with no `--repo`, a command that can't be found
+  or can't be started (no execute bit, say) — and 124, the deadline (plus 128 + the
+  signal when it is interrupted). Any other code is the wrapped program's: its own exit
+  code, or 128 + N when signal N killed it (137 for `SIGKILL`), the way a shell reports
+  it.
 
 ## `tp shape acp`
 
 | Flag | Meaning |
 |---|---|
 | `--agent-cmd` | how to start the agent, e.g. `npx -y @agentclientprotocol/codex-acp@1.11.0` |
-| `--agent-id` | its [ACP registry](https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json) id — `claude-acp`, `codex-acp`, `gemini`, … — which turns on what tp knows about that agent |
+| `--agent-id` | its [ACP registry](https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json) id — `claude-acp`, `codex-acp`, `gemini`, … — which turns on what tp knows about that agent. Claude Code's settings isolation (below) needs `--agent-id claude-acp`: without it, the runner's own `CLAUDE.md`, hooks and plugins load |
 | `--model` | required (unless `--describe`); **a value the agent itself lists**, not an API model id |
 | `--option ID=VALUE` | set another of the agent's options, e.g. `effort=low` |
 | `--skill DIR` | install a skill for the case (Claude Code only) |
-| `--describe` | print the agent's options and their values, then exit — with the same scrubbed environment a case would run under |
+| `--describe` | print the agent's options and their values, then exit — with a scrubbed environment, scrubbed the same way a case's is |
+
+`tp shape acp` needs an agent that offers a model option — a config option whose category
+is `model`, which `--describe` lists — and exits 24 for one that doesn't. Claude Code
+(`claude-acp`) and Codex (`codex-acp`) are verified; other agents are not verified yet.
 
 Find the `--model` values with `--describe`:
 
@@ -94,18 +109,27 @@ closes off whatever message came before it, so the answer is the text *after* th
 tool call; a turn that ends right on a tool call, with nothing said afterward, answers
 with `""`. Opening the session and setting the model/options share one time budget with
 `--deadline`, not a fresh allowance each — a case that spent most of its deadline on a
-slow handshake has that much less left for the question. The config the case ran with,
-each permission granted, and the agent's self-reported usage go to the case's stderr.
+slow handshake has that much less left for the question. Everything but the answer goes
+to the case's stderr, in order: the config the case ran with, each earlier message the
+agent sent (its first 500 characters), each tool call's title and status, each
+permission granted, and the agent's self-reported usage.
 
 - **Permissions** are granted one call at a time (`allow_once`, falling back to
   `reject_once` then to cancelling the request), never "always". This is unattended
   execution of whatever the agent decides to run; the work directory is not a sandbox.
-- **Claude Code** runs with only project settings (`settingSources: ["project"]`): your own
-  `CLAUDE.md`, skills, hooks and plugins stay out of the run, and cannot redirect its API
-  calls around the cost proxy.
+  Nor is the environment scrub: it keeps the task's paths from being found by accident,
+  not from a determined agent — anything running as your user can still read the
+  shape's own environment, `TRAP_MANIFEST` included (for the agent, its parent's:
+  `ps eww $PPID`, or `/proc/$PPID/environ` on Linux).
+- **Claude Code**, with `--agent-id claude-acp`, runs with only project settings
+  (`settingSources: ["project"]`): your own `CLAUDE.md`, skills, hooks and plugins stay
+  out of the run, and cannot redirect its API calls around the cost proxy. Without
+  `--agent-id claude-acp` none of that applies — it loads them like any Claude Code
+  session.
 - **Answers that are not answers.** A turn that failed (a login error, say) or in which the
   agent reports that no model answered exits 23 with empty stdout, even when the agent
-  sent the error text as a message.
+  sent the error text as a message. So does a reply shaped unlike the protocol — an
+  error or result that isn't an object, `configOptions` that isn't a list.
 
 **Cost.** The cost proxy measures what the agent sends through the provider's base URL:
 
@@ -149,9 +173,12 @@ object, or otherwise doesn't match what a provider's API is expected to send bac
 23, as does an HTTP error status from the provider.
 
 A case with input files besides the question is refused (exit 24) — a model called
-directly cannot see them. Use an agent for those tasks. `--system-file` is read as
+directly cannot see them. Use an agent for those tasks. The files a file browser leaves
+behind (`.DS_Store`, `Thumbs.db`, `desktop.ini`) don't count. `--system-file` is read as
 UTF-8; a path that can't be read, or whose contents aren't valid UTF-8, is also a
-configuration error (exit 24).
+configuration error (exit 24), as are an API key an HTTP header can't carry (non-ASCII,
+or a stray newline — the message never shows the key) and a base URL the request can't
+use.
 
 ## `tp shape cmd`
 
@@ -169,8 +196,8 @@ With neither `{prompt}` nor `{prompt_file}` the question goes to the program's s
 template is split like a shell command but never run by a shell — no pipes or `&&`; for
 those, wrap the command in `sh -c '…'` and use `{prompt_file}`. The program runs in the
 work directory, so a relative path in the template resolves there: refer to your code
-through `{repo}`. Whatever it prints on stdout is the answer, and its exit code is the
-case's.
+through `{repo}`. Whatever it prints on stdout is the answer (bytes that aren't valid
+text are replaced, not refused), and its exit code is the case's.
 
 ## Limits
 
