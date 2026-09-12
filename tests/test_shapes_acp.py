@@ -589,6 +589,13 @@ def test_describe_agent_passes_meta_too(fake, tmp_path):
 
 
 def test_a_malformed_update_ends_the_case_promptly_as_agent_error(fake, tmp_path):
+    """``null_chunk``'s ``content.text: null`` makes MessageCollector.on_update raise
+    (``None`` is not a str to concatenate) — deliberately: the collector stays strict
+    about shape instead of silently swallowing a bad field. AcpConnection's reader
+    thread (Task 3) turns that raise into an AcpError that fails the in-flight
+    session/prompt; this test is not about the collector but about proving _converse
+    maps *that* AcpError to AGENT_ERROR, promptly, like any other agent-side failure —
+    not into a hang until the deadline, and not mislabelled as the agent having crashed."""
     fake("null_chunk")
     started = time.monotonic()
     out = _run(tmp_path, deadline=20.0)

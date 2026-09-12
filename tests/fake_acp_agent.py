@@ -167,8 +167,9 @@ def prompt(rid: object, sid: str) -> None:
         say(sid, "about to crash", "m1")
         sys.exit(3)
     elif MODE == "null_chunk":
-        # A chunk whose content.text is null: malformed, and must fail the case promptly
-        # rather than being silently swallowed or hanging until the deadline.
+        # A chunk whose content.text is null: malformed. MessageCollector.on_update
+        # raises on it (None is not a str to concatenate); the case must fail promptly
+        # as AGENT_ERROR rather than hang to the deadline or be read as a crashed agent.
         update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": None}})
         result(rid, {"stopReason": "end_turn", "usage": USAGE})
     elif MODE == "unknown_stop":
