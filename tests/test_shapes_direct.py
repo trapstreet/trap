@@ -187,6 +187,26 @@ def test_other_input_files_are_refused_before_any_call(tmp_path, monkeypatch, ca
     assert "ledger.txt" in err and "tp shape acp" in err
 
 
+def test_os_junk_beside_the_question_does_not_refuse_the_case(tmp_path, monkeypatch, capsys):
+    srv, url = _vendor(OPENAI_OK)
+    try:
+        _case(tmp_path, monkeypatch, {"question.txt": "Q?", ".DS_Store": "finder", "Thumbs.db": "x"})
+        monkeypatch.setenv("OPENAI_API_KEY", "k")
+        monkeypatch.setenv("OPENAI_BASE_URL", url)
+        assert direct.main(["--model", "gpt-test"]) == 0
+    finally:
+        srv.shutdown()
+    assert capsys.readouterr().out == "hi there\n"
+
+
+def test_the_refusal_names_the_real_extra_files_not_the_junk(tmp_path, monkeypatch, capsys):
+    _case(tmp_path, monkeypatch, {"question.txt": "Q?", "ledger.txt": "1", "desktop.ini": "x"})
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    assert direct.main(["--model", "gpt-test"]) == ShapeExit.CONFIG_ERROR
+    err = capsys.readouterr().err
+    assert "(ledger.txt)" in err and "desktop.ini" not in err
+
+
 def test_an_http_error_is_not_an_answer(tmp_path, monkeypatch, capsys):
     srv, url = _vendor({"error": {"message": "invalid x-api-key"}}, status=401)
     try:

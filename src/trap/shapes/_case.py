@@ -64,6 +64,10 @@ class Deadline:
         return max(0.0, self._end - time.monotonic())
 
 
+#: Files macOS Finder and Windows Explorer write into any folder they show.
+OS_JUNK = frozenset({".DS_Store", "Thumbs.db", "desktop.ini"})
+
+
 @dataclass
 class CaseSandbox:
     """The case's inputs, copied into a fresh directory outside the task checkout and
@@ -92,7 +96,13 @@ class CaseSandbox:
                 ShapeExit.CONFIG_ERROR, f"this case has no {prompt_file} (looked in {inputs_dir})"
             )
         workdir = Path(tempfile.mkdtemp(prefix="trap-case-")).resolve()
-        shutil.copytree(inputs_dir, workdir, dirs_exist_ok=True)
+        try:
+            shutil.copytree(inputs_dir, workdir, dirs_exist_ok=True)
+        except OSError as e:  # shutil.Error too: an unreadable file, a dangling symlink, ...
+            shutil.rmtree(workdir, ignore_errors=True)
+            raise ShapeError(
+                ShapeExit.CONFIG_ERROR, f"cannot copy this case's inputs from {inputs_dir}: {e}"
+            ) from None
         return cls(inputs_dir=inputs_dir, prompt_file=prompt_file, workdir=workdir)
 
     @property
@@ -101,15 +111,23 @@ class CaseSandbox:
 
     @property
     def question(self) -> str:
-        return self.prompt_path.read_text()
+        """The question, read as UTF-8 whatever the locale says — a task's files are."""
+        try:
+            return self.prompt_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            raise ShapeError(
+                ShapeExit.CONFIG_ERROR, f"cannot read {self.prompt_file} as UTF-8 text: {e}"
+            ) from None
 
     def extra_inputs(self) -> list[str]:
-        """The case's input files other than the prompt, relative to its directory."""
+        """The case's input files other than the prompt, relative to its directory. The
+        files a file browser leaves behind (OS_JUNK) are not inputs: a task folder
+        opened once in Finder must not read as a case with files."""
         prompt = Path(self.prompt_file)
         return sorted(
             p.relative_to(self.inputs_dir).as_posix()
             for p in self.inputs_dir.rglob("*")
-            if p.is_file() and p.relative_to(self.inputs_dir) != prompt
+            if p.is_file() and p.name not in OS_JUNK and p.relative_to(self.inputs_dir) != prompt
         )
 
     def close(self) -> None:
@@ -204,7 +222,11 @@ def run_group(
     argv: Sequence[str], *, cwd: Path, env: Mapping[str, str], stdin: str | None, deadline: Deadline
 ) -> tuple[str, str, int]:
     """Run ``argv`` in its own process group and collect its output. At the deadline the
-    group is killed and the exit code is TIMEOUT, with whatever output there was."""
+    group is killed and the exit code is TIMEOUT, with whatever output there was.
+
+    Output that is not valid text is decoded with the bad bytes replaced, not refused: a
+    program's stray byte must not cost the case its answer, and passing raw bytes on would
+    only move the decoding failure into the runner, which reads this shape's stdout as text."""
     proc = subprocess.Popen(
         list(argv),
         cwd=cwd,
@@ -213,6 +235,7 @@ def run_group(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        errors="replace",
         start_new_session=True,
     )
     try:

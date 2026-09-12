@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shlex
 import shutil
+import signal
 import sys
 from pathlib import Path
 
@@ -218,6 +219,36 @@ def test_main_reports_a_missing_program_as_a_config_error_in_process(tmp_path, m
     code = main(["--template", "no-such-program-xyz {prompt}", "--deadline", "30"])
     assert code == ShapeExit.CONFIG_ERROR
     assert "command not found: no-such-program-xyz" in capsys.readouterr().err
+
+
+def test_main_reports_a_program_it_cannot_execute_as_a_config_error(tmp_path, monkeypatch, capsys):
+    case = _case_dir(tmp_path, {"question.txt": "hi"})
+    _set_manifest(monkeypatch, case)
+    program = tmp_path / "not-executable"
+    program.write_text("#!/bin/sh\necho hi\n")
+    program.chmod(0o644)
+    code = main(["--template", f"{program} {{prompt}}", "--deadline", "30"])
+    assert code == ShapeExit.CONFIG_ERROR
+    err = capsys.readouterr().err
+    assert err.startswith("[trap] cannot start") and "not-executable" in err
+
+
+def test_a_program_killed_by_a_signal_exits_128_plus_the_signal(tmp_path, monkeypatch, capsys):
+    case = _case_dir(tmp_path, {"question.txt": "hi"})
+    _set_manifest(monkeypatch, case)
+    code = main(["--template", "sh -c 'echo partial; kill -KILL $$'", "--deadline", "30"])
+    assert code == 128 + signal.SIGKILL
+    assert capsys.readouterr().out == "partial\n"
+
+
+def test_main_relays_output_that_is_not_utf8_instead_of_crashing(tmp_path, monkeypatch, capsys):
+    case = _case_dir(tmp_path, {"question.txt": "hi"})
+    _set_manifest(monkeypatch, case)
+    program = tmp_path / "bytes.py"
+    program.write_text("import sys; sys.stdout.buffer.write(b'ok \\xff\\xfe')")
+    code = main(["--template", f"{PY} {program}", "--deadline", "30"])
+    assert code == 0
+    assert capsys.readouterr().out.startswith("ok ")
 
 
 def test_main_reports_a_bad_template_as_a_config_error_in_process(tmp_path, monkeypatch, capsys):

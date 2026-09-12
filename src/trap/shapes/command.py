@@ -77,13 +77,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             out, err, code = run_group(command, cwd=sandbox.workdir, env=env, stdin=stdin, deadline=deadline)
         except FileNotFoundError:
             raise ShapeError(ShapeExit.CONFIG_ERROR, f"command not found: {command[0]}") from None
+        except OSError as e:  # no execute bit, a bad shebang, anything else exec refused
+            raise ShapeError(ShapeExit.CONFIG_ERROR, f"cannot start {command[0]}: {e.strerror}") from None
     except ShapeError as e:
         return fail(e)
     finally:
         sandbox.close()
     sys.stdout.write(out)
     sys.stderr.write(err)
-    return code
+    # A program killed by signal N has returncode -N; report it the way a shell does,
+    # 128 + N — an exit status is 0-255, and -9 would reach the runner as 247.
+    return code if code >= 0 else 128 - code
 
 
 if __name__ == "__main__":

@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import locale
 import os
 import subprocess
+import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -59,6 +62,27 @@ def test_the_sandbox_is_a_copy_of_the_case_outside_the_task(tmp_path):
     assert not box.workdir.exists()
 
 
+def test_os_junk_files_are_not_extra_inputs(tmp_path):
+    case = _case(
+        tmp_path,
+        {
+            "question.txt": "what?",
+            ".DS_Store": "finder",
+            "desktop.ini": "explorer",
+            "data/Thumbs.db": "explorer",
+            "data/.DS_Store": "finder",
+            "data/ledger.txt": "1,2",
+        },
+    )
+    box = CaseSandbox.open(
+        manifest_envvar="TRAP_MANIFEST", prompt_file="question.txt", environ=_manifest(case)
+    )
+    try:
+        assert box.extra_inputs() == ["data/ledger.txt"]
+    finally:
+        box.close()
+
+
 def test_a_sandbox_without_a_manifest_says_how_to_run_it():
     with pytest.raises(ShapeError) as e:
         CaseSandbox.open(manifest_envvar="TRAP_MANIFEST", prompt_file="question.txt", environ={})
@@ -81,6 +105,48 @@ def test_a_case_without_the_prompt_file_is_a_config_error(tmp_path):
         CaseSandbox.open(manifest_envvar="TRAP_MANIFEST", prompt_file="question.txt", environ=_manifest(case))
     assert e.value.code is ShapeExit.CONFIG_ERROR
     assert "question.txt" in str(e.value)
+
+
+def test_inputs_that_cannot_be_copied_are_a_config_error_and_leave_no_work_dir(tmp_path, monkeypatch):
+    case = _case(tmp_path, {"question.txt": "what?"})
+    (case / "data.csv").symlink_to(tmp_path / "gone.csv")  # dangling: copying it fails
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    with pytest.raises(ShapeError) as e:
+        CaseSandbox.open(manifest_envvar="TRAP_MANIFEST", prompt_file="question.txt", environ=_manifest(case))
+    assert e.value.code is ShapeExit.CONFIG_ERROR
+    assert "cannot copy this case's inputs" in str(e.value)
+    assert list(scratch.iterdir()) == [], "the half-filled work directory was left behind"
+
+
+def test_a_question_that_is_not_utf8_is_a_config_error(tmp_path):
+    case = _case(tmp_path, {})
+    (case / "question.txt").write_bytes(b"caf\xe9?")
+    box = CaseSandbox.open(
+        manifest_envvar="TRAP_MANIFEST", prompt_file="question.txt", environ=_manifest(case)
+    )
+    try:
+        with pytest.raises(ShapeError) as e:
+            _ = box.question
+    finally:
+        box.close()
+    assert e.value.code is ShapeExit.CONFIG_ERROR
+    assert "question.txt" in str(e.value) and "UTF-8" in str(e.value)
+
+
+def test_a_question_that_cannot_be_read_is_a_config_error(tmp_path):
+    case = _case(tmp_path, {"question.txt": "what?"})
+    box = CaseSandbox.open(
+        manifest_envvar="TRAP_MANIFEST", prompt_file="question.txt", environ=_manifest(case)
+    )
+    try:
+        box.prompt_path.unlink()
+        with pytest.raises(ShapeError) as e:
+            _ = box.question
+    finally:
+        box.close()
+    assert e.value.code is ShapeExit.CONFIG_ERROR
 
 
 def test_the_env_loses_the_manifest_and_anything_naming_a_prefix(tmp_path):
@@ -150,6 +216,36 @@ def test_run_group_collects_output_and_exit_code(tmp_path):
         deadline=Deadline(10),
     )
     assert (out, err.strip(), code) == ("hi", "oops", 3)
+
+
+NOT_UTF8 = "import sys, time; sys.stdout.buffer.write(b'ok \\xff\\xfe'); sys.stdout.flush(); time.sleep({})"
+
+
+def _decoded(raw: bytes) -> str:
+    """``raw`` as a text-mode pipe decodes it with bad bytes replaced."""
+    return raw.decode(locale.getpreferredencoding(False), errors="replace")
+
+
+def test_run_group_replaces_output_that_is_not_utf8(tmp_path):
+    out, _, code = run_group(
+        [sys.executable, "-c", NOT_UTF8.format(0)],
+        cwd=tmp_path,
+        env=os.environ,
+        stdin=None,
+        deadline=Deadline(10),
+    )
+    assert (out, code) == (_decoded(b"ok \xff\xfe"), 0)
+
+
+def test_run_group_replaces_bad_output_collected_after_the_deadline_too(tmp_path):
+    out, _, code = run_group(
+        [sys.executable, "-c", NOT_UTF8.format(30)],
+        cwd=tmp_path,
+        env=os.environ,
+        stdin=None,
+        deadline=Deadline(1),
+    )
+    assert (out, code) == (_decoded(b"ok \xff\xfe"), ShapeExit.TIMEOUT)
 
 
 def test_the_deadline_kills_the_whole_group(tmp_path):
