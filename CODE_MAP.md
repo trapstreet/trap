@@ -18,6 +18,7 @@ graph TD
     loader["loader<br/>load trap.yaml / traptask.yaml"]
     runner["runner<br/>run solution per case"]
     cost["cost<br/>LLM spend proxy"]
+    shapes["shapes<br/>built-in solution programs"]
     git_ops["git_ops<br/>clone + git provenance"]
     environment["environment<br/>host machine detect"]
     display["display<br/>progress / report / submit UI"]
@@ -35,6 +36,8 @@ graph TD
     cli --> live
     cli --> workspace
     cli --> models
+    cli --> shapes
+    shapes --> cost
     live --> auth
     live --> models
     loader --> git_ops
@@ -62,6 +65,7 @@ graph TD
 | `loader` | Parse trap.yaml / traptask.yaml; clone + setup; discover cases | `TrapLoader`, `TraptaskLoader` |
 | `runner` | Execute the solution subprocess per case; run judge/grader | `TaskRunner` |
 | `cost` | Intercept LLM API calls via a local reverse proxy; tally spend | `CostProxy` |
+| `shapes` | Built-in solution programs, run *as* the solution subprocess (never imported by the runner): the ACP bridge, model-direct, the command template, and their shared sandbox / env scrub / deadline | `CaseSandbox`, `ShapeExit`, `AcpConnection`, `run_case` |
 | `git_ops` | Clone/fetch repos; compute `{repo, commit}` provenance | `LocalRepo`, `RemoteRepo`, `ParsedGitUrl` |
 | `workspace` | `.trap` addressing (solution keys, run layout, derived `latest`) + `report.json` IO | `SolutionIdentity`, `Workspace` |
 | `live` | Everything that talks to the paired server during and after a run, all of it fail-open. `tracker` mirrors progress (whitelisted events, heartbeats) from a sender thread; `delivery` is the one flow both the sender and `tp sync` use — verify the frozen identity, idempotently ensure the session, drain the outbox, persist the ack; `sync` is `tp sync` plus gap recovery by checkpoint; `grading` submits each case's answer for the site to judge when the task is an admitted evaluation. Depends on `auth`/`models`/`runner.layout`; only `cli` depends on it — nothing here may change what a run does | `LiveTracker`, `Delivery`, `Outbox`, `LiveSession`, `LiveClient`, `SiteGrader` |

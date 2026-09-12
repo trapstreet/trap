@@ -3,6 +3,9 @@
 A solution is any shell-invokable program. trap runs it once per case as a subprocess
 and captures its stdout/stderr/files — it never has to import trap or know it exists.
 
+Testing an agent product, a bare model, or someone else's program? You may not need to
+write one: see [Built-in shapes](built-in-shapes.md).
+
 ## Minimal `trap.yaml`
 
 Place it next to your solution code, then run `tp run` from that directory:
