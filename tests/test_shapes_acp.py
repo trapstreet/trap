@@ -353,6 +353,81 @@ def test_a_turn_that_ends_right_after_a_tool_call_has_an_empty_answer():
     assert c.final == ""
 
 
+# --- everything before the answer is kept, in order, for the case's stderr --------------
+
+
+def _tool(kind: str, tool_id: str = "t1", **fields: str) -> dict:
+    return {"sessionUpdate": kind, "toolCallId": tool_id, **fields}
+
+
+def test_earlier_messages_and_tool_calls_are_noted_in_order_but_not_the_answer():
+    notes: list[str] = []
+    c = MessageCollector(notes)
+    for u in [
+        _chunk("Let me look.", "m1"),
+        _tool("tool_call", title="Read question.txt", status="pending"),
+        _tool("tool_call_update", status="completed"),
+        _chunk("Checking.", "m2"),
+        _chunk("4", "m3"),
+        _chunk("2", "m3"),
+    ]:
+        c.on_update(u)
+    assert c.final == "42"
+    assert notes == [
+        "agent message: Let me look.",
+        "tool call: Read question.txt (pending)",
+        "tool call: Read question.txt (completed)",
+        "agent message: Checking.",
+    ]
+
+
+def test_without_message_ids_the_text_before_each_tool_call_is_noted():
+    notes: list[str] = []
+    c = MessageCollector(notes)
+    for u in [_chunk("thinking "), _chunk("aloud"), _tool("tool_call", title="ls"), _chunk("final")]:
+        c.on_update(u)
+    assert (c.final, notes) == ("final", ["agent message: thinking aloud", "tool call: ls"])
+
+
+def test_a_long_earlier_message_is_noted_cut_short():
+    notes: list[str] = []
+    c = MessageCollector(notes)
+    for u in [_chunk("x" * 600, "m1"), _chunk("answer", "m2")]:
+        c.on_update(u)
+    assert notes == ["agent message: " + "x" * 500 + "…"]
+
+
+def test_a_tool_update_without_a_status_is_not_noted_and_an_untitled_call_goes_by_its_id():
+    notes: list[str] = []
+    c = MessageCollector(notes)
+    for u in [
+        _tool("tool_call", "t7", status="pending"),
+        _tool("tool_call_update", "t7", content="streaming output"),
+        _tool("tool_call_update", "t7", title="Run tests", status="failed"),
+    ]:
+        c.on_update(u)
+    assert notes == ["tool call: t7 (pending)", "tool call: Run tests (failed)"]
+
+
+def test_the_case_stderr_tells_the_story_and_stdout_holds_only_the_answer(
+    fake, tmp_path, monkeypatch, capsys
+):
+    fake("ok")
+    case = _case_dir(tmp_path, {"question.txt": "q"})
+    _set_manifest(monkeypatch, case)
+    code = bridge.main(["--agent-cmd", shlex.join(AGENT), "--model", "haiku", "--deadline", "20"])
+    captured = capsys.readouterr()
+    assert (code, captured.out) == (ShapeExit.OK, "42\n")
+    story = [line for line in captured.err.splitlines() if line.startswith(("[trap] agent", "[trap] tool"))]
+    assert story[:4] == [
+        "[trap] agent config: effort=default, model=haiku",
+        "[trap] agent message: Let me read the file first.",
+        "[trap] tool call: Read question.txt (pending)",
+        "[trap] tool call: Read question.txt (completed)",
+    ]
+    assert "42" not in "\n".join(story[:4])
+
+
 def test_a_lone_chunk_with_no_message_id_still_starts_its_own_message():
     """The very first update, with no messageId: ``mid is None and self._boundary`` is
     the only true disjunct, and it alone must be enough to start a message — this is the

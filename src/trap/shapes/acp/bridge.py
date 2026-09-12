@@ -4,9 +4,9 @@
          --agent-cmd "npx -y @agentclientprotocol/claude-agent-acp@0.76.0"
 
 Prints the agent's last message and exits with the turn's ShapeExit code; the rest of
-the conversation — the config the case ran with, permissions, self-reported usage — goes
-to stderr. ``--describe`` prints the agent's config options instead: the values
-``--model`` and ``--option`` accept."""
+the conversation — the config the case ran with, the agent's earlier messages and tool
+calls, permissions, self-reported usage — goes to stderr. ``--describe`` prints the
+agent's config options instead: the values ``--model`` and ``--option`` accept."""
 
 from __future__ import annotations
 

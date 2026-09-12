@@ -3,8 +3,8 @@
 Protocol v1. tp declares no client capabilities — no ``fs``, no ``terminal`` — so the
 agent works on the case directory with its own tools, and the only thing it can ask tp
 for is permission, which is granted one call at a time. Everything besides the answer
-(the config the case ran with, permissions, self-reported usage) comes back as notes for
-stderr."""
+(the config the case ran with, the agent's earlier messages and tool calls, permissions,
+self-reported usage) comes back, in order, as notes for stderr."""
 
 from __future__ import annotations
 
@@ -42,6 +42,10 @@ class CaseOutcome:
     notes: list[str] = field(default_factory=list)
 
 
+#: How much of an earlier agent message the case's stderr keeps.
+NOTED_CHARS = 500
+
+
 class MessageCollector:
     """Splits the streamed reply into the agent's separate messages and keeps them all;
     the answer is the last. A new message starts when ``messageId`` changes, or — for an
@@ -49,21 +53,52 @@ class MessageCollector:
     right away: a turn that ends on a tool call answers with "", not with whatever it
     said before the tool call. Joining every chunk would put "let me read the file
     first…" in front of the answer, and a judge that wants three letters marks that
-    wrong."""
+    wrong.
 
-    def __init__(self) -> None:
+    Everything before the answer goes to ``notes`` as it happens — each earlier message
+    (cut to NOTED_CHARS) once a tool call or another message follows it, and each tool
+    call's title and status — so the case's stderr shows how the agent got to the
+    message that was taken as its answer."""
+
+    def __init__(self, notes: list[str] | None = None) -> None:
         self.messages: list[str] = []
         self.cost: dict[str, Any] | None = None
         self._current: object = None
         self._boundary = True
+        self._notes = notes if notes is not None else []
+        self._noted = 0  # how much of the running message is already in the notes
+        self._titles: dict[str, str] = {}
+
+    def _note_message(self) -> None:
+        """Note what the running message has said since it was last noted: something
+        followed it, so it is part of the process, not the answer."""
+        said = self.messages[-1][self._noted :] if self.messages else ""
+        if said:
+            cut = "…" if len(said) > NOTED_CHARS else ""
+            self._notes.append(f"agent message: {said[:NOTED_CHARS]}{cut}")
+        self._noted += len(said)
+
+    def _note_tool_call(self, kind: str, update: dict[str, Any]) -> None:
+        """Note a tool call when it starts, and again whenever an update changes its
+        status; a call is named by its title, or its id until it has one."""
+        tool = str(update.get("toolCallId"))
+        if update.get("title"):
+            self._titles[tool] = str(update["title"])
+        if kind == "tool_call" or "status" in update:
+            status = update.get("status")
+            self._notes.append(
+                f"tool call: {self._titles.get(tool, tool)}" + (f" ({status})" if status else "")
+            )
 
     def _start_new_segment(self, mid: object) -> None:
         """Open a fresh message for ``mid`` to append to — reusing the last one if a
         tool call already opened it and nothing has filled it yet, so a tool call
         followed immediately by another (or by nothing) never leaves a stray empty
         message in the middle of ``messages``."""
+        self._note_message()
         if not self.messages or self.messages[-1] != "":
             self.messages.append("")
+        self._noted = 0
         self._current = mid
         self._boundary = False
 
@@ -78,9 +113,11 @@ class MessageCollector:
                 self._start_new_segment(mid)
             self.messages[-1] += text
         elif kind in ("tool_call", "tool_call_update"):
+            self._note_message()
             if self._current is None and self.messages and self.messages[-1]:
                 self._start_new_segment(None)
             self._boundary = True
+            self._note_tool_call(kind, update)
         elif kind == "usage_update" and isinstance(update.get("cost"), dict):
             self.cost = update["cost"]
 
@@ -252,7 +289,7 @@ def run_case(
     with the exit code the turn earned. The agent's process group is gone on return — and
     on an interrupt, before the shape exits."""
     notes: list[str] = []
-    collector = MessageCollector()
+    collector = MessageCollector(notes)
     conn = AcpConnection(
         argv, env=env, cwd=workdir, on_update=collector.on_update, on_request=grant_once(notes)
     )
