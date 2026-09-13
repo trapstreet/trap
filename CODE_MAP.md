@@ -44,6 +44,7 @@ graph TD
     loader --> models
     loader --> workspace
     runner --> cost
+    runner --> loader
     runner --> models
     workspace --> git_ops
     workspace --> models

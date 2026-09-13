@@ -426,6 +426,12 @@ def run(
         run_dir=ws.run_dir(ts),
         cost_enabled=cost,
     )
+    # A task whose case inputs overlap its answers is refused here, before a session is
+    # opened on the site or a case starts. runner.run() refuses it too, for any caller.
+    try:
+        runner.refuse_answer_overlap(active_cases)
+    except ConfigError as e:
+        raise _die(e) from None
     # Capture the host machine environment (CPU/RAM/OS/Python) unless disabled.
     # Detection is best-effort and must never abort a run. Probed once, here,
     # so the report and the run's description on the site say the same thing.

@@ -211,6 +211,24 @@ def test_the_documented_form_runs_through_tp_on_path(make_project, runner, tmp_p
     assert case_capture(sol)[0].strip() == "ARG:hi"
 
 
+@pytest.mark.skipif(not _venv_tp(), reason="needs this venv's tp first on PATH (uv run pytest)")
+def test_a_case_dir_linked_into_expected_is_refused_before_the_shape_starts(make_project, runner, tmp_path):
+    # The manifest carries the resolved case dir, which here holds the answer; the shape
+    # would copy it into the work dir as an ordinary file. trap refuses the run instead.
+    sol = make_project(
+        cmd=shlex.join(["tp", "shape", "cmd", "--template", "cat answer.txt", "--deadline", "30"]),
+        expected={"c1": {"question.txt": "hi", "answer.txt": "secret"}},
+    )
+    case = tmp_path / "task" / "inputs" / "c1"
+    shutil.rmtree(case)
+    case.symlink_to("../expected/c1")
+    res = runner.invoke(app, ["run", "--task", "t", "--no-environment"])
+    assert res.exit_code == 2, res.output
+    assert "c1:inputs" in "".join(res.output.split())
+    assert "secret" not in res.output
+    assert not [p for p in sol.rglob("stdout") if p.parent.name == "solution"], "the shape started"
+
+
 def test_tp_shape_cmd_outside_a_run_says_how_to_use_it(runner, monkeypatch):
     monkeypatch.delenv("TRAP_MANIFEST", raising=False)
     res = runner.invoke(app, ["shape", "cmd", "--template", "echo hi"])
