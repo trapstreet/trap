@@ -26,10 +26,15 @@ tasks:
 
 - **Reads the question** from the case's `question.txt` (`--prompt-file` to change it),
   as UTF-8 whatever the locale; a question that isn't valid UTF-8 is a configuration
-  error (exit 24).
+  error (exit 24). `--prompt-file` is a relative path inside the case (`prompt.md`,
+  `docs/question.txt`): an absolute path, or one with a `..` component, is a
+  configuration error (exit 24).
 - **Works in a copy.** The case's input files are copied to a fresh temporary directory
   outside the task checkout and `.trap/`, private to the user running it (mode 0700);
-  the program under test runs there and the directory is removed afterwards. Task
+  the program under test runs there and the directory is removed afterwards — whatever
+  the program left in it, read-only or unlistable directories included. If something in
+  it still can't be removed, the shape says so in one `[trap] could not remove the work
+  dir …` line on stderr, and the case keeps its answer and exit code. Task
   questions that say "the file is in the current directory" work as written. Inputs
   that can't be copied (an unreadable file) are a configuration error (exit 24), and
   nothing is left behind. A symlink anywhere in a case's inputs — a file, a directory,

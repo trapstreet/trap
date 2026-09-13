@@ -223,7 +223,8 @@ tp shape cmd --template TEMPLATE [--repo PATH]
 ```
 
 `tp shape acp` requires `--model` unless it is given `--describe`. Every shape also takes
-`--prompt-file` (default `question.txt`), `--manifest-envvar`, `--deadline` (seconds,
+`--prompt-file` (default `question.txt`; a relative path inside the case — an absolute
+path or one with a `..` component exits 24), `--manifest-envvar`, `--deadline` (seconds,
 default 570) and `--scrub PATH`.
 
 ## tp report
