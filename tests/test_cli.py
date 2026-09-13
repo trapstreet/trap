@@ -82,9 +82,11 @@ def test_run_tag_filter_and_skip(make_project, runner):
         tags={"c1": ["smoke"]},
         skip=("c3",),
     )
-    res = runner.invoke(app, ["run", "-t", "smoke", "--no-environment"])
+    res = runner.invoke(app, ["run", "-t", "smoke", "-o", "json", "--no-environment"])
     assert res.exit_code == 0, res.output
-    assert "c1" in res.output and "c2" not in res.output
+    # exact case ids, never substrings of the output: the report path it prints carries the
+    # solution key's hex hash, which can itself contain "c1"/"c2"
+    assert [c["case_id"] for c in json.loads(res.stdout)["cases_results"]] == ["c1"]
 
 
 def test_run_output_only_autodiscovered(make_project, runner, tmp_path):
