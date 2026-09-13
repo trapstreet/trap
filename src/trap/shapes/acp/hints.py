@@ -7,12 +7,11 @@ otherwise."""
 from __future__ import annotations
 
 import json
-import shutil
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from trap.shapes._case import ShapeError, ShapeExit
+from trap.shapes._case import ShapeError, ShapeExit, copy_tree_without_symlinks, refuse_symlinks, remove_tree
 
 CLAUDE = "claude-acp"
 CODEX = "codex-acp"
@@ -56,9 +55,27 @@ def _codex_auth_mode(path: Path) -> str | None:
 
 def install_skill(agent_id: str | None, skill_dir: Path, workdir: Path) -> None:
     """Put a skill where the agent loads it from. Claude Code only for now: project skills
-    live in ``.claude/skills/<name>/`` and load under settingSources ["project"] (probe)."""
+    live in ``.claude/skills/<name>/`` and load under settingSources ["project"] (probe).
+
+    Copied the same way a case's inputs are: no symlink in the skill is ever created in
+    the work directory, and a skill holding one is refused rather than silently missing
+    whatever it named. Any other failure to install — the directory is missing, a file
+    could not be read — is a config error naming the skill directory, not the agent
+    (starting the agent is a separate failure, reported separately)."""
     if agent_id != CLAUDE:
         raise ShapeError(ShapeExit.CONFIG_ERROR, f"installing a skill is supported for {CLAUDE} only")
+    if not skill_dir.is_dir():
+        raise ShapeError(
+            ShapeExit.CONFIG_ERROR, f"cannot install the skill from {skill_dir}: no such directory"
+        )
     if not (skill_dir / "SKILL.md").is_file():
         raise ShapeError(ShapeExit.CONFIG_ERROR, f"no SKILL.md in {skill_dir}")
-    shutil.copytree(skill_dir, workdir / ".claude" / "skills" / skill_dir.resolve().name, dirs_exist_ok=True)
+    dest = workdir / ".claude" / "skills" / skill_dir.resolve().name
+    try:
+        links = copy_tree_without_symlinks(skill_dir, dest)
+    except OSError as e:
+        remove_tree(dest)
+        raise ShapeError(ShapeExit.CONFIG_ERROR, f"cannot install the skill from {skill_dir}: {e}") from None
+    if links:
+        remove_tree(dest)
+        refuse_symlinks("this skill contains symlinks", links)

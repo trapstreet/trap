@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from enum import IntEnum
 from pathlib import Path
 from types import FrameType
-from typing import NoReturn
+from typing import Any, NoReturn
 
 
 class ShapeExit(IntEnum):
@@ -88,34 +88,117 @@ OS_JUNK = frozenset({".DS_Store", "Thumbs.db", "desktop.ini"})
 MAX_NAMED_SYMLINKS = 5
 
 
-def _symlinks_under(root: Path) -> list[str]:
-    """Every symlink under ``root`` — a file, a directory, or one that resolves to
-    nothing — as a sorted POSIX path relative to ``root``. Walked with
-    ``followlinks=False`` so a symlinked directory is reported and never descended
-    into; nothing a link points at is ever read to produce this list."""
-    found: list[str] = []
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        for name in (*dirnames, *filenames):
-            entry = Path(dirpath, name)
-            if entry.is_symlink():
-                found.append(entry.relative_to(root).as_posix())
-    return sorted(found)
+def _secure_and_verify(dst: Path) -> list[str]:
+    """Walk an already-copied tree, giving the owner read/write/execute on every real
+    directory found — on top of whatever ``copystat`` gave it from the inputs, so a
+    read-only input directory (0555, say) does not stop the copy being written into or
+    later removed — and collecting any symlink still there.
+
+    ``copy_tree_without_symlinks``'s ``ignore`` callback should have kept every link out
+    of ``dst`` in the first place, so finding one here means it slipped past that check
+    somehow; ``symlinks=True`` stays a backstop for exactly that case, and a symlink
+    found is reported, never chmod'd through (that would reach through it to whatever it
+    names).
+
+    Walked with ``followlinks=False`` and an ``onerror`` that re-raises, so a directory
+    the walk cannot read (however that happened) surfaces as an error rather than being
+    silently skipped — the default `os.walk` swallows a `listdir` failure and simply
+    does not recurse into it, which would let a copy this function cannot fully inspect
+    be reported as symlink-free.
+
+    Returns every symlink found, as POSIX paths relative to ``dst``."""
+    links: list[str] = []
+
+    def _raise(err: OSError) -> NoReturn:
+        raise err
+
+    for dirpath, dirnames, filenames in os.walk(dst, followlinks=False, onerror=_raise):
+        for name in dirnames:
+            entry = os.path.join(dirpath, name)
+            if os.path.islink(entry):
+                links.append(Path(entry).relative_to(dst).as_posix())
+            else:
+                os.chmod(entry, os.stat(entry).st_mode | 0o700)
+        for name in filenames:
+            entry = os.path.join(dirpath, name)
+            if os.path.islink(entry):
+                links.append(Path(entry).relative_to(dst).as_posix())
+    return links
 
 
-def _refuse_symlinks(paths: Sequence[str]) -> NoReturn:
-    """A case whose inputs hold any symlink is refused outright, wherever it points:
-    even a link that resolves inside the case's own inputs is one a task author could
-    just as easily have pointed at ``expected/`` instead, and a shape has no way to
-    tell the two apart from here — so none are ever copied through."""
+def copy_tree_without_symlinks(src: Path, dst: Path) -> list[str]:
+    """Copy every file and directory under ``src`` into ``dst``, never creating a
+    symlink there — used for a case's inputs and for ``--skill``.
+
+    The ``copytree`` ``ignore`` callback records each entry ``os.path.islink`` reports
+    and drops it from the copy, whatever it names: even one that resolves inside ``src``
+    itself is left out, because nothing a link points at is ever read to decide. This
+    also closes a theoretical write-through: on a case-insensitive work directory, a
+    link ``DATA -> X`` alongside an input directory ``data/`` would otherwise make
+    copytree write *into* ``X`` when it reached the second name. ``symlinks=True`` stays
+    as a backstop, so a link that lands anyway is recreated as a link, never
+    dereferenced — see ``_secure_and_verify``, which checks for exactly that.
+
+    Every directory copytree creates — ``dst`` itself included — gets the owner's
+    read/write/execute bits added on top of whatever ``copystat`` gave it from ``src``.
+
+    Returns every symlink found — file, directory, or one that resolves to nothing — as
+    POSIX paths relative to ``src`` (``dst`` mirrors ``src``'s layout, so the two name
+    the same paths), sorted. Raises ``OSError`` if the copy, or verifying it, fails."""
+    links: list[str] = []
+
+    def _ignore(dirpath: str, names: list[str]) -> set[str]:
+        skip = set()
+        for name in names:
+            if os.path.islink(os.path.join(dirpath, name)):
+                skip.add(name)
+                links.append(Path(dirpath, name).relative_to(src).as_posix())
+        return skip
+
+    shutil.copytree(src, dst, symlinks=True, dirs_exist_ok=True, ignore=_ignore)
+    os.chmod(dst, os.stat(dst).st_mode | 0o700)
+    links.extend(_secure_and_verify(dst))
+    return sorted(set(links))
+
+
+def refuse_symlinks(clause: str, paths: Sequence[str]) -> NoReturn:
+    """A case or a skill whose copy would include a symlink is refused outright,
+    wherever it points: even a link that resolves inside its own source is one a task
+    author could just as easily have pointed at ``expected/`` instead, and a shape has
+    no way to tell the two apart from here — so none are ever copied through.
+
+    ``clause`` names what held them (e.g. "this case's inputs contain symlinks");
+    ``paths`` are named relative to that source, capped at MAX_NAMED_SYMLINKS — a case
+    gone wrong in bulk doesn't need every path spelled out to be diagnosable — with the
+    rest only counted, and file contents are never shown."""
     shown = list(paths[:MAX_NAMED_SYMLINKS])
     remaining = len(paths) - len(shown)
     if remaining > 0:
         shown.append(f"and {remaining} more")
     raise ShapeError(
         ShapeExit.CONFIG_ERROR,
-        "this case's inputs contain symlinks — a shape never copies them, because a link "
-        f"can reach the answers: {', '.join(shown)}",
+        f"{clause} — a shape never copies them, because a link can reach the answers: {', '.join(shown)}",
     )
+
+
+def _reclaim_and_retry(func: Any, path: str, exc: BaseException) -> None:
+    """``remove_tree``'s ``onexc`` handler: a directory copied read-only from the
+    inputs, or one a child made read-only while the case ran, blocks ``func`` on its
+    parent's write bit. Reclaim it there and on ``path`` itself, then retry once. A
+    path already gone — nothing left to remove — needs no retry."""
+    if not os.path.lexists(path):
+        return
+    parent = os.path.dirname(path)
+    os.chmod(parent, os.stat(parent).st_mode | 0o700)
+    os.chmod(path, os.stat(path).st_mode | 0o700)
+    func(path)
+
+
+def remove_tree(path: Path) -> None:
+    """Remove ``path`` and everything under it, reclaiming the owner's write bit
+    wherever it is missing instead of leaving a ``trap-case-*`` directory (or a
+    partially installed skill) behind. A path already gone is not an error."""
+    shutil.rmtree(path, onexc=_reclaim_and_retry)
 
 
 @dataclass
@@ -142,16 +225,28 @@ class CaseSandbox:
                 ShapeExit.CONFIG_ERROR, f"${manifest_envvar} is not a trap manifest ({e})"
             ) from None
         if inputs_dir.is_symlink():
-            # Only a hand-made manifest reaches this — the runner always resolves
-            # inputs_dir first — but nothing stops one from pointing straight at
-            # expected/, and copytree below would silently walk through it: caught
-            # here, before a work directory even exists to clean up. inputs_dir has
-            # no path relative to itself to name, so this gets its own message
-            # rather than _refuse_symlinks', which names paths under it.
+            # The runner always hands a shape a resolved inputs_dir — a case directory
+            # that is itself a link is followed by the runner before a shape ever sees
+            # it — so only a hand-made manifest reaches this check. Nothing stops one
+            # from pointing straight at expected/, though, and copytree below would
+            # silently walk through it: caught here, before a work directory even
+            # exists to clean up. inputs_dir has no path relative to itself to name, so
+            # this gets its own message rather than refuse_symlinks', which names
+            # paths under it.
             raise ShapeError(
                 ShapeExit.CONFIG_ERROR,
                 f"this case's inputs ({inputs_dir}) is itself a symlink — a shape never copies "
                 "inputs through a link, because it can reach the answers",
+            )
+        prompt_path_rel = Path(prompt_file)
+        if prompt_path_rel.is_absolute() or ".." in prompt_path_rel.parts:
+            # inputs_dir / prompt_file silently escapes inputs_dir for either shape
+            # (an absolute right-hand side replaces the left entirely; ".." walks back
+            # out) — refused here so the existence check below and the later read from
+            # the work directory can never disagree about which file they mean.
+            raise ShapeError(
+                ShapeExit.CONFIG_ERROR,
+                f"--prompt-file must be a plain relative path inside the case, got {prompt_file!r}",
             )
         if not (inputs_dir / prompt_file).is_file():
             raise ShapeError(
@@ -159,21 +254,21 @@ class CaseSandbox:
             )
         workdir = Path(tempfile.mkdtemp(prefix="trap-case-")).resolve()
         try:
-            # symlinks=True so a link is recreated as a link, never dereferenced into
-            # the answer it names; the walk below then decides from what actually
-            # landed in the work directory, which is what the child can see.
-            shutil.copytree(inputs_dir, workdir, symlinks=True, dirs_exist_ok=True)
+            links = copy_tree_without_symlinks(inputs_dir, workdir)
         except OSError as e:  # shutil.Error too: an unreadable file, one that vanishes mid-copy, ...
-            shutil.rmtree(workdir, ignore_errors=True)
+            remove_tree(workdir)
             raise ShapeError(
                 ShapeExit.CONFIG_ERROR, f"cannot copy this case's inputs from {inputs_dir}: {e}"
             ) from None
+        # The work directory is this case's own, not shared with any other — private to
+        # whoever runs `tp run`, however the inputs themselves were shared on disk.
+        os.chmod(workdir, 0o700)
         # The copy mirrors inputs_dir's layout exactly, so a path found here is the
         # same path relative to inputs_dir — this is what a shape is about to hand a
         # program or agent, named the way the case author would recognise it.
-        if links := _symlinks_under(workdir):
-            shutil.rmtree(workdir, ignore_errors=True)
-            _refuse_symlinks(links)
+        if links:
+            remove_tree(workdir)
+            refuse_symlinks("this case's inputs contain symlinks", links)
         return cls(inputs_dir=inputs_dir, prompt_file=prompt_file, workdir=workdir)
 
     @property
@@ -202,7 +297,7 @@ class CaseSandbox:
         )
 
     def close(self) -> None:
-        shutil.rmtree(self.workdir, ignore_errors=True)
+        remove_tree(self.workdir)
 
 
 #: Never scrubbed by value: a child cannot start without them, and a broad ``--scrub`` (a

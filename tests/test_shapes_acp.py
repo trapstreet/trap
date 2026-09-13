@@ -939,6 +939,54 @@ def test_install_skill_requires_a_skill_md(tmp_path):
     assert "SKILL.md" in str(e.value)
 
 
+def test_install_skill_reports_a_missing_directory_as_cannot_install(tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    with pytest.raises(ShapeError) as e:
+        hints.install_skill("claude-acp", tmp_path / "no-such-skill", work)
+    assert e.value.code is ShapeExit.CONFIG_ERROR
+    assert "cannot install the skill" in str(e.value)
+
+
+def test_install_skill_refuses_a_symlink_in_the_skill(tmp_path):
+    skill = tmp_path / "my-skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("---\nname: my-skill\n---\n")
+    secret = tmp_path / "secret.txt"
+    secret.write_text("s3cr3t")
+    (skill / "leak.txt").symlink_to(secret)
+    work = tmp_path / "work"
+    work.mkdir()
+    with pytest.raises(ShapeError) as e:
+        hints.install_skill("claude-acp", skill, work)
+    message = str(e.value)
+    assert e.value.code is ShapeExit.CONFIG_ERROR
+    assert "symlink" in message and "leak.txt" in message
+    assert "s3cr3t" not in message
+    assert not (work / ".claude" / "skills" / "my-skill").exists()
+
+
+def test_install_skill_reports_any_other_copy_failure_as_cannot_install_not_start_the_agent(
+    tmp_path, monkeypatch
+):
+    skill = tmp_path / "my-skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("hello")
+    work = tmp_path / "work"
+    work.mkdir()
+
+    def boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(hints, "copy_tree_without_symlinks", boom)
+    with pytest.raises(ShapeError) as e:
+        hints.install_skill("claude-acp", skill, work)
+    assert e.value.code is ShapeExit.CONFIG_ERROR
+    assert "cannot install the skill" in str(e.value)
+    assert "cannot start the agent" not in str(e.value)
+    assert not (work / ".claude" / "skills" / "my-skill").exists()
+
+
 # --- tp shape acp: end to end, the way a trap.yaml `cmd:` line actually runs it ---------
 
 
@@ -1162,6 +1210,61 @@ def test_bridge_installs_a_skill_for_claude_acp(fake, tmp_path, monkeypatch):
     # installed at the wrong depth, flattened, or truncated must fail this.
     start = next(e for e in _log(log) if "cwd" in e)
     assert start["tree"][".claude/skills/my-skill/SKILL.md"] == "hello skill"
+
+
+def test_bridge_refuses_a_skill_whose_symlink_reaches_a_secret(fake, tmp_path, monkeypatch, capsys):
+    log = fake("ok")
+    case = _case_dir(tmp_path, {"question.txt": "q"})
+    _set_manifest(monkeypatch, case)
+    secret = tmp_path / "secret.txt"
+    secret.write_text("s3cr3t")
+    skill = tmp_path / "my-skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("hello skill")
+    (skill / "leak.txt").symlink_to(secret)
+    code = bridge.main(
+        [
+            "--agent-cmd",
+            shlex.join(AGENT),
+            "--agent-id",
+            "claude-acp",
+            "--model",
+            "haiku",
+            "--skill",
+            str(skill),
+            "--deadline",
+            "20",
+        ]
+    )
+    assert code == ShapeExit.CONFIG_ERROR
+    captured = capsys.readouterr()
+    assert "leak.txt" in captured.err
+    assert "s3cr3t" not in captured.err
+    assert "s3cr3t" not in captured.out
+    assert not log.exists(), "the agent's own startup log means it was started"
+
+
+def test_bridge_reports_a_missing_skill_dir_as_cannot_install(fake, tmp_path, monkeypatch, capsys):
+    log = fake("ok")
+    case = _case_dir(tmp_path, {"question.txt": "q"})
+    _set_manifest(monkeypatch, case)
+    code = bridge.main(
+        [
+            "--agent-cmd",
+            shlex.join(AGENT),
+            "--agent-id",
+            "claude-acp",
+            "--model",
+            "haiku",
+            "--skill",
+            str(tmp_path / "no-such-skill"),
+            "--deadline",
+            "20",
+        ]
+    )
+    assert code == ShapeExit.CONFIG_ERROR
+    assert "cannot install the skill" in capsys.readouterr().err
+    assert not log.exists(), "the agent's own startup log means it was started"
 
 
 def test_bridge_refuses_a_skill_for_an_unsupported_agent(fake, tmp_path, monkeypatch, capsys):

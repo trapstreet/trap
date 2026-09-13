@@ -100,6 +100,8 @@ CASE_GARBAGE = [
         pytest.param({}, ["--template", "no-such-program-xyz {prompt}"], id="program-missing"),
         pytest.param({}, ["--template", "{tmp}/not-executable {prompt}"], id="program-not-executable"),
         pytest.param({}, ["--template", f"{PY} -c '{NOT_UTF8}'"], id="program-prints-invalid-utf8"),
+        pytest.param({}, ["--template", "cat", "--prompt-file", "/etc/passwd"], id="prompt-file-absolute"),
+        pytest.param({}, ["--template", "cat", "--prompt-file", "../x"], id="prompt-file-dotdot"),
         *(pytest.param(p.values[0], ["--template", "cat"], id=p.id) for p in CASE_GARBAGE),
     ],
 )
@@ -157,6 +159,33 @@ AGENT_MODES = [
             "ok",
             ["--agent-cmd", FAKE_AGENT, "--agent-id", "claude-acp", "--model", "haiku", "--skill", "{tmp}"],
             id="skill-without-skill-md",
+        ),
+        pytest.param(
+            {},
+            "ok",
+            [
+                "--agent-cmd",
+                FAKE_AGENT,
+                "--agent-id",
+                "claude-acp",
+                "--model",
+                "haiku",
+                "--skill",
+                "{tmp}/no-such-skill",
+            ],
+            id="skill-missing-dir",
+        ),
+        pytest.param(
+            {},
+            "ok",
+            ["--agent-cmd", FAKE_AGENT, "--model", "haiku", "--prompt-file", "/etc/passwd"],
+            id="prompt-file-absolute",
+        ),
+        pytest.param(
+            {},
+            "ok",
+            ["--agent-cmd", FAKE_AGENT, "--model", "haiku", "--prompt-file", "../x"],
+            id="prompt-file-dotdot",
         ),
         pytest.param({}, "ok", ["--agent-cmd", "no-such-agent-xyz", "--model", "haiku"], id="agent-missing"),
         pytest.param(
@@ -281,6 +310,8 @@ ANTHROPIC = ["--model", "claude-test"]
             id="reply-stop-reason-an-object",
         ),
         pytest.param({}, {}, OPENAI, _reply({"error": {"message": "overloaded"}}, 500), id="reply-http-500"),
+        pytest.param({}, {}, [*OPENAI, "--prompt-file", "/etc/passwd"], None, id="prompt-file-absolute"),
+        pytest.param({}, {}, [*OPENAI, "--prompt-file", "../x"], None, id="prompt-file-dotdot"),
         pytest.param(
             {},
             {},

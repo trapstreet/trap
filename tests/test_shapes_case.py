@@ -8,6 +8,7 @@ import locale
 import os
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -24,11 +25,14 @@ from trap.shapes._case import (
     ShapeError,
     ShapeExit,
     ShapeParser,
+    _secure_and_verify,
     add_case_args,
+    copy_tree_without_symlinks,
     fail,
     kill_group,
     kill_now,
     open_case,
+    remove_tree,
     run_group,
     scrubbed_env,
 )
@@ -188,9 +192,10 @@ def test_the_prompt_file_itself_a_symlink_is_refused(tmp_path):
     assert "question.txt" in str(e.value) and "symlinks" in str(e.value)
 
 
-def test_an_inputs_dir_that_is_itself_a_symlink_is_refused(tmp_path):
-    # Only a hand-made manifest can point inputs_dir at a symlink — the runner always
-    # resolves it first — but a shape must not trust a manifest that does.
+def test_a_hand_made_manifest_pointing_inputs_dir_at_a_symlink_is_refused(tmp_path):
+    # The runner always hands a shape a resolved inputs_dir — a case directory that is
+    # itself a link is followed by the runner before a shape ever sees it — so only a
+    # hand-made manifest can reach this check, and a shape must not trust one that does.
     real_case = _case(tmp_path, {"question.txt": "what?"})
     link = tmp_path / "task" / "inputs" / "c1-link"
     link.symlink_to(real_case)
@@ -213,6 +218,180 @@ def test_more_symlinks_than_the_cap_are_named_and_the_rest_are_counted(tmp_path)
     for name in sorted(names)[:MAX_NAMED_SYMLINKS]:
         assert name in message
     assert "and 3 more" in message
+
+
+# --- copy_tree_without_symlinks: the one copy every shape uses for a case's inputs and
+# for --skill never creates a link in the destination, and reports every one it found --
+
+
+def test_copy_tree_without_symlinks_creates_no_link_and_reports_every_one(tmp_path):
+    src = tmp_path / "src"
+    (src / "data").mkdir(parents=True)
+    (src / "data" / "real.txt").write_text("kept")
+    secret = tmp_path / "secret.txt"
+    secret.write_text("s3cr3t")
+    (src / "data" / "nested_link.txt").symlink_to(secret)  # a link inside a real subdir
+    (src / "top_link.txt").symlink_to(secret)  # a file link at the top
+    (src / "linked_dir").symlink_to(src / "data")  # a directory link at the top
+    dst = tmp_path / "dst"
+
+    links = copy_tree_without_symlinks(src, dst)
+
+    assert links == sorted(["data/nested_link.txt", "top_link.txt", "linked_dir"])
+    assert (dst / "data" / "real.txt").read_text() == "kept"
+    assert not (dst / "data" / "nested_link.txt").exists()
+    assert not (dst / "top_link.txt").exists()
+    assert not (dst / "linked_dir").exists()
+    for p in dst.rglob("*"):
+        assert not p.is_symlink(), p
+
+
+def test_a_directory_the_walk_cannot_read_refuses_the_case_and_leaves_no_work_dir(tmp_path, monkeypatch):
+    case = _case(tmp_path, {"question.txt": "what?"})
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+
+    def fake_walk(root, followlinks=False, onerror=None):
+        if onerror is not None:
+            onerror(OSError("permission denied"))
+        return
+        yield  # pragma: no cover - never reached; makes this a generator function
+
+    monkeypatch.setattr(os, "walk", fake_walk)
+    with pytest.raises(ShapeError) as e:
+        CaseSandbox.open(manifest_envvar="TRAP_MANIFEST", prompt_file="question.txt", environ=_manifest(case))
+    assert e.value.code is ShapeExit.CONFIG_ERROR
+    assert list(scratch.iterdir()) == [], "a trap-case-* work dir was left behind"
+
+
+def test_secure_and_verify_finds_a_symlink_that_slipped_past_the_ignore_callback(tmp_path):
+    # symlinks=True is a backstop for a link the ignore callback missed; this tests that
+    # backstop directly by planting links straight into an already-"copied" tree.
+    dst = tmp_path / "dst"
+    (dst / "sub").mkdir(parents=True)
+    (dst / "sub" / "file.txt").write_text("x")
+    os.chmod(dst / "sub", 0o555)  # a directory copystat left read-only
+    outside_secret = tmp_path / "elsewhere.txt"
+    outside_secret.write_text("s3cr3t")
+    (dst / "link.txt").symlink_to(outside_secret)
+    linked_dir_target = tmp_path / "real_dir"
+    linked_dir_target.mkdir()
+    linked_dir_target.chmod(0o750)
+    (dst / "linked_dir").symlink_to(linked_dir_target)
+
+    links = _secure_and_verify(dst)
+
+    assert sorted(links) == ["link.txt", "linked_dir"]
+    assert stat.S_IMODE((dst / "sub").stat().st_mode) & 0o700 == 0o700, "the real dir was not made writable"
+    # chmod must never reach through the dir symlink to what it names.
+    assert stat.S_IMODE(linked_dir_target.stat().st_mode) == 0o750
+
+
+def test_secure_and_verify_fails_closed_when_the_walk_cannot_read_a_directory(tmp_path, monkeypatch):
+    dst = tmp_path / "dst"
+    dst.mkdir()
+
+    def fake_walk(root, followlinks=False, onerror=None):
+        if onerror is not None:
+            onerror(OSError("permission denied"))
+        return
+        yield  # pragma: no cover - never reached; makes this a generator function
+
+    monkeypatch.setattr(os, "walk", fake_walk)
+    with pytest.raises(OSError):
+        _secure_and_verify(dst)
+
+
+def test_remove_tree_tolerates_a_path_that_is_already_gone(tmp_path):
+    remove_tree(tmp_path / "already-gone")  # must not raise
+
+
+# --- the work directory is private, and writable even from a read-only input ----------
+
+
+def test_the_work_dir_is_private_even_when_the_inputs_dir_is_wide_open(tmp_path):
+    case = _case(tmp_path, {"question.txt": "what?"})
+    os.chmod(case, 0o777)
+    box = CaseSandbox.open(
+        manifest_envvar="TRAP_MANIFEST", prompt_file="question.txt", environ=_manifest(case)
+    )
+    try:
+        assert stat.S_IMODE(box.workdir.stat().st_mode) == 0o700
+    finally:
+        box.close()
+
+
+def test_a_read_only_input_dir_still_yields_a_writable_copy_and_close_leaves_nothing(tmp_path):
+    case = _case(tmp_path, {"question.txt": "what?", "data/ledger.txt": "1,2"})
+    data_dir = case / "data"
+    os.chmod(data_dir, 0o555)
+    try:
+        box = CaseSandbox.open(
+            manifest_envvar="TRAP_MANIFEST", prompt_file="question.txt", environ=_manifest(case)
+        )
+        try:
+            assert stat.S_IMODE((box.workdir / "data").stat().st_mode) & 0o700 == 0o700
+        finally:
+            box.close()
+        assert not box.workdir.exists()
+    finally:
+        os.chmod(data_dir, 0o755)
+
+
+def test_a_refused_case_with_a_read_only_dir_holding_a_link_leaves_no_work_dir(tmp_path, monkeypatch):
+    case = _case(tmp_path, {"question.txt": "what?"})
+    data_dir = case / "data"
+    data_dir.mkdir()
+    target = case.parent.parent / "expected" / "c1" / "answer.txt"
+    (data_dir / "link.txt").symlink_to(target)
+    os.chmod(data_dir, 0o555)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    try:
+        with pytest.raises(ShapeError) as e:
+            CaseSandbox.open(
+                manifest_envvar="TRAP_MANIFEST", prompt_file="question.txt", environ=_manifest(case)
+            )
+        assert e.value.code is ShapeExit.CONFIG_ERROR
+        assert list(scratch.iterdir()) == [], "a trap-case-* work dir was left behind"
+    finally:
+        os.chmod(data_dir, 0o755)
+
+
+def test_close_removes_a_work_dir_a_child_made_read_only(tmp_path):
+    case = _case(tmp_path, {"question.txt": "what?"})
+    box = CaseSandbox.open(
+        manifest_envvar="TRAP_MANIFEST", prompt_file="question.txt", environ=_manifest(case)
+    )
+    made = box.workdir / "made_by_child"
+    made.mkdir()
+    (made / "file.txt").write_text("x")
+    os.chmod(made, 0o555)
+    box.close()
+    assert not box.workdir.exists()
+
+
+# --- --prompt-file must stay a plain relative path inside the case --------------------
+
+
+def test_prompt_file_must_not_be_an_absolute_path(tmp_path):
+    case = _case(tmp_path, {"question.txt": "what?"})
+    with pytest.raises(ShapeError) as e:
+        CaseSandbox.open(manifest_envvar="TRAP_MANIFEST", prompt_file="/etc/passwd", environ=_manifest(case))
+    assert e.value.code is ShapeExit.CONFIG_ERROR
+    assert "/etc/passwd" in str(e.value)
+
+
+def test_prompt_file_must_not_escape_the_case_with_dotdot(tmp_path):
+    case = _case(tmp_path, {"question.txt": "what?"})
+    with pytest.raises(ShapeError) as e:
+        CaseSandbox.open(
+            manifest_envvar="TRAP_MANIFEST", prompt_file="../secret.txt", environ=_manifest(case)
+        )
+    assert e.value.code is ShapeExit.CONFIG_ERROR
+    assert "../secret.txt" in str(e.value)
 
 
 def test_a_question_that_is_not_utf8_is_a_config_error(tmp_path):
