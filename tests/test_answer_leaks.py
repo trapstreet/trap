@@ -1,14 +1,17 @@
 """A task that could hand a solution the answers is refused before any case runs.
 
 A solution is handed its case's inputs directory. Nothing in it may be a symlink, from the
-inputs root down; no answers directory may lie inside it or around it; and case ids stay
-inside their directories. The tests build those layouts with real links."""
+inputs root down; no answers directory may lie inside it, and no case's answers directory
+around it; and case ids stay inside their directories. The tests build those layouts with
+real links."""
 
 from __future__ import annotations
 
 import json
+import os
 import shutil
-from collections.abc import Callable
+import unicodedata
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -221,25 +224,96 @@ def test_a_directory_the_check_cannot_read_is_refused(tmp_path):
     assert f"c1: inputs {task / 'inputs' / 'c1' / 'locked'} cannot be read" in message
 
 
+def test_an_entry_that_vanishes_during_the_walk_is_refused(tmp_path, monkeypatch):
+    task = _task(tmp_path)
+    walk = os.walk
+
+    def walk_with_a_vanished_entry(top, **kwargs):
+        for dirpath, dirnames, filenames in walk(top, **kwargs):
+            yield dirpath, dirnames, [*filenames, "vanished.txt"]
+
+    monkeypatch.setattr(os, "walk", walk_with_a_vanished_entry)
+    message = _refusal(task, ["c1"])
+    assert f"c1: inputs {task / 'inputs' / 'c1' / 'vanished.txt'} cannot be read" in message
+
+
 def test_only_the_cases_about_to_run_are_walked(tmp_path):
     task = _task(tmp_path, ("c1", "c2"))
     (task / "inputs" / "c2" / "reference.txt").symlink_to("../../expected/c2/answer.txt")
     assert _refusal(task, ["c1", "c2"], run=["c1"]) == ""
 
 
+# --- the roots, resolved as the runner resolves them ----------------------------------
+
+
+@pytest.fixture(params=["gone", "locked"])
+def detour(request, tmp_path: Path) -> Iterator[str]:
+    """A folder for a ``..`` in a root to pass through: one that isn't there, or one no one
+    may search. The runner resolves such a ``..`` by text, where the OS fails on it."""
+    if request.param == "locked":
+        (tmp_path / "task" / "locked").mkdir(parents=True, mode=0o000)
+    yield request.param
+    unlock(tmp_path)
+
+
+def test_a_dotdot_in_dirs_inputs_is_resolved_as_the_runner_resolves_it(tmp_path, detour: str):
+    task = _task(tmp_path)
+    link = task / "inputs" / "c1" / "reference.txt"
+    link.symlink_to("../../expected/c1/answer.txt")
+    assert f"c1: inputs {link} is a symlink" in _refusal(task, ["c1"], inputs=f"{detour}/../inputs/")
+
+
+def test_a_dotdot_in_dirs_expected_is_resolved_as_the_runner_resolves_it(tmp_path, detour: str):
+    task = _task(tmp_path)
+    answers = task / "inputs" / "c1" / "ans"
+    answers.mkdir()
+    message = _refusal(task, ["c1"], expected=f"{detour}/../inputs/c1/ans/")
+    assert f"c1: inputs {task / 'inputs' / 'c1'} hold the expected root {answers}" in message
+
+
+def test_an_inputs_root_linked_through_a_dotdot_is_resolved_as_the_runner_resolves_it(tmp_path, detour: str):
+    task = _task(tmp_path)
+    (task / "inputs").rename(task / "stored")
+    (task / "inputs").symlink_to(f"{detour}/../stored")
+    link = task / "stored" / "c1" / "reference.txt"
+    link.symlink_to("../../expected/c1/answer.txt")
+    assert f"c1: inputs {link} is a symlink" in _refusal(task, ["c1"])
+
+
 # --- no answers inside what a solution is handed --------------------------------------
 
 
-@pytest.mark.parametrize("spelling", ["inputs/", "Inputs/"])
-def test_dirs_naming_one_directory_are_refused(tmp_path, spelling: str):
+NFC, NFD = (unicodedata.normalize(form, "réponses") for form in ("NFC", "NFD"))
+
+
+def _expected_in_another_unicode_form(task: Path) -> dict[str, str]:
+    (task / "expected").rename(task / NFC)
+    return {"inputs": f"{NFD}/", "expected": f"{NFC}/"}
+
+
+def _inputs_root_linked_to_expected(task: Path) -> dict[str, str]:
+    shutil.rmtree(task / "inputs")
+    (task / "inputs").symlink_to("expected")
+    return {}
+
+
+@pytest.mark.parametrize(
+    "layout",
+    [
+        pytest.param(lambda task: {"inputs": "expected/"}, id="one name"),
+        pytest.param(lambda task: {"inputs": "Expected/"}, id="another letter case"),
+        pytest.param(_expected_in_another_unicode_form, id="another Unicode form"),
+        pytest.param(_inputs_root_linked_to_expected, id="an inputs root linked to it"),
+    ],
+)
+def test_dirs_naming_one_directory_are_refused(tmp_path, layout: Callable[[Path], dict[str, str]]):
     task = _task(tmp_path)
-    if not (task / spelling).exists():
-        pytest.skip("the tmp filesystem tells letter cases apart")
-    message = _refusal(task, ["c1"], inputs=spelling, expected="inputs/")
-    assert (
-        f"c1: inputs {task / spelling / 'c1'} hold the answers of case 'c1' {task / 'inputs' / 'c1'}"
-        in message
-    )
+    dirs = layout(task)
+    inputs = task / dirs.get("inputs", "inputs/")
+    if not inputs.exists():
+        pytest.skip("the tmp filesystem tells these two spellings apart")
+    line = f"c1: inputs {os.path.realpath(inputs / 'c1')} hold the answers of case 'c1'"
+    assert line in _refusal(task, ["c1"], **dirs)
 
 
 def test_ids_that_make_one_case_s_inputs_another_s_answers_are_refused(tmp_path):

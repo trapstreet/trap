@@ -6,6 +6,14 @@ from pathlib import Path
 from trap.runner.capture import Capture
 
 
+def task_root(traptask_dir: Path, relative: str) -> Path:
+    """A task directory named in traptask.yaml's ``dirs``, resolved: the root each case's
+    inputs and answers are handed on from, to the solution, the judge and the leak check
+    alike. Resolving takes a ``..`` after a folder that is missing or can't be searched
+    by its text, where the OS would fail on it, so all three must start from this path."""
+    return (traptask_dir / relative).resolve()
+
+
 @dataclass(frozen=True)
 class CaseLayout:
     """Where one case's run artefacts live in the .trap workspace.

@@ -3,12 +3,14 @@
 A solution is handed its case's inputs directory, resolved, and nothing downstream can tell
 a link or an answers directory in it from an ordinary file. So: nothing a solution is
 handed may be a symlink, from the inputs root down to and inside each running case's
-inputs (the inputs root itself may be one); no answers directory — the expected root's or
+inputs (the inputs root itself may be one); no answers directory — the expected root or
 any defined case's — may lie inside a running case's inputs, and no case's answers
-directory may lie around a running case's directory; and case ids stay inside their
-directories. Directories are compared as (device, inode), which sees through a different
-letter case or Unicode spelling of one directory, and through a firmlink. A hard link or a
-copy of an answer inside the inputs is an ordinary file and is the task author's to avoid."""
+directory may be or lie around a running case's directory; and case ids stay inside their
+directories. Both roots are resolved exactly as the runner resolves them (``task_root``),
+and directories are compared as (device, inode), which sees through a different letter
+case or Unicode spelling of one directory, and through a firmlink. An answer placed in
+the inputs — a copy, a hard link, or an answers-side link to an input file — isn't
+checked, and is the task author's to avoid."""
 
 from __future__ import annotations
 
@@ -21,6 +23,7 @@ from typing import NoReturn
 
 from trap.errors import ConfigError
 from trap.models import TraptaskCase, TraptaskConfig
+from trap.runner.layout import task_root
 
 #: A refusal names at most this many cases and counts the rest.
 MAX_NAMED_CASES = 5
@@ -48,22 +51,23 @@ def _raise(error: OSError) -> NoReturn:
 
 def _walk_inputs(inputs_root: Path, case: str, held: dict[Identity, str]) -> str | None:
     """Why ``case``'s inputs can't be handed over — a symlink, or something that can't be
-    read — or None, recording every directory in them in ``held``. A case with no inputs
-    directory hands nothing over."""
+    read — or None, recording every directory in them in ``held``. A case whose folder
+    isn't there hands nothing over; anything else the walk can't read refuses."""
     path = inputs_root
     try:
         for part in PurePath(case).parts:
             path = path / part
-            if _is_link(path):
-                return f"inputs {path} is a symlink"
+            try:
+                if _is_link(path):
+                    return f"inputs {path} is a symlink"
+            except FileNotFoundError:
+                return None
         for dirpath, dirnames, filenames in os.walk(path, onerror=_raise):
             st = os.stat(dirpath)
             held.setdefault((st.st_dev, st.st_ino), case)
             for name in sorted(dirnames + filenames):
                 if _is_link(entry := os.path.join(dirpath, name)):
                     return f"inputs {entry} is a symlink"
-    except FileNotFoundError:
-        return None
     except OSError as e:
         return f"inputs {e.filename} cannot be read ({e.strerror})"
     return None
@@ -76,8 +80,8 @@ def refuse_answer_leaks(
     (see the module docstring), naming each offending case with the first reason found:
     its id, a link or unreadable directory in its inputs, answers inside its inputs, then
     answers around its directory. Answers are those of every case the task defines."""
-    inputs_root = traptask_dir / traptask_config.dirs.inputs
-    expected_root = traptask_dir / traptask_config.dirs.expected
+    inputs_root = task_root(traptask_dir, traptask_config.dirs.inputs)
+    expected_root = task_root(traptask_dir, traptask_config.dirs.expected)
     running = list(dict.fromkeys(c.id for c in cases))
     defined = list(dict.fromkeys([*(c.id for c in traptask_config.cases), *running]))
     problems: dict[str, str] = {}

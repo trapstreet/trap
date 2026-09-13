@@ -37,17 +37,18 @@ tasks:
   dir …` line on stderr, and the case keeps its answer and exit code. Task
   questions that say "the file is in the current directory" work as written. Inputs
   that can't be copied (an unreadable file) are a configuration error (exit 24), and
-  nothing is left behind. Before any case runs, `tp run` itself refuses a task with a
-  symlink anywhere in what a solution is handed, or with answers inside or around a
-  case's inputs, whatever the solution ([Writing a task](writing-task.md)). A shape
-  checks again, for a hand-made manifest: a symlink anywhere in the inputs it is handed —
-  the directory itself, a file, a directory, one that resolves to nothing, even one that
-  only points at another file in the same case — is refused the same way, because a
-  shape has no way to tell it apart from a link into `expected/`; replace links in a
-  task's inputs with real files. A skill installed with `--skill` is refused the same way
-  if it contains one. Beyond both, a shape copies exactly what the task declares as a
-  case's inputs — a hard link to an answer or a copy of it inside the inputs looks like
-  an ordinary file from here, and avoiding that is the task author's job, not a shape's.
+  nothing is left behind. Before any case runs, `tp run` itself refuses — whatever the
+  solution — a task with a symlink anywhere in what a solution is handed, with answers
+  inside a case's inputs, or with a case's answers directory that is or lies around a
+  case's directory ([Writing a task](writing-task.md)). A shape checks again, for a
+  hand-made manifest: a symlink anywhere in the inputs it is handed — the directory
+  itself, a file, a directory, one that resolves to nothing, even one that only points
+  at another file in the same case — is refused the same way, because a shape has no
+  way to tell it apart from a link into `expected/`; replace links in a task's inputs
+  with real files. A skill installed with `--skill` is refused the same way if it
+  contains one. Beyond both, a shape copies exactly what the task declares as a case's
+  inputs — a hard link to an answer or a copy of it inside the inputs looks like an
+  ordinary file from here, and avoiding that is the task author's job, not a shape's.
 - **Scrubs the environment before starting a child.** `cmd` and `acp` pass a scrubbed
   copy of the environment to the program or agent they start: it never sees
   `TRAP_MANIFEST` (it points at `inputs/`, and `expected/` sits next to it), your

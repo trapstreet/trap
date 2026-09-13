@@ -8,7 +8,7 @@ from typing import Any
 from trap.models import CaseResult, TrapConfig, TraptaskCase, TraptaskConfig
 from trap.runner.grader import GraderRunner
 from trap.runner.judge import JudgeRunner
-from trap.runner.layout import CaseLayout
+from trap.runner.layout import CaseLayout, task_root
 from trap.runner.leaks import refuse_answer_leaks
 from trap.runner.solution import SolutionRunner
 
@@ -32,13 +32,13 @@ class TaskRunner:
 
     @cached_property
     def task_inputs_dir(self) -> Path:
-        """The task's inputs/ dir (traptask_dir / dirs.inputs), resolved once on first use."""
-        return (self.traptask_dir / self.traptask_config.dirs.inputs).resolve()
+        """The task's inputs/ dir (``task_root`` of dirs.inputs), resolved once on first use."""
+        return task_root(self.traptask_dir, self.traptask_config.dirs.inputs)
 
     @cached_property
     def task_expected_dir(self) -> Path:
-        """The task's expected/ dir (traptask_dir / dirs.expected), resolved once on first use."""
-        return (self.traptask_dir / self.traptask_config.dirs.expected).resolve()
+        """The task's expected/ dir (``task_root`` of dirs.expected), resolved once on first use."""
+        return task_root(self.traptask_dir, self.traptask_config.dirs.expected)
 
     def _iter_cases(
         self,
