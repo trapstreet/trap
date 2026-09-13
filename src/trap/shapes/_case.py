@@ -276,14 +276,13 @@ class CaseSandbox:
                 ShapeExit.CONFIG_ERROR, f"${manifest_envvar} is not a trap manifest ({e})"
             ) from None
         if inputs_dir.is_symlink():
-            # The runner always hands a shape a resolved inputs_dir — a case directory
-            # that is itself a link is followed by the runner before a shape ever sees
-            # it — so only a hand-made manifest reaches this check. Nothing stops one
-            # from pointing straight at expected/, though, and copytree below would
-            # silently walk through it: caught here, before a work directory even
-            # exists to clean up. inputs_dir has no path relative to itself to name, so
-            # this gets its own message rather than refuse_symlinks', which names
-            # paths under it.
+            # The runner refuses a task with a link anywhere in a case's inputs and
+            # hands a shape a resolved inputs_dir, so only a hand-made manifest reaches
+            # this check. Nothing stops one from pointing straight at expected/, though,
+            # and copytree below would silently walk through it: caught here, before a
+            # work directory even exists to clean up. inputs_dir has no path relative to
+            # itself to name, so this gets its own message rather than refuse_symlinks',
+            # which names paths under it.
             raise ShapeError(
                 ShapeExit.CONFIG_ERROR,
                 f"this case's inputs ({inputs_dir}) is itself a symlink — a shape never copies "

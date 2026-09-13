@@ -68,7 +68,7 @@ graph TD
 | `models` | All pydantic data (config + wire format); the shared layer | `TrapConfig`, `TaskBinding`, `TraptaskConfig`, `ReportData`, `Profile`, `Provenance`, `Environment`, `CaseResult`, `CaseCost` |
 | `errors` | Exception types more than one package raises; a leaf module that imports nothing internal | `ConfigError` |
 | `loader` | Parse trap.yaml / traptask.yaml; clone + setup; discover cases | `TrapLoader`, `TraptaskLoader` |
-| `runner` | Execute the solution subprocess per case; run judge/grader; refuse a task whose case inputs overlap its answers | `TaskRunner`, `refuse_answer_overlap` |
+| `runner` | Execute the solution subprocess per case; run judge/grader; refuse (in `leaks`) a task that could hand a solution the answers | `TaskRunner`, `refuse_answer_leaks` |
 | `cost` | Intercept LLM API calls via a local reverse proxy; tally spend | `CostProxy` |
 | `shapes` | Built-in solution programs, run *as* the solution subprocess (never imported by the runner): the ACP bridge, model-direct, the command template, and their shared sandbox / env scrub / deadline | `CaseSandbox`, `ShapeExit`, `AcpConnection`, `run_case` |
 | `git_ops` | Clone/fetch repos; compute `{repo, commit}` provenance | `LocalRepo`, `RemoteRepo`, `ParsedGitUrl` |

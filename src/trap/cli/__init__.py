@@ -32,7 +32,7 @@ from trap.live.sync import sync_run
 from trap.live.tracker import LiveTracker, plain_score
 from trap.loader import ConfigError, TrapLoader, TraptaskLoader
 from trap.models import Diagnosis, Provenance, ReportData
-from trap.runner import TaskRunner, refuse_answer_overlap
+from trap.runner import TaskRunner, refuse_answer_leaks
 from trap.workspace import SolutionIdentity, Workspace
 
 # A traceback's locals can hold request headers — an API key among them (tp shape direct
@@ -399,9 +399,9 @@ def run(
             task_binding, trap_yaml_loader.trap_dir, setup=setup_task, workspace_root=workspace.resolve()
         )
         active_cases = traptask_yaml_loader.cases_with_tags(tags or [])
-        # A task whose case inputs overlap its answers is refused here, before any prompt,
+        # A task that could hand a solution the answers is refused here, before any prompt,
         # any session on the site, or any case. TaskRunner.run() refuses it too, for any caller.
-        refuse_answer_overlap(traptask_yaml_loader.traptask_dir, traptask_yaml_loader.traptask, active_cases)
+        refuse_answer_leaks(traptask_yaml_loader.traptask_dir, traptask_yaml_loader.traptask, active_cases)
     except (GitOpsError, ConfigError, subprocess.CalledProcessError) as e:
         # Escaped: these messages quote paths, case ids and commands that task and solution
         # authors wrote, which Rich would otherwise read as markup.

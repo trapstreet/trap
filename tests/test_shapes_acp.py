@@ -1077,9 +1077,8 @@ def test_a_case_with_a_symlinked_input_is_refused_before_the_agent_starts(
         tmp_path / "task" / "expected" / "c1" / "answer.txt"
     )
     res = runner.invoke(app, ["run", "--task", "t", "--no-environment"])
-    assert res.exit_code == 0, res.output  # a refused case is a fact about it, not a trap error
-    _, meta = case_capture(sol)
-    assert meta["exit_code"] == ShapeExit.CONFIG_ERROR
+    assert res.exit_code == 2, res.output  # trap refuses the task before any case starts
+    assert not [p for p in sol.rglob("stdout") if p.parent.name == "solution"], "the shape started"
     assert not log.exists(), "the agent's own startup log means it was started"
 
 

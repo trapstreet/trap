@@ -157,12 +157,9 @@ def test_a_case_with_a_symlinked_input_is_refused_before_the_program_runs(make_p
         tmp_path / "task" / "expected" / "c1" / "answer.txt"
     )
     res = runner.invoke(app, ["run", "--task", "t", "--no-environment"])
-    assert res.exit_code == 0, res.output  # a refused case is a fact about it, not a trap error
-    out, meta = case_capture(sol)
-    assert meta["exit_code"] == ShapeExit.CONFIG_ERROR
-    assert "secret" not in out
-    stderr = next((sol / ".trap").rglob("c1/solution/stderr")).read_text()
-    assert "secret" not in stderr
+    assert res.exit_code == 2, res.output  # trap refuses the task before any case starts
+    assert "secret" not in res.output
+    assert not [p for p in sol.rglob("stdout") if p.parent.name == "solution"], "the shape started"
 
 
 #: A program that answers, then leaves a directory in its work dir that no one can list.
