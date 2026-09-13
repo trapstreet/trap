@@ -211,6 +211,22 @@ never tracked rather than inventing one.
 **Task identity.** As for `tp submit`: `--task` names the local alias from `trap.yaml`, which
 is chosen by the solution author and is **not** the website's task id.
 
+## tp shape
+
+Built-in solution programs, run as a `trap.yaml` `cmd:` rather than typed. Hidden from
+`tp --help`. See [Built-in shapes](../guides/built-in-shapes.md) for flags and behaviour.
+
+```
+tp shape acp --agent-cmd CMD [--model VALUE] [--agent-id ID] [--option ID=VALUE] [--skill DIR] [--describe]
+tp shape direct --model ID [--provider NAME] [--system-file PATH]
+tp shape cmd --template TEMPLATE [--repo PATH]
+```
+
+`tp shape acp` requires `--model` unless it is given `--describe`. Every shape also takes
+`--prompt-file` (default `question.txt`; a relative path inside the case — an absolute
+path or one with a `..` component exits 24), `--manifest-envvar`, `--deadline` (seconds,
+default 570) and `--scrub PATH`.
+
 ## tp report
 
 Re-render a stored run without re-executing the solution.

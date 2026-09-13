@@ -61,6 +61,11 @@
           "title": "Cost tracking"
         },
         {
+          "slug": "guides/built-in-shapes",
+          "path": "docs/guides/built-in-shapes.md",
+          "title": "Built-in shapes"
+        },
+        {
           "slug": "guides/privacy-and-grading",
           "path": "docs/guides/privacy-and-grading.md",
           "title": "Privacy and grading"

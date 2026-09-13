@@ -29,6 +29,14 @@ grader: { cmd: uv run python grader.py }   # optional: overall aggregation
 
 Omit `judge` to run cases unscored; omit `grader` to skip final aggregation.
 
+trap refuses to run a task that could hand a solution the answers. Nothing a solution is
+handed may be a symlink: not a case's directory, not a directory between `inputs/` and
+it, and nothing inside it — replace links with real files (`inputs/` itself may be a
+link). No answers directory may lie inside a case's inputs, and no case's answers
+directory may be or lie around a case's directory. Case ids stay inside their
+directories. An answer placed in the inputs — a copy, a hard link, or a link in
+`expected/` to an input file — isn't checked; that one is yours to avoid.
+
 ## Judge (per case)
 
 Reads `TRAPTASK_MANIFEST` — directory paths plus the solution run's capture paths — and

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import typer
+from rich.markup import escape
 
 from trap import __version__
 from trap.auth import (
@@ -31,11 +32,52 @@ from trap.live.sync import sync_run
 from trap.live.tracker import LiveTracker, plain_score
 from trap.loader import ConfigError, TrapLoader, TraptaskLoader
 from trap.models import Diagnosis, Provenance, ReportData
-from trap.runner import TaskRunner
+from trap.runner import TaskRunner, refuse_answer_leaks
 from trap.workspace import SolutionIdentity, Workspace
 
-app = typer.Typer(help="AI prompt / agent / workflow / testing framework.")
+# A traceback's locals can hold request headers — an API key among them (tp shape direct
+# builds them). Said here, not left to typer: older typer releases print locals by default.
+app = typer.Typer(
+    help="AI prompt / agent / workflow / testing framework.", pretty_exceptions_show_locals=False
+)
 app.add_typer(auth_app, name="auth")
+
+# Built-in solution programs (trap.shapes), run as a trap.yaml `cmd:`. Hidden: they are
+# solutions, not something a person types; docs/guides/built-in-shapes.md documents them.
+shape_app = typer.Typer(help="Built-in solution programs, run as a trap.yaml `cmd:`.")
+app.add_typer(shape_app, name="shape", hidden=True)
+
+# argparse owns each shape's arguments, --help included; click passes everything through.
+_PASSTHROUGH = {"allow_extra_args": True, "ignore_unknown_options": True, "help_option_names": []}
+
+
+@shape_app.callback()
+def _shape() -> None:
+    """Built-in solution programs (see docs/guides/built-in-shapes.md)."""
+
+
+@shape_app.command("cmd", context_settings=_PASSTHROUGH)
+def shape_cmd(ctx: typer.Context) -> None:
+    """Run a one-line command template for one case."""
+    from trap.shapes.command import main
+
+    raise typer.Exit(code=main(ctx.args))
+
+
+@shape_app.command("acp", context_settings=_PASSTHROUGH)
+def shape_acp(ctx: typer.Context) -> None:
+    """Drive an ACP agent (Claude Code and Codex are verified) for one case."""
+    from trap.shapes.acp.bridge import main
+
+    raise typer.Exit(code=main(ctx.args))
+
+
+@shape_app.command("direct", context_settings=_PASSTHROUGH)
+def shape_direct(ctx: typer.Context) -> None:
+    """Send one case's question to a model API, no harness."""
+    from trap.shapes.direct import main
+
+    raise typer.Exit(code=main(ctx.args))
 
 
 def _version_callback(value: bool) -> None:
@@ -356,8 +398,14 @@ def run(
         traptask_yaml_loader = TraptaskLoader.from_task_binding(
             task_binding, trap_yaml_loader.trap_dir, setup=setup_task, workspace_root=workspace.resolve()
         )
+        active_cases = traptask_yaml_loader.cases_with_tags(tags or [])
+        # A task that could hand a solution the answers is refused here, before any prompt,
+        # any session on the site, or any case. TaskRunner.run() refuses it too, for any caller.
+        refuse_answer_leaks(traptask_yaml_loader.traptask_dir, traptask_yaml_loader.traptask, active_cases)
     except (GitOpsError, ConfigError, subprocess.CalledProcessError) as e:
-        raise _die(e) from None
+        # Escaped: these messages quote paths, case ids and commands that task and solution
+        # authors wrote, which Rich would otherwise read as markup.
+        raise _die(escape(str(e))) from None
 
     # Record git provenance (repo + commit) of both checkouts — solution and task —
     # so the run is reproducible; an unanchored side carries an `issue` naming why.
@@ -368,8 +416,6 @@ def run(
         task=LocalRepo.provenance_of(traptask_yaml_loader.traptask_dir),
     )
     _confirm_unanchored(provenance, allow=allow_unanchored or _env_truthy("TRAP_ALLOW_UNANCHORED"))
-
-    active_cases = traptask_yaml_loader.cases_with_tags(tags or [])
 
     started_at_local = datetime.now()
     ws = Workspace(workspace.resolve(), SolutionIdentity.from_spec(solution).dirname, task_binding.alias)
