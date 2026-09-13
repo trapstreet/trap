@@ -29,9 +29,13 @@ grader: { cmd: uv run python grader.py }   # optional: overall aggregation
 
 Omit `judge` to run cases unscored; omit `grader` to skip final aggregation.
 
-A case's inputs (`inputs/<case>/`) must not be, contain, or sit inside its expected
-answers (`expected/<case>/`), including through a symlink — every solution would be
-handed the answers, so trap refuses to run such a task.
+A case's inputs (`inputs/<case>/`) must not be, contain, or sit inside expected answers —
+its own (`expected/<case>/`) or another case's under `expected/` — or every solution
+would be handed them; trap refuses to run such a task. It follows links on each case
+directory's own path and on `inputs/` and `expected/`, and compares the real
+directories, so a different letter case or Unicode spelling of one directory on macOS
+counts. It doesn't look at links *inside* a case directory (the built-in shapes refuse
+those), and a hard link or a copy of an answer is yours to avoid.
 
 ## Judge (per case)
 
