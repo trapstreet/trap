@@ -65,7 +65,9 @@ tasks:
   only the shape and leave an agent running. Interrupted (Ctrl-C, or `SIGTERM`) while
   its program or agent runs, `cmd` and `acp` kill it and everything it started at once,
   remove the work directory, and exit 128 + the signal number — 130 for Ctrl-C, 143 for
-  `SIGTERM`.
+  `SIGTERM`. And when the program or agent exits on its own, `cmd` and `acp` still kill
+  whatever it leaves running in its process group before moving on — a backgrounded
+  process (a stray `sleep &`, say) does not outlive the case it belonged to.
 - **Exits with a code that says how the case ended:**
 
   | Exit | Meaning |

@@ -209,24 +209,47 @@ def remove_tree(path: Path, *, what: str = "the work dir") -> None:
     shape prints its answer after removing the work dir, and a cleanup that fails must
     not cost the case its answer and exit code, nor turn a refusal into some other
     error. Whatever is left is named in one ``[trap] could not remove …`` line on stderr,
-    with the first reason; a path already gone needs nothing.
+    naming the exact path of the first failure — the full path, not just the bare entry
+    name a descriptor-based unlink reports for one nested under ``path``; a path already
+    gone needs nothing.
+
+    "Left behind" is decided by ``os.lstat(root)``, not ``os.path.lexists``: lexists
+    reports False on *any* lstat error, not only "gone", so a root whose parent went
+    unsearchable mid-run (a program's own ``chmod 000 ..``, say) would read as removed
+    and the warning would never fire even though the directory is still sitting there.
+    Only ``FileNotFoundError`` means gone; every other lstat error means "maybe left
+    behind" and is reported too, with that error standing in as the reason when nothing
+    more specific was recorded.
 
     Runs only once nothing else can write under ``path``: a shape removes its work dir
-    after ``run_group`` or the ACP connection has killed the child's whole process
-    group, so no directory can be swapped for a link between the ``lstat`` that vets it
+    only after ``run_group`` — which kills the child's whole process group before
+    returning on every path, a normal exit included, not only the deadline or an
+    interrupt — or the ACP connection's ``close()`` has done the same, so no process of
+    the case is left to swap a directory for a link between the ``lstat`` that vets it
     and the ``chmod`` that follows."""
     root = os.fspath(path)
     _open_up_directories(root)
-    errors: list[BaseException] = []
+    errors: list[tuple[str, BaseException]] = []
     try:
         # Each failure is recorded and skipped, never retried — ignore_errors=True, but
-        # keeping the reasons.
-        shutil.rmtree(root, onexc=lambda func, failed, exc: errors.append(exc))
+        # keeping (path, reason) for every one: shutil hands onexc the full path it
+        # failed on even for an operation whose own exception names only the bare entry.
+        shutil.rmtree(root, onexc=lambda func, failed, exc: errors.append((failed, exc)))
     except Exception as e:  # rmtree hands every OSError to onexc; nothing else may escape either
-        errors.append(e)
-    if os.path.lexists(root):
-        reason = errors[0] if errors else "reason unknown"
-        print(f"[trap] could not remove {what} {root}: {reason}", file=sys.stderr)
+        errors.append((root, e))
+    try:
+        os.lstat(root)
+    except FileNotFoundError:
+        return
+    except OSError as e:
+        if not errors:
+            errors.append((root, e))
+    if errors:
+        failing_path, exc = errors[0]
+        reason: object = exc if failing_path == root else f"{failing_path}: {exc}"
+    else:
+        reason = "reason unknown"
+    print(f"[trap] could not remove {what} {root}: {reason}", file=sys.stderr)
 
 
 @dataclass
@@ -458,6 +481,10 @@ def run_group(
     """Run ``argv`` in its own process group and collect its output. At the deadline the
     group is killed and the exit code is TIMEOUT, with whatever output there was.
 
+    Whichever way this returns, the whole group is dead first: on a normal exit,
+    anything ``argv`` backgrounded and left running (a stray ``sleep &``, say) is
+    SIGKILLed along with it, so nothing of this case outlives its shape into cleanup.
+
     Output that is not valid text is decoded with the bad bytes replaced, not refused: a
     program's stray byte must not cost the case its answer, and passing raw bytes on would
     only move the decoding failure into the runner, which reads this shape's stdout as text."""
@@ -492,4 +519,9 @@ def run_group(
             kill_now(proc.pid)
             proc.wait()
             raise
+        # argv exited on its own, but its process group may not have: a backgrounded
+        # grandchild (output redirected away, say) doesn't make proc.communicate() wait
+        # for it. Killed here, before the work dir removal that follows in every shape,
+        # so nothing of this case is still running to race that removal.
+        kill_now(proc.pid)
     return out, err, proc.returncode

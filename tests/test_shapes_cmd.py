@@ -317,6 +317,18 @@ def test_main_keeps_the_answer_of_a_program_that_locks_a_dir_in_its_work_dir(tmp
         unlock(tmpdir)
 
 
+def test_main_kills_what_the_program_backgrounded_before_it_exited(tmp_path, monkeypatch, capsys):
+    # The program itself exits 0 right away; a grandchild it backgrounded (output sent to
+    # /dev/null, so nothing keeps the pipes open) must not outlive it into cleanup.
+    case = _case_dir(tmp_path, {"question.txt": "hi"})
+    _set_manifest(monkeypatch, case)
+    pidfile = tmp_path / "pid"
+    template = shlex.join(["sh", "-c", f"sleep 30 >/dev/null 2>&1 & echo $! > {pidfile}; echo the-answer"])
+    code = main(["--template", template, "--deadline", "30"])
+    assert (code, capsys.readouterr().out) == (0, "the-answer\n")
+    assert process_gone(int(pidfile.read_text()), timeout=1.0), "the backgrounded process outlived the shape"
+
+
 def test_main_relays_output_that_is_not_utf8_instead_of_crashing(tmp_path, monkeypatch, capsys):
     case = _case_dir(tmp_path, {"question.txt": "hi"})
     _set_manifest(monkeypatch, case)

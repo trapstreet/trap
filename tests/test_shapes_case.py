@@ -348,6 +348,85 @@ def test_remove_tree_never_reaches_through_a_root_that_is_a_link(tmp_path, capsy
     assert capsys.readouterr().err.startswith(f"[trap] could not remove the work dir {link}: ")
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can lstat through a 000 directory regardless")
+def test_remove_tree_reports_a_root_whose_parent_went_unsearchable(tmp_path, capsys):
+    # os.path.lexists(root) returns False on *any* lstat error, not only "gone" — so a
+    # program that left the work dir's own parent unsearchable (its own `chmod 000 ..`)
+    # used to make the work dir read as already removed, and the warning never fired.
+    parent = tmp_path / "denied"
+    parent.mkdir()
+    root = parent / "workdir"
+    root.mkdir()
+    (root / "file.txt").write_text("x")
+    parent.chmod(0o000)
+    try:
+        remove_tree(root)  # must not raise
+    finally:
+        parent.chmod(0o755)
+    err = capsys.readouterr().err
+    assert err.startswith(f"[trap] could not remove the work dir {root}: ")
+    assert err.count("\n") == 1, "one line, not a traceback"
+
+
+def test_remove_tree_names_the_full_path_of_a_nested_failure(tmp_path, monkeypatch, capsys):
+    # _open_up_directories repairs every directory mode it *can* chmod, but one it can't
+    # (an immutable flag, say) it leaves alone — its own docstring says as much: skipped,
+    # "left for the removal that follows to report." rmtree still walks into that
+    # directory and hits a denied unlink inside it, and shutil's descriptor-based unlink
+    # reports the failing path two ways that disagree: onexc's own ``path`` argument gets
+    # the full path it built up while walking ("d/f"), but the exception it hands
+    # alongside names only the bare entry it unlinked ("f"), since that unlink ran
+    # relative to an already-open directory fd (confirmed directly against a real
+    # rmtree()/onexc() run, not just read from the source). Reproduced here without
+    # fighting the filesystem for the exact mode that defeats _open_up_directories.
+    root = tmp_path / "workdir"
+    root.mkdir()
+    nested = os.path.join(os.fspath(root), "d", "f")
+
+    def fake_rmtree(path, onexc):
+        err = PermissionError(13, "Permission denied")
+        err.filename = "f"
+        onexc(os.unlink, nested, err)
+
+    monkeypatch.setattr(shutil, "rmtree", fake_rmtree)
+    remove_tree(root)  # must not raise
+    err = capsys.readouterr().err
+    assert nested in err, err
+    assert err.count("\n") == 1, "one line, not a traceback"
+
+
+def test_remove_tree_uses_the_lstat_error_when_rmtree_recorded_none_of_its_own(tmp_path, monkeypatch, capsys):
+    # A root rmtree could not even reach (nothing recorded, no exception of its own) can
+    # still be reported: the final lstat that finds it "maybe left behind" carries a
+    # reason of its own, and that is what gets printed.
+    root = tmp_path / "workdir"
+    root.mkdir()
+    monkeypatch.setattr(shutil, "rmtree", lambda *a, **k: None)  # records nothing, removes nothing
+    real_lstat = os.lstat
+
+    def flaky_lstat(path, *a, **k):
+        if os.fspath(path) == os.fspath(root):
+            raise PermissionError(13, "synthetic failure reaching the root")
+        return real_lstat(path, *a, **k)
+
+    monkeypatch.setattr(os, "lstat", flaky_lstat)
+    remove_tree(root)  # must not raise
+    err = capsys.readouterr().err
+    assert err.startswith(f"[trap] could not remove the work dir {root}: ")
+    assert "synthetic failure reaching the root" in err
+    assert err.count("\n") == 1, "one line, not a traceback"
+
+
+def test_remove_tree_falls_back_to_reason_unknown_when_nothing_explains_the_leftover(
+    tmp_path, monkeypatch, capsys
+):
+    root = tmp_path / "workdir"
+    root.mkdir()
+    monkeypatch.setattr(shutil, "rmtree", lambda *a, **k: None)  # records nothing, removes nothing
+    remove_tree(root)  # must not raise
+    assert capsys.readouterr().err == f"[trap] could not remove the work dir {root}: reason unknown\n"
+
+
 # --- close() removes whatever the case's program left, and never reaches past it -------
 #
 # By the time close() runs the program is gone, but the work dir was the program's to
@@ -687,6 +766,23 @@ def test_run_group_replaces_bad_output_collected_after_the_deadline_too(tmp_path
         deadline=Deadline(1),
     )
     assert (out, code) == (_decoded(b"ok \xff\xfe"), ShapeExit.TIMEOUT)
+
+
+def test_a_normal_exit_still_kills_whatever_the_program_backgrounded(tmp_path):
+    # argv can exit 0 with a grandchild still running in its process group — output
+    # redirected away, say — and proc.communicate() returns as soon as argv itself is
+    # gone, without waiting on that grandchild. run_group must take the whole group down
+    # anyway, or that grandchild outlives the shape into cleanup.
+    pidfile = tmp_path / "pid"
+    out, _, code = run_group(
+        ["sh", "-c", f"sleep 30 >/dev/null 2>&1 & echo $! > {pidfile}; echo done"],
+        cwd=tmp_path,
+        env=os.environ,
+        stdin=None,
+        deadline=Deadline(10),
+    )
+    assert (out, code) == ("done\n", 0)
+    assert process_gone(int(pidfile.read_text()), timeout=1.0), "the backgrounded process outlived the shape"
 
 
 def test_the_deadline_kills_the_whole_group(tmp_path):
