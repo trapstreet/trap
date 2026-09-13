@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import typer
+from rich.markup import escape
 
 from trap import __version__
 from trap.auth import (
@@ -31,7 +32,7 @@ from trap.live.sync import sync_run
 from trap.live.tracker import LiveTracker, plain_score
 from trap.loader import ConfigError, TrapLoader, TraptaskLoader
 from trap.models import Diagnosis, Provenance, ReportData
-from trap.runner import TaskRunner
+from trap.runner import TaskRunner, refuse_answer_overlap
 from trap.workspace import SolutionIdentity, Workspace
 
 # A traceback's locals can hold request headers — an API key among them (tp shape direct
@@ -397,8 +398,14 @@ def run(
         traptask_yaml_loader = TraptaskLoader.from_task_binding(
             task_binding, trap_yaml_loader.trap_dir, setup=setup_task, workspace_root=workspace.resolve()
         )
+        active_cases = traptask_yaml_loader.cases_with_tags(tags or [])
+        # A task whose case inputs overlap its answers is refused here, before any prompt,
+        # any session on the site, or any case. TaskRunner.run() refuses it too, for any caller.
+        refuse_answer_overlap(traptask_yaml_loader.traptask_dir, traptask_yaml_loader.traptask, active_cases)
     except (GitOpsError, ConfigError, subprocess.CalledProcessError) as e:
-        raise _die(e) from None
+        # Escaped: these messages quote paths, case ids and commands that task and solution
+        # authors wrote, which Rich would otherwise read as markup.
+        raise _die(escape(str(e))) from None
 
     # Record git provenance (repo + commit) of both checkouts — solution and task —
     # so the run is reproducible; an unanchored side carries an `issue` naming why.
@@ -409,8 +416,6 @@ def run(
         task=LocalRepo.provenance_of(traptask_yaml_loader.traptask_dir),
     )
     _confirm_unanchored(provenance, allow=allow_unanchored or _env_truthy("TRAP_ALLOW_UNANCHORED"))
-
-    active_cases = traptask_yaml_loader.cases_with_tags(tags or [])
 
     started_at_local = datetime.now()
     ws = Workspace(workspace.resolve(), SolutionIdentity.from_spec(solution).dirname, task_binding.alias)
@@ -426,12 +431,6 @@ def run(
         run_dir=ws.run_dir(ts),
         cost_enabled=cost,
     )
-    # A task whose case inputs overlap its answers is refused here, before a session is
-    # opened on the site or a case starts. runner.run() refuses it too, for any caller.
-    try:
-        runner.refuse_answer_overlap(active_cases)
-    except ConfigError as e:
-        raise _die(e) from None
     # Capture the host machine environment (CPU/RAM/OS/Python) unless disabled.
     # Detection is best-effort and must never abort a run. Probed once, here,
     # so the report and the run's description on the site say the same thing.

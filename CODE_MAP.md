@@ -8,9 +8,10 @@ preview), and at mermaid.live. Generated from the actual `import` graph under
 ## 1. Package dependency graph
 
 `models/` is the shared, serialisable data layer at the bottom — everything
-depends on it, it depends on nothing internal. `cli/` is the top-level
-orchestrator. Each behaviour package talks to the rest only through `models`
-(the Rust-rewrite boundary rule).
+depends on it, it depends on nothing internal. `errors` (a single module) sits
+beside it the same way, holding the exception types more than one package raises.
+`cli/` is the top-level orchestrator. Each behaviour package talks to the rest only
+through `models` (the Rust-rewrite boundary rule).
 
 ```mermaid
 graph TD
@@ -26,6 +27,7 @@ graph TD
     live["live<br/>progress mirror · tp sync · site grading"]
     workspace["workspace<br/>.trap addressing + report IO"]
     models[("models<br/>pydantic data layer")]
+    errors["errors<br/>shared exception types"]
 
     cli --> loader
     cli --> runner
@@ -40,11 +42,12 @@ graph TD
     shapes --> cost
     live --> auth
     live --> models
+    loader --> errors
     loader --> git_ops
     loader --> models
     loader --> workspace
     runner --> cost
-    runner --> loader
+    runner --> errors
     runner --> models
     workspace --> git_ops
     workspace --> models
@@ -63,8 +66,9 @@ graph TD
 |---|---|---|
 | `cli` | Typer entry point + commands; orchestrates a run | `run` / `report` / `submit` |
 | `models` | All pydantic data (config + wire format); the shared layer | `TrapConfig`, `TaskBinding`, `TraptaskConfig`, `ReportData`, `Profile`, `Provenance`, `Environment`, `CaseResult`, `CaseCost` |
+| `errors` | Exception types more than one package raises; a leaf module that imports nothing internal | `ConfigError` |
 | `loader` | Parse trap.yaml / traptask.yaml; clone + setup; discover cases | `TrapLoader`, `TraptaskLoader` |
-| `runner` | Execute the solution subprocess per case; run judge/grader | `TaskRunner` |
+| `runner` | Execute the solution subprocess per case; run judge/grader; refuse a task whose case inputs overlap its answers | `TaskRunner`, `refuse_answer_overlap` |
 | `cost` | Intercept LLM API calls via a local reverse proxy; tally spend | `CostProxy` |
 | `shapes` | Built-in solution programs, run *as* the solution subprocess (never imported by the runner): the ACP bridge, model-direct, the command template, and their shared sandbox / env scrub / deadline | `CaseSandbox`, `ShapeExit`, `AcpConnection`, `run_case` |
 | `git_ops` | Clone/fetch repos; compute `{repo, commit}` provenance | `LocalRepo`, `RemoteRepo`, `ParsedGitUrl` |

@@ -6,46 +6,123 @@ from functools import cached_property
 from pathlib import Path
 from typing import Any
 
-from trap.loader.errors import ConfigError
+from trap.errors import ConfigError
 from trap.models import CaseResult, TrapConfig, TraptaskCase, TraptaskConfig
 from trap.runner.grader import GraderRunner
 from trap.runner.judge import JudgeRunner
 from trap.runner.layout import CaseLayout
 from trap.runner.solution import SolutionRunner
 
+OWN_ANSWERS = "its own answers"
+EXPECTED_ROOT = "the expected root"
+
 
 @dataclass(frozen=True)
 class AnswerOverlap:
-    """A case whose inputs, with symlinks followed, overlap the answers at ``answers``."""
+    """One case whose inputs overlap answers, read as ``inputs`` ``relation`` ``target``
+    ``answers`` — "inputs /t/expected/c1 are its own answers /t/expected/c1". ``relation``
+    is "are", "contain" or "sit inside"; ``target`` says whether ``answers`` is the case's
+    own answers directory or the expected root that holds every case's."""
 
     case_id: str
     inputs: Path
+    relation: str
+    target: str
     answers: Path
 
 
-def _nested(a: Path, b: Path) -> bool:
-    """Whether ``a`` and ``b`` are one path or one sits inside the other — compared by
-    path component, so ``/x/ab`` is not inside ``/x/a``."""
-    return a.is_relative_to(b) or b.is_relative_to(a)
+def _identity(path: Path) -> tuple[int, int] | None:
+    """The directory ``path`` names on disk, as (device, inode) — or None when it can't be
+    read (missing, a link loop, a parent without search permission), which matches nothing."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return st.st_dev, st.st_ino
+
+
+def _same(a: Path, b: Path) -> bool:
+    """One directory: the same path, or two spellings of it on disk — letter case or
+    Unicode form on a filesystem that ignores them, a firmlink."""
+    return a == b or ((key := _identity(a)) is not None and key == _identity(b))
+
+
+def _inside(child: Path, parent: Path) -> bool:
+    """``child`` is ``parent`` or sits inside it: by path component (``/x/ab`` is not
+    inside ``/x/a``), or because ``child`` or one of its parents is ``parent`` on disk."""
+    if child.is_relative_to(parent):
+        return True
+    key = _identity(parent)
+    return key is not None and any(_identity(p) == key for p in (child, *child.parents))
+
+
+def _relation(inputs: Path, answers: Path) -> str | None:
+    """How a case's inputs overlap an answers directory, or None when they don't."""
+    if _same(inputs, answers):
+        return "are"
+    if _inside(answers, inputs):
+        return "contain"
+    if _inside(inputs, answers):
+        return "sit inside"
+    return None
+
+
+def _root_relation(inputs: Path, expected: Path, inputs_root: Path) -> str | None:
+    """How a case's inputs overlap the expected root. Sitting inside it counts only away
+    from the inputs root: an expected root around the inputs root (``dirs.expected: ./``)
+    holds every case's inputs without their holding anyone's answers."""
+    relation = _relation(inputs, expected)
+    if relation == "sit inside" and _inside(inputs, inputs_root):
+        return None
+    return relation
 
 
 def answer_overlaps(
     inputs_root: Path, expected_root: Path, case_ids: Iterable[str]
 ) -> tuple[AnswerOverlap, ...]:
-    """The cases whose inputs directory, resolved, is, contains, or sits inside its own
-    resolved answers directory or the resolved expected root (where every other case's
-    answers are). Nothing has to exist — a missing path is resolved as far as it goes — so
-    a task that keeps its answers off the machine is compared like any other."""
+    """The cases whose resolved inputs directory is, contains, or sits inside its own
+    resolved answers directory; contains the resolved expected root; or sits inside it
+    outside the inputs root, where other cases' answers are.
+
+    Directories are compared by path and by identity on disk, so two spellings of one
+    directory match. Nothing has to exist: a missing path is resolved as far as it goes
+    and compared by path alone, so a task that keeps its answers off the machine is
+    compared like any other."""
+    inputs_dir = inputs_root.resolve()
     expected = expected_root.resolve()
     overlaps: list[AnswerOverlap] = []
     for case_id in case_ids:
         inputs = (inputs_root / case_id).resolve()
         answers = (expected_root / case_id).resolve()
-        if _nested(inputs, answers):
-            overlaps.append(AnswerOverlap(case_id, inputs, answers))
-        elif _nested(inputs, expected):
-            overlaps.append(AnswerOverlap(case_id, inputs, expected))
+        if own := _relation(inputs, answers):
+            overlaps.append(AnswerOverlap(case_id, inputs, own, OWN_ANSWERS, answers))
+        elif root := _root_relation(inputs, expected, inputs_dir):
+            overlaps.append(AnswerOverlap(case_id, inputs, root, EXPECTED_ROOT, expected))
     return tuple(overlaps)
+
+
+def refuse_answer_overlap(
+    traptask_dir: Path, traptask_config: TraptaskConfig, cases: Iterable[TraptaskCase]
+) -> None:
+    """Raise ConfigError when any of ``cases`` has inputs that overlap answers.
+
+    A solution is handed its case's inputs as a resolved path, so a case directory that —
+    through a symlink, through ``dirs``, or as another spelling of one directory — is,
+    holds, or sits inside answers hands every solution the answers, and nothing
+    downstream can tell it from an ordinary directory. The error names the task and, for
+    each such case, how its inputs overlap which answers."""
+    dirs = traptask_config.dirs
+    overlaps = answer_overlaps(
+        traptask_dir / dirs.inputs, traptask_dir / dirs.expected, (c.id for c in cases)
+    )
+    if overlaps:
+        lines = "".join(
+            f"\n  {o.case_id}: inputs {o.inputs} {o.relation} {o.target} {o.answers}" for o in overlaps
+        )
+        raise ConfigError(
+            f"refusing to run task {traptask_dir}: every solution would be handed the answers, "
+            f"because these cases' inputs overlap expected answers:{lines}"
+        )
 
 
 class TaskRunner:
@@ -74,24 +151,6 @@ class TaskRunner:
     def task_expected_dir(self) -> Path:
         """The task's expected/ dir (traptask_dir / dirs.expected), resolved once on first use."""
         return (self.traptask_dir / self.traptask_config.dirs.expected).resolve()
-
-    def refuse_answer_overlap(self, cases: Iterable[TraptaskCase]) -> None:
-        """Raise ConfigError when any of ``cases`` has inputs that overlap its answers.
-
-        A solution is handed its case's inputs as a resolved path, so a case directory
-        that — through a symlink or through ``dirs`` — is, holds, or sits inside expected
-        answers hands every solution the answers, and nothing downstream can tell it from
-        an ordinary directory. The error names each such case with both resolved paths."""
-        overlaps = answer_overlaps(self.task_inputs_dir, self.task_expected_dir, (c.id for c in cases))
-        if overlaps:
-            lines = "".join(
-                f"\n  {o.case_id}: inputs {o.inputs} overlap answers {o.answers}" for o in overlaps
-            )
-            raise ConfigError(
-                f"refusing to run task {self.traptask_dir}: every solution would be handed the "
-                "answers, because these cases' inputs are, contain, or sit inside expected "
-                f"answers once symlinks are followed:{lines}"
-            )
 
     def _iter_cases(
         self,
@@ -147,7 +206,7 @@ class TaskRunner:
         overlap its answers (see ``refuse_answer_overlap``)."""
 
         cases = tuple(cases)
-        self.refuse_answer_overlap(cases)
+        refuse_answer_overlap(self.traptask_dir, self.traptask_config, cases)
         case_results = tuple(
             self._iter_cases(
                 cases,
