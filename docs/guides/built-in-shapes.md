@@ -28,14 +28,19 @@ tasks:
   as UTF-8 whatever the locale; a question that isn't valid UTF-8 is a configuration
   error (exit 24).
 - **Works in a copy.** The case's input files are copied to a fresh temporary directory
-  outside the task checkout and `.trap/`; the program under test runs there and the
-  directory is removed afterwards. Task questions that say "the file is in the current
-  directory" work as written. Inputs that can't be copied (an unreadable file) are a
-  configuration error (exit 24), and nothing is left behind. A symlink anywhere in a
-  case's inputs — a file, a directory, one that resolves to nothing, even one that only
-  points at another file in the same case — is refused the same way, because a shape has
-  no way to tell it apart from a link into `expected/`; replace links in a task's inputs
-  with real files.
+  outside the task checkout and `.trap/`, private to the user running it (mode 0700);
+  the program under test runs there and the directory is removed afterwards. Task
+  questions that say "the file is in the current directory" work as written. Inputs
+  that can't be copied (an unreadable file) are a configuration error (exit 24), and
+  nothing is left behind. A symlink anywhere in a case's inputs — a file, a directory,
+  one that resolves to nothing, even one that only points at another file in the same
+  case — is refused the same way, because a shape has no way to tell it apart from a
+  link into `expected/`; replace links in a task's inputs with real files. A skill
+  installed with `--skill` is refused the same way if it contains one. Beyond a
+  symlink, though, a shape copies exactly what the task declares as a case's inputs — a
+  hard link to an answer, a copy of it, or a case directory that is itself a link to a
+  folder holding answers all look like ordinary files or an ordinary directory from
+  here, and avoiding them is the task author's job, not a shape's.
 - **Scrubs the environment before starting a child.** `cmd` and `acp` pass a scrubbed
   copy of the environment to the program or agent they start: it never sees
   `TRAP_MANIFEST` (it points at `inputs/`, and `expected/` sits next to it), your
@@ -213,6 +218,7 @@ text are replaced, not refused), and its exit code is the case's.
 ## Limits
 
 - Answers are stdout. A task whose answer is a folder of files is out of reach for now.
-- `--skill` installs skills for Claude Code only.
+- `--skill` installs skills for Claude Code only, and refuses one that contains a
+  symlink the same way a case's inputs are.
 - Coming next: `tp run --agent … / --model … / --cmd …` will build these for you, without a
   `trap.yaml`.
