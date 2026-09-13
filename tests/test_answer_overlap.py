@@ -37,6 +37,13 @@ def _relink(path: Path, target: str) -> None:
     path.symlink_to(target)
 
 
+def _set_dirs(task: Path, *, inputs: str, expected: str) -> None:
+    """Point the task's traptask.yaml ``dirs`` at ``inputs`` and ``expected``."""
+    config = json.loads((task / "traptask.yaml").read_text())
+    config["dirs"] = {"inputs": inputs, "expected": expected}
+    (task / "traptask.yaml").write_text(json.dumps(config))
+
+
 def _solution_ran(sol: Path) -> bool:
     captures = [p for p in sol.rglob("stdout") if p.parent.name == "solution"]
     return (sol / "ran.txt").exists() or bool(captures)
@@ -102,9 +109,7 @@ def test_an_inputs_dir_linked_to_expected_is_refused(make_project, runner, tmp_p
 def test_dirs_naming_one_directory_for_inputs_and_expected_are_refused(make_project, runner, tmp_path):
     sol = make_project(cmd=MARKS_THAT_IT_RAN, inputs={"c1": {"question.txt": "q", "answer.txt": "secret"}})
     task = tmp_path / "task"
-    config = json.loads((task / "traptask.yaml").read_text())
-    config["dirs"] = {"inputs": "inputs/", "expected": "inputs/"}
-    (task / "traptask.yaml").write_text(json.dumps(config))
+    _set_dirs(task, inputs="inputs/", expected="inputs/")
     res = runner.invoke(app, ["run", "--no-environment"])
     answers = (task / "inputs" / "c1").resolve()
     _assert_refused(res, sol, "c1", answers, f"are {OWN}", answers)
@@ -146,9 +151,7 @@ def test_dirs_naming_one_directory_in_two_letter_cases_are_refused(make_project,
     task = tmp_path / "task"
     (task / "inputs").rename(task / "data")
     (task / "data" / "c1" / "answer.txt").write_text("secret")
-    config = json.loads((task / "traptask.yaml").read_text())
-    config["dirs"] = {"inputs": "Data/", "expected": "data/"}
-    (task / "traptask.yaml").write_text(json.dumps(config))
+    _set_dirs(task, inputs="Data/", expected="data/")
     res = runner.invoke(app, ["run", "--no-environment"])
     _assert_refused(
         res, sol, "c1", (task / "Data" / "c1").resolve(), f"are {OWN}", (task / "data" / "c1").resolve()
@@ -185,6 +188,40 @@ def test_a_case_id_that_reads_as_markup_is_printed_as_written(make_project, runn
     _assert_refused(res, sol, "c[/x]", answers, f"are {OWN}", answers)
 
 
+def test_a_case_linked_into_answers_inside_the_inputs_root_is_refused(make_project, runner, tmp_path):
+    # The expected root sits inside the inputs root, so a case dir inside it is inside the
+    # inputs root too; that must not excuse a case that is another case's answers.
+    sol = make_project(cmd=MARKS_THAT_IT_RAN, cases=["c1", "c2"])
+    task = tmp_path / "task"
+    (task / "inputs").rename(task / "cases")
+    for case in ("c1", "c2"):
+        (task / "cases" / "_answers" / case).mkdir(parents=True)
+        (task / "cases" / "_answers" / case / "answer.txt").write_text(f"secret-{case}")
+    _relink(task / "cases" / "c1", "_answers/c2")
+    _set_dirs(task, inputs="cases/", expected="cases/_answers/")
+    res = runner.invoke(app, ["run", "--no-environment"])
+    expected = (task / "cases" / "_answers").resolve()
+    _assert_refused(res, sol, "c1", expected / "c2", f"sit inside {ROOT}", expected)
+    assert _squash("c2: inputs") not in _squash(res.output)
+
+
+def test_a_case_linked_into_answers_with_inputs_at_the_task_root_is_refused(make_project, runner, tmp_path):
+    sol = make_project(
+        cmd=MARKS_THAT_IT_RAN,
+        cases=["c1", "c2"],
+        expected={c: {"answer.txt": f"secret-{c}"} for c in ("c1", "c2")},
+    )
+    task = tmp_path / "task"
+    (task / "inputs" / "c2").rename(task / "c2")
+    shutil.rmtree(task / "inputs")
+    (task / "c1").symlink_to("expected/c2")
+    _set_dirs(task, inputs="./", expected="expected/")
+    res = runner.invoke(app, ["run", "--no-environment"])
+    expected = (task / "expected").resolve()
+    _assert_refused(res, sol, "c1", expected / "c2", f"sit inside {ROOT}", expected)
+    assert _squash("c2: inputs") not in _squash(res.output)
+
+
 # --- tp run: not refused ----------------------------------------------------------
 
 
@@ -215,9 +252,26 @@ def test_answers_at_the_task_root_beside_inputs_run_and_score(make_project, runn
     task = tmp_path / "task"
     (task / "c1").mkdir()
     (task / "c1" / "answer.txt").write_text("hello")
-    config = json.loads((task / "traptask.yaml").read_text())
-    config["dirs"] = {"inputs": "inputs/", "expected": "./"}
-    (task / "traptask.yaml").write_text(json.dumps(config))
+    _set_dirs(task, inputs="inputs/", expected="./")
+    res = runner.invoke(app, ["run", "-o", "json", "--no-environment"])
+    assert res.exit_code == 0, res.output
+    assert json.loads(res.stdout)["cases_results"][0]["metrics"] == {"score": 1.0}
+
+
+def test_a_clean_task_with_its_inputs_at_the_task_root_runs_and_scores(make_project, runner, tmp_path):
+    # dirs.inputs "./" puts the inputs root around expected/; a case dir beside expected/
+    # holds no answers.
+    make_project(
+        cmd="sh -c 'cat'",
+        stdin="input.txt",
+        inputs={"c1": {"input.txt": "hello"}},
+        expected={"c1": {"answer.txt": "hello"}},
+        judge_src=JUDGE_SCORE,
+    )
+    task = tmp_path / "task"
+    (task / "inputs" / "c1").rename(task / "c1")
+    (task / "inputs").rmdir()
+    _set_dirs(task, inputs="./", expected="expected/")
     res = runner.invoke(app, ["run", "-o", "json", "--no-environment"])
     assert res.exit_code == 0, res.output
     assert json.loads(res.stdout)["cases_results"][0]["metrics"] == {"score": 1.0}

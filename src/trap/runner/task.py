@@ -68,11 +68,13 @@ def _relation(inputs: Path, answers: Path) -> str | None:
 
 
 def _root_relation(inputs: Path, expected: Path, inputs_root: Path) -> str | None:
-    """How a case's inputs overlap the expected root. Sitting inside it counts only away
-    from the inputs root: an expected root around the inputs root (``dirs.expected: ./``)
-    holds every case's inputs without their holding anyone's answers."""
+    """How a case's inputs overlap the expected root. Sitting inside it is excused for a
+    case dir under the inputs root only when the expected root is around the inputs root
+    (``dirs.expected: ./``), which holds every case's inputs without their holding anyone's
+    answers. When the expected root is inside (or is) the inputs root, a case dir inside
+    it is always under the inputs root too, so that excuses nothing."""
     relation = _relation(inputs, expected)
-    if relation == "sit inside" and _inside(inputs, inputs_root):
+    if relation == "sit inside" and _inside(inputs, inputs_root) and not _inside(expected, inputs_root):
         return None
     return relation
 
