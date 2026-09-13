@@ -21,8 +21,9 @@ EXPECTED_ROOT = "the expected root"
 class AnswerOverlap:
     """One case whose inputs overlap answers, read as ``inputs`` ``relation`` ``target``
     ``answers`` — "inputs /t/expected/c1 are its own answers /t/expected/c1". ``relation``
-    is "are", "contain" or "sit inside"; ``target`` says whether ``answers`` is the case's
-    own answers directory or the expected root that holds every case's."""
+    is "are", "contain" or "sit inside"; ``target`` says whose answers ``answers`` are: the
+    case's own, another case's ("the answers of case 'c2'"), or the expected root, which
+    holds every case's."""
 
     case_id: str
     inputs: Path
@@ -79,43 +80,105 @@ def _root_relation(inputs: Path, expected: Path, inputs_root: Path) -> str | Non
     return relation
 
 
+def _answers_held(inputs: dict[str, Path], answers: dict[str, Path]) -> dict[str, dict[str, str]]:
+    """For each case in ``inputs``, the cases in ``answers`` whose answers directory its
+    inputs are ("are"), contain ("contain") or sit inside ("sit inside").
+
+    Both sides are indexed by path and by identity on disk. Each inputs directory's parents
+    are looked up among the answers directories, and each answers directory's parents
+    among the inputs directories, so the cost is the number of cases times the depth of
+    their paths, and each directory is stat'ed once. A directory that can't be stat'ed has
+    no identity and is found by path alone."""
+    identities: dict[Path, tuple[int, int] | None] = {}
+
+    def identity(path: Path) -> tuple[int, int] | None:
+        if path not in identities:
+            identities[path] = _identity(path)
+        return identities[path]
+
+    def index(dirs: dict[str, Path]) -> Callable[[Path], list[str]]:
+        by_path: dict[Path, list[str]] = {}
+        by_identity: dict[tuple[int, int], list[str]] = {}
+        for case, path in dirs.items():
+            by_path.setdefault(path, []).append(case)
+            if (key := identity(path)) is not None:
+                by_identity.setdefault(key, []).append(case)
+
+        def cases_at(path: Path) -> list[str]:
+            key = identity(path)
+            return by_path.get(path, []) + (by_identity.get(key, []) if key is not None else [])
+
+        return cases_at
+
+    answers_at, inputs_at = index(answers), index(inputs)
+    held: dict[str, dict[str, str]] = {case: {} for case in inputs}
+    for case, path in inputs.items():
+        for depth, parent in enumerate((path, *path.parents)):
+            for other in answers_at(parent):
+                held[case].setdefault(other, "are" if depth == 0 else "sit inside")
+    for other, path in answers.items():
+        for depth, parent in enumerate((path, *path.parents)):
+            for case in inputs_at(parent):
+                held[case].setdefault(other, "are" if depth == 0 else "contain")
+    return held
+
+
 def answer_overlaps(
-    inputs_root: Path, expected_root: Path, case_ids: Iterable[str]
+    inputs_root: Path, expected_root: Path, case_ids: Iterable[str], *, defined: Iterable[str] = ()
 ) -> tuple[AnswerOverlap, ...]:
-    """The cases whose resolved inputs directory is, contains, or sits inside its own
-    resolved answers directory; contains the resolved expected root; or sits inside it
-    outside the inputs root, where other cases' answers are.
+    """The cases in ``case_ids`` (the ones about to run) whose resolved inputs directory
+    overlaps answers, one per case, first match wins:
+
+    - it is, contains, or sits inside its own resolved answers directory;
+    - it is, contains, or sits inside the answers directory of another case — any in
+      ``defined`` (every case the task defines, run or not) or ``case_ids``, the first in
+      that order named;
+    - it is or contains the resolved expected root, or sits inside it — unless it is under
+      the inputs root and the expected root is around the inputs root (``dirs.expected: ./``).
 
     Directories are compared by path and by identity on disk, so two spellings of one
     directory match. Nothing has to exist: a missing path is resolved as far as it goes
     and compared by path alone, so a task that keeps its answers off the machine is
     compared like any other."""
+    running = tuple(dict.fromkeys(case_ids))
+    inputs = {case: (inputs_root / case).resolve() for case in running}
+    answers = {case: (expected_root / case).resolve() for case in dict.fromkeys((*defined, *running))}
+    order = {case: n for n, case in enumerate(answers)}
+    held = _answers_held(inputs, answers)
     inputs_dir = inputs_root.resolve()
     expected = expected_root.resolve()
     overlaps: list[AnswerOverlap] = []
-    for case_id in case_ids:
-        inputs = (inputs_root / case_id).resolve()
-        answers = (expected_root / case_id).resolve()
-        if own := _relation(inputs, answers):
-            overlaps.append(AnswerOverlap(case_id, inputs, own, OWN_ANSWERS, answers))
-        elif root := _root_relation(inputs, expected, inputs_dir):
-            overlaps.append(AnswerOverlap(case_id, inputs, root, EXPECTED_ROOT, expected))
+    for case in running:
+        found = held[case]
+        if case in found:
+            overlaps.append(AnswerOverlap(case, inputs[case], found[case], OWN_ANSWERS, answers[case]))
+        elif found:
+            other = min(found, key=order.__getitem__)
+            target = f"the answers of case {other!r}"
+            overlaps.append(AnswerOverlap(case, inputs[case], found[other], target, answers[other]))
+        elif root := _root_relation(inputs[case], expected, inputs_dir):
+            overlaps.append(AnswerOverlap(case, inputs[case], root, EXPECTED_ROOT, expected))
     return tuple(overlaps)
 
 
 def refuse_answer_overlap(
     traptask_dir: Path, traptask_config: TraptaskConfig, cases: Iterable[TraptaskCase]
 ) -> None:
-    """Raise ConfigError when any of ``cases`` has inputs that overlap answers.
+    """Raise ConfigError when any of ``cases`` has inputs that overlap answers: its own,
+    those of any case the task defines (selected to run or not, skipped included), or the
+    expected root.
 
     A solution is handed its case's inputs as a resolved path, so a case directory that —
-    through a symlink, through ``dirs``, or as another spelling of one directory — is,
-    holds, or sits inside answers hands every solution the answers, and nothing
-    downstream can tell it from an ordinary directory. The error names the task and, for
-    each such case, how its inputs overlap which answers."""
+    through a symlink, through ``dirs``, through its id, or as another spelling of one
+    directory — is, holds, or sits inside answers hands every solution the answers, and
+    nothing downstream can tell it from an ordinary directory. The error names the task
+    and, for each such case, how its inputs overlap whose answers."""
     dirs = traptask_config.dirs
     overlaps = answer_overlaps(
-        traptask_dir / dirs.inputs, traptask_dir / dirs.expected, (c.id for c in cases)
+        traptask_dir / dirs.inputs,
+        traptask_dir / dirs.expected,
+        (c.id for c in cases),
+        defined=(c.id for c in traptask_config.cases),
     )
     if overlaps:
         lines = "".join(

@@ -45,11 +45,12 @@ tasks:
   that is itself a link reaches a shape as the folder it points to, so trap checks case
   directories before any case runs: it follows links on each one's own path and on
   `inputs/` and `expected/`, compares the real directories (a different letter case or
-  Unicode spelling on macOS included), and refuses a task whose case inputs overlap its
-  answers. That check doesn't look inside a case directory — the refusal above covers
-  links there. Beyond both, a shape copies exactly what the task declares as a case's
-  inputs — a hard link to an answer or a copy of it inside the inputs looks like an
-  ordinary file from here, and avoiding that is the task author's job, not a shape's.
+  Unicode spelling on macOS included), and refuses a task whose case inputs overlap
+  answers — their own or any other case's. That check doesn't look inside a case
+  directory — the refusal above covers links there. Beyond both, a shape copies exactly
+  what the task declares as a case's inputs — a hard link to an answer or a copy of it
+  inside the inputs looks like an ordinary file from here, and avoiding that is the task
+  author's job, not a shape's.
 - **Scrubs the environment before starting a child.** `cmd` and `acp` pass a scrubbed
   copy of the environment to the program or agent they start: it never sees
   `TRAP_MANIFEST` (it points at `inputs/`, and `expected/` sits next to it), your

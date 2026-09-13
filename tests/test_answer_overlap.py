@@ -188,21 +188,39 @@ def test_a_case_id_that_reads_as_markup_is_printed_as_written(make_project, runn
     _assert_refused(res, sol, "c[/x]", answers, f"are {OWN}", answers)
 
 
-def test_a_case_linked_into_answers_inside_the_inputs_root_is_refused(make_project, runner, tmp_path):
-    # The expected root sits inside the inputs root, so a case dir inside it is inside the
-    # inputs root too; that must not excuse a case that is another case's answers.
+def _answers_inside_the_inputs_root(make_project, tmp_path: Path) -> tuple[Path, Path]:
+    """A task whose expected root cases/_answers/ sits inside its inputs root cases/;
+    returns (solution, task)."""
     sol = make_project(cmd=MARKS_THAT_IT_RAN, cases=["c1", "c2"])
     task = tmp_path / "task"
     (task / "inputs").rename(task / "cases")
     for case in ("c1", "c2"):
         (task / "cases" / "_answers" / case).mkdir(parents=True)
         (task / "cases" / "_answers" / case / "answer.txt").write_text(f"secret-{case}")
-    _relink(task / "cases" / "c1", "_answers/c2")
     _set_dirs(task, inputs="cases/", expected="cases/_answers/")
+    return sol, task
+
+
+def test_a_case_linked_into_answers_inside_the_inputs_root_is_refused(make_project, runner, tmp_path):
+    sol, task = _answers_inside_the_inputs_root(make_project, tmp_path)
+    _relink(task / "cases" / "c1", "_answers/c2")
+    res = runner.invoke(app, ["run", "--no-environment"])
+    held = (task / "cases" / "_answers" / "c2").resolve()
+    _assert_refused(res, sol, "c1", held, "are the answers of case 'c2'", held)
+    assert _squash("c2: inputs") not in _squash(res.output)
+
+
+def test_a_case_linked_into_an_expected_root_inside_the_inputs_root_is_refused(
+    make_project, runner, tmp_path
+):
+    # The expected root sits inside the inputs root, so a case dir inside it is under the
+    # inputs root too; that must not excuse it. (_answers/extra is no case's answers.)
+    sol, task = _answers_inside_the_inputs_root(make_project, tmp_path)
+    (task / "cases" / "_answers" / "extra").mkdir()
+    _relink(task / "cases" / "c1", "_answers/extra")
     res = runner.invoke(app, ["run", "--no-environment"])
     expected = (task / "cases" / "_answers").resolve()
-    _assert_refused(res, sol, "c1", expected / "c2", f"sit inside {ROOT}", expected)
-    assert _squash("c2: inputs") not in _squash(res.output)
+    _assert_refused(res, sol, "c1", expected / "extra", f"sit inside {ROOT}", expected)
 
 
 def test_a_case_linked_into_answers_with_inputs_at_the_task_root_is_refused(make_project, runner, tmp_path):
@@ -217,8 +235,83 @@ def test_a_case_linked_into_answers_with_inputs_at_the_task_root_is_refused(make
     (task / "c1").symlink_to("expected/c2")
     _set_dirs(task, inputs="./", expected="expected/")
     res = runner.invoke(app, ["run", "--no-environment"])
-    expected = (task / "expected").resolve()
-    _assert_refused(res, sol, "c1", expected / "c2", f"sit inside {ROOT}", expected)
+    held = (task / "expected" / "c2").resolve()
+    _assert_refused(res, sol, "c1", held, "are the answers of case 'c2'", held)
+    assert _squash("c2: inputs") not in _squash(res.output)
+
+
+# --- tp run: one case's inputs against another case's answers -----------------------
+
+
+def _answers(directory: Path, case: str) -> None:
+    """Put ``case``'s answer file in ``directory`` (its answers dir, wherever that falls)."""
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "answer.txt").write_text(f"secret-{case}")
+
+
+def test_a_case_whose_inputs_are_another_case_s_answers_by_its_id_is_refused(make_project, runner, tmp_path):
+    # expected "./" makes case "inputs/c2"'s answers dir ./inputs/c2 -- which is case c2's inputs.
+    sol = make_project(cmd=MARKS_THAT_IT_RAN, cases=["c2", "inputs/c2"])
+    task = tmp_path / "task"
+    _answers(task / "c2", "c2")
+    _answers(task / "inputs" / "c2", "inputs/c2")
+    _set_dirs(task, inputs="inputs/", expected="./")
+    res = runner.invoke(app, ["run", "--no-environment"])
+    held = (task / "inputs" / "c2").resolve()
+    _assert_refused(res, sol, "c2", held, "are the answers of case 'inputs/c2'", held)
+    assert _squash("inputs/c2: inputs") not in _squash(res.output)
+
+
+def test_the_same_by_id_under_a_nested_inputs_dir_is_refused(make_project, runner, tmp_path):
+    sol = make_project(cmd=MARKS_THAT_IT_RAN, cases=["c2", "in/c2"])
+    task = tmp_path / "task"
+    (task / "data").mkdir()
+    (task / "inputs").rename(task / "data" / "in")
+    _answers(task / "data" / "c2", "c2")
+    _answers(task / "data" / "in" / "c2", "in/c2")
+    _set_dirs(task, inputs="data/in/", expected="data/")
+    res = runner.invoke(app, ["run", "--no-environment"])
+    held = (task / "data" / "in" / "c2").resolve()
+    _assert_refused(res, sol, "c2", held, "are the answers of case 'in/c2'", held)
+
+
+def test_a_case_whose_inputs_hold_another_case_s_answers_by_its_id_is_refused(make_project, runner, tmp_path):
+    sol = make_project(cmd=MARKS_THAT_IT_RAN, cases=["c2", "inputs/c2/key"])
+    task = tmp_path / "task"
+    _answers(task / "c2", "c2")
+    _answers(task / "inputs" / "c2" / "key", "inputs/c2/key")
+    _set_dirs(task, inputs="inputs/", expected="./")
+    res = runner.invoke(app, ["run", "--no-environment"])
+    inputs = (task / "inputs" / "c2").resolve()
+    _assert_refused(res, sol, "c2", inputs, "contain the answers of case 'inputs/c2/key'", inputs / "key")
+
+
+def test_inputs_inside_the_answers_of_a_case_not_selected_to_run_are_refused(make_project, runner, tmp_path):
+    # The inputs root links into c2's answers dir; only c1 is selected, but c2's answers
+    # are on disk all the same.
+    sol = make_project(cmd=MARKS_THAT_IT_RAN, cases=["c1", "c2"], tags={"c1": ["smoke"]})
+    task = tmp_path / "task"
+    _answers(task / "data" / "c1", "c1")
+    _answers(task / "data" / "c2", "c2")
+    for case in ("c1", "c2"):
+        (task / "inputs" / case).rename(task / "data" / "c2" / case)
+    (task / "inputs").rmdir()
+    (task / "data" / "in").symlink_to("c2")
+    _set_dirs(task, inputs="data/in/", expected="data/")
+    res = runner.invoke(app, ["run", "-t", "smoke", "--no-environment"])
+    held = (task / "data" / "c2").resolve()
+    _assert_refused(res, sol, "c1", held / "c1", "sit inside the answers of case 'c2'", held)
+
+
+def test_an_answers_dir_linked_to_another_case_s_inputs_is_refused(make_project, runner, tmp_path):
+    sol = make_project(
+        cmd=MARKS_THAT_IT_RAN, cases=["c1", "c2"], expected={"c1": {"answer.txt": "secret-c1"}}
+    )
+    task = tmp_path / "task"
+    (task / "expected" / "c2").symlink_to("../inputs/c1")
+    res = runner.invoke(app, ["run", "--no-environment"])
+    inputs = (task / "inputs" / "c1").resolve()
+    _assert_refused(res, sol, "c1", inputs, "are the answers of case 'c2'", inputs)
     assert _squash("c2: inputs") not in _squash(res.output)
 
 
@@ -362,6 +455,19 @@ def test_inputs_holding_the_expected_root_overlap_it(tmp_path):
     assert _relation(overlap) == (task.resolve(), "contain", ROOT, (task / "expected").resolve())
 
 
+def test_inputs_that_are_the_expected_root_overlap_it(tmp_path):
+    # c1's own answers live outside the task, so the inputs match only the expected root.
+    task = tmp_path / "task"
+    (task / "expected").mkdir(parents=True)
+    (tmp_path / "elsewhere" / "c1").mkdir(parents=True)
+    (task / "expected" / "c1").symlink_to(tmp_path / "elsewhere" / "c1")
+    (task / "inputs").mkdir()
+    (task / "inputs" / "c1").symlink_to("../expected")
+    [overlap] = runner_task.answer_overlaps(task / "inputs", task / "expected", ["c1"])
+    expected = (task / "expected").resolve()
+    assert _relation(overlap) == (expected, "are", ROOT, expected)
+
+
 def test_inputs_holding_their_own_answers_overlap_them(tmp_path):
     (tmp_path / "expected" / "c1").mkdir(parents=True)
     (tmp_path / "inputs").mkdir()
@@ -413,3 +519,35 @@ def test_an_unreadable_expected_dir_is_still_compared_by_path(tmp_path):
     finally:
         unlock(tmp_path)
     assert [o.case_id for o in overlaps] == ["c1"]
+
+
+def test_unreadable_dirs_on_both_sides_match_nothing(tmp_path):
+    # Neither side can be stat'ed, so neither has an identity; two unknowns are not one dir.
+    (tmp_path / "inputs").mkdir()
+    (tmp_path / "expected").mkdir()
+    (tmp_path / "inputs" / "c1").symlink_to("c1")
+    (tmp_path / "expected" / "c2").symlink_to("c2")
+    overlaps = runner_task.answer_overlaps(
+        tmp_path / "inputs", tmp_path / "expected", ["c1"], defined=["c1", "c2", "c3"]
+    )
+    assert overlaps == ()
+
+
+def test_the_first_case_in_task_order_is_named_when_several_answers_are_held(tmp_path):
+    shared = tmp_path / "shared"
+    for case in ("c2", "c3"):
+        (shared / case).mkdir(parents=True)
+    (tmp_path / "inputs").mkdir()
+    (tmp_path / "expected").mkdir()
+    (tmp_path / "inputs" / "c1").symlink_to("../shared")
+    for case in ("c3", "c2"):
+        (tmp_path / "expected" / case).symlink_to(f"../shared/{case}")
+    [overlap] = runner_task.answer_overlaps(
+        tmp_path / "inputs", tmp_path / "expected", ["c1"], defined=["c1", "c3", "c2"]
+    )
+    assert _relation(overlap) == (
+        shared.resolve(),
+        "contain",
+        "the answers of case 'c3'",
+        (shared / "c3").resolve(),
+    )
