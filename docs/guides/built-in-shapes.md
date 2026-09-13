@@ -78,7 +78,7 @@ tasks:
 | Flag | Meaning |
 |---|---|
 | `--agent-cmd` | how to start the agent, e.g. `npx -y @agentclientprotocol/codex-acp@1.11.0` |
-| `--agent-id` | its [ACP registry](https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json) id — `claude-acp`, `codex-acp`, `gemini`, … — which turns on what tp knows about that agent. Claude Code's settings isolation (below) needs `--agent-id claude-acp`: without it, the runner's own `CLAUDE.md`, hooks and plugins load |
+| `--agent-id` | its [ACP registry](https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json) id — `claude-acp`, `codex-acp`, … — which turns on what tp knows about that agent. Claude Code's settings isolation (below) needs `--agent-id claude-acp`: without it, the runner's own `CLAUDE.md`, hooks and plugins load |
 | `--model` | required (unless `--describe`); **a value the agent itself lists**, not an API model id |
 | `--option ID=VALUE` | set another of the agent's options, e.g. `effort=low` |
 | `--skill DIR` | install a skill for the case (Claude Code only) |
@@ -128,8 +128,15 @@ permission granted, and the agent's self-reported usage.
   session.
 - **Answers that are not answers.** A turn that failed (a login error, say) or in which the
   agent reports that no model answered exits 23 with empty stdout, even when the agent
-  sent the error text as a message. So does a reply shaped unlike the protocol — an
-  error or result that isn't an object, `configOptions` that isn't a list.
+  sent the error text as a message. So does a reply shaped unlike the protocol — a
+  JSON-RPC error that isn't an object, or `configOptions` that isn't a list. A `result`
+  that isn't a JSON object is read as empty rather than failing outright, which is
+  harmless for `initialize` and `session/set_config_option` — the case carries on as if
+  nothing were wrong — but shows up downstream everywhere else a result is read: a
+  non-object `session/new` result leaves the session without an id (exit 23 when running
+  a case, or, under `--describe`, an empty list of options and exit 0), and a non-object
+  `session/prompt` result leaves the turn without a `stopReason`, ending the case the same
+  way an unrecognized one does — exit 23.
 
 **Cost.** The cost proxy measures what the agent sends through the provider's base URL:
 
