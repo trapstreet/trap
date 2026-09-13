@@ -41,11 +41,12 @@ tasks:
   one that resolves to nothing, even one that only points at another file in the same
   case — is refused the same way, because a shape has no way to tell it apart from a
   link into `expected/`; replace links in a task's inputs with real files. A skill
-  installed with `--skill` is refused the same way if it contains one. Beyond a
-  symlink, though, a shape copies exactly what the task declares as a case's inputs — a
-  hard link to an answer, a copy of it, or a case directory that is itself a link to a
-  folder holding answers all look like ordinary files or an ordinary directory from
-  here, and avoiding them is the task author's job, not a shape's.
+  installed with `--skill` is refused the same way if it contains one. A case directory
+  that is itself a link reaches a shape as the folder it points to, so trap checks that
+  before any case runs: it refuses a task whose case inputs overlap its answers, links
+  included. Beyond that, a shape copies exactly what the task declares as a case's
+  inputs — a hard link to an answer or a copy of it inside the inputs looks like an
+  ordinary file from here, and avoiding that is the task author's job, not a shape's.
 - **Scrubs the environment before starting a child.** `cmd` and `acp` pass a scrubbed
   copy of the environment to the program or agent they start: it never sees
   `TRAP_MANIFEST` (it points at `inputs/`, and `expected/` sits next to it), your

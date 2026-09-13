@@ -35,7 +35,7 @@ setup_cmd: uv sync            # optional: prepare the checkout (e.g. install jud
 ## Fields
 
 - **`name`** — optional title. Task-author owned; consumers read it from the task repo via the run's `provenance.task`, so it stays identical across solutions.
-- **`dirs.inputs` / `dirs.expected`** — case input / expected dirs, relative to `traptask.yaml` (defaults `inputs/`, `expected/`).
+- **`dirs.inputs` / `dirs.expected`** — case input / expected dirs, relative to `traptask.yaml` (defaults `inputs/`, `expected/`). A case's inputs must not be, contain, or sit inside its expected answers, including through a symlink (`inputs/<id>` linked into `expected/`, or both dirs set to one directory); trap refuses to run such a task.
 - **`cases[]`** — `id` (required; matches an `inputs/<id>/` dir), `description` (free-form author note; trap doesn't show it), `tags` (filter with `tp run -t`), `skip` (bool — a skipped case is not run and never appears in the report).
 - **`judge`** / **`grader`** — each optional; a subprocess with `cmd` (shlex-split, cwd = task dir), `manifest_envvar` (default `TRAPTASK_MANIFEST`), and `timeout`. Omit `judge` → cases run unscored; omit `grader` → no aggregation. Each gets `TRAPTASK_MANIFEST` and prints JSON — see the [IO contract](io-contract.md).
 - **`setup_cmd`** — shell command to prepare the checkout (cwd = task dir). Task-author owned, so every solution on this task commit gets the same env. Auto-runs when a remote pull brings new code; force on a pinned/local source with `tp run --setup-task`.
