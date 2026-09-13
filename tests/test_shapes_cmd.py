@@ -9,6 +9,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,7 @@ from .conftest import (
     reap,
     signal_main_thread_when,
     sleeper,
+    unlock,
     wait_until,
 )
 
@@ -163,6 +165,32 @@ def test_a_case_with_a_symlinked_input_is_refused_before_the_program_runs(make_p
     assert "secret" not in stderr
 
 
+#: A program that answers, then leaves a directory in its work dir that no one can list.
+ANSWERS_THEN_LOCKS_A_DIR = "sh -c 'echo the-answer; mkdir d && chmod 000 d'"
+
+
+def test_a_program_that_locks_a_dir_in_its_work_dir_keeps_its_answer(
+    make_project, runner, tmp_path, monkeypatch
+):
+    tmpdir = tmp_path / "tmpdir"  # the shape's own TMPDIR, so its work dir is findable
+    tmpdir.mkdir()
+    monkeypatch.setenv("TMPDIR", str(tmpdir))
+    sol = make_project(
+        cmd=shlex.join(
+            [PY, "-m", "trap.shapes.command", "--template", ANSWERS_THEN_LOCKS_A_DIR, "--deadline", "30"]
+        ),
+        inputs={"c1": {"question.txt": "q"}},
+    )
+    try:
+        res = runner.invoke(app, ["run", "--task", "t", "--no-environment"])
+        assert res.exit_code == 0, res.output
+        out, meta = case_capture(sol)
+        assert (out, meta["exit_code"]) == ("the-answer\n", 0)
+        assert list(tmpdir.glob("trap-case-*")) == [], "the work dir was left behind"
+    finally:
+        unlock(tmpdir)
+
+
 def _venv_tp() -> bool:
     found = shutil.which("tp")
     return found is not None and Path(found).parent == Path(sys.executable).parent
@@ -273,6 +301,20 @@ def test_a_program_killed_by_a_signal_exits_128_plus_the_signal(tmp_path, monkey
     code = main(["--template", "sh -c 'echo partial; kill -KILL $$'", "--deadline", "30"])
     assert code == 128 + signal.SIGKILL
     assert capsys.readouterr().out == "partial\n"
+
+
+def test_main_keeps_the_answer_of_a_program_that_locks_a_dir_in_its_work_dir(tmp_path, monkeypatch, capsys):
+    case = _case_dir(tmp_path, {"question.txt": "hi"})
+    _set_manifest(monkeypatch, case)
+    tmpdir = tmp_path / "tmpdir"
+    tmpdir.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(tmpdir))
+    try:
+        code = main(["--template", ANSWERS_THEN_LOCKS_A_DIR, "--deadline", "30"])
+        assert (code, capsys.readouterr().out) == (0, "the-answer\n")
+        assert list(tmpdir.iterdir()) == [], "the work dir was left behind"
+    finally:
+        unlock(tmpdir)
 
 
 def test_main_relays_output_that_is_not_utf8_instead_of_crashing(tmp_path, monkeypatch, capsys):

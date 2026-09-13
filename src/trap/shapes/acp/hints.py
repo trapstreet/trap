@@ -74,8 +74,8 @@ def install_skill(agent_id: str | None, skill_dir: Path, workdir: Path) -> None:
     try:
         links = copy_tree_without_symlinks(skill_dir, dest)
     except OSError as e:
-        remove_tree(dest)
+        remove_tree(dest, what="the partly installed skill")
         raise ShapeError(ShapeExit.CONFIG_ERROR, f"cannot install the skill from {skill_dir}: {e}") from None
     if links:
-        remove_tree(dest)
+        remove_tree(dest, what="the partly installed skill")
         refuse_symlinks("this skill contains symlinks", links)

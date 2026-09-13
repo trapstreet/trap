@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import time
@@ -985,6 +986,39 @@ def test_install_skill_reports_any_other_copy_failure_as_cannot_install_not_star
     assert "cannot install the skill" in str(e.value)
     assert "cannot start the agent" not in str(e.value)
     assert not (work / ".claude" / "skills" / "my-skill").exists()
+
+
+@pytest.mark.parametrize("failure", ["a symlink in the skill", "a copy that fails halfway"])
+def test_a_refused_skill_is_still_a_config_error_when_its_partial_copy_cannot_be_removed(
+    tmp_path, monkeypatch, capsys, failure
+):
+    skill = tmp_path / "my-skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("hello")
+    if failure == "a symlink in the skill":
+        (skill / "leak.txt").symlink_to(tmp_path / "secret.txt")
+    else:
+
+        def half_copy(src: Path, dst: Path) -> list[str]:
+            dst.mkdir(parents=True)
+            raise OSError("disk full")
+
+        monkeypatch.setattr(hints, "copy_tree_without_symlinks", half_copy)
+    work = tmp_path / "work"
+    work.mkdir()
+
+    def rmtree_fails(*args, **kwargs):
+        raise OSError("the disk went away")
+
+    monkeypatch.setattr(shutil, "rmtree", rmtree_fails)
+    with pytest.raises(ShapeError) as e:
+        hints.install_skill("claude-acp", skill, work)
+    assert e.value.code is ShapeExit.CONFIG_ERROR
+    dest = work / ".claude" / "skills" / "my-skill"
+    assert (
+        capsys.readouterr().err
+        == f"[trap] could not remove the partly installed skill {dest}: the disk went away\n"
+    )
 
 
 # --- tp shape acp: end to end, the way a trap.yaml `cmd:` line actually runs it ---------

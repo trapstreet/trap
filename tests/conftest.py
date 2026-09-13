@@ -53,6 +53,17 @@ def sleeper(pidfile: Path) -> list[str]:
     return ["sh", "-c", f"sleep 60 & echo $! > {pidfile}.tmp && mv {pidfile}.tmp {pidfile}; wait"]
 
 
+def unlock(root: Path) -> None:
+    """Give the owner rwx on every real directory under ``root`` — top-down, so a 000
+    directory is opened up before it is listed, and never through a link — so pytest can
+    remove whatever modes a test's child left there."""
+    for dirpath, dirnames, _ in os.walk(root):
+        for name in dirnames:
+            path = os.path.join(dirpath, name)
+            if not os.path.islink(path):
+                os.chmod(path, 0o755)
+
+
 def reap(pid: int) -> None:
     """SIGKILL ``pid``'s process group if a failing test left it running — never the
     group this test process belongs to."""

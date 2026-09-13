@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -24,7 +25,7 @@ from dataclasses import dataclass
 from enum import IntEnum
 from pathlib import Path
 from types import FrameType
-from typing import Any, NoReturn
+from typing import NoReturn
 
 
 class ShapeExit(IntEnum):
@@ -139,7 +140,9 @@ def copy_tree_without_symlinks(src: Path, dst: Path) -> list[str]:
     as a backstop, so a link that lands anyway is recreated as a link, never
     dereferenced — see ``_secure_and_verify``, which checks for exactly that.
 
-    Every directory copytree creates — ``dst`` itself included — gets the owner's
+    ``dst`` is private to the owner (exactly 0700) from the moment copytree returns,
+    before anything walks the copy: copystat has just given it ``src``'s mode, which may
+    be open to everyone. Every directory copytree created below it gets the owner's
     read/write/execute bits added on top of whatever ``copystat`` gave it from ``src``.
 
     Returns every symlink found — file, directory, or one that resolves to nothing — as
@@ -156,7 +159,7 @@ def copy_tree_without_symlinks(src: Path, dst: Path) -> list[str]:
         return skip
 
     shutil.copytree(src, dst, symlinks=True, dirs_exist_ok=True, ignore=_ignore)
-    os.chmod(dst, os.stat(dst).st_mode | 0o700)
+    os.chmod(dst, 0o700)
     links.extend(_secure_and_verify(dst))
     return sorted(set(links))
 
@@ -181,24 +184,49 @@ def refuse_symlinks(clause: str, paths: Sequence[str]) -> NoReturn:
     )
 
 
-def _reclaim_and_retry(func: Any, path: str, exc: BaseException) -> None:
-    """``remove_tree``'s ``onexc`` handler: a directory copied read-only from the
-    inputs, or one a child made read-only while the case ran, blocks ``func`` on its
-    parent's write bit. Reclaim it there and on ``path`` itself, then retry once. A
-    path already gone — nothing left to remove — needs no retry."""
-    if not os.path.lexists(path):
-        return
-    parent = os.path.dirname(path)
-    os.chmod(parent, os.stat(parent).st_mode | 0o700)
-    os.chmod(path, os.stat(path).st_mode | 0o700)
-    func(path)
+def _open_up_directories(root: str) -> None:
+    """Add the owner's read/write/execute to ``root`` and to every real directory under
+    it, each one before it is listed — so a directory left 000, 444 or 555 can be listed
+    and emptied. Walked top-down with ``lstat``: a symlink, and anything reached through
+    one, is never chmod'd, and nothing above ``root`` is ever touched. Files keep their
+    modes: removing one needs only its directory's write bit. A directory that cannot be
+    opened up is skipped, left for the removal that follows to report."""
+    pending = [root]
+    while pending:
+        path = pending.pop()
+        try:
+            mode = os.lstat(path).st_mode
+            if stat.S_ISDIR(mode):
+                os.chmod(path, stat.S_IMODE(mode) | 0o700)
+                with os.scandir(path) as entries:
+                    pending.extend(e.path for e in entries if e.is_dir(follow_symlinks=False))
+        except OSError:
+            continue
 
 
-def remove_tree(path: Path) -> None:
-    """Remove ``path`` and everything under it, reclaiming the owner's write bit
-    wherever it is missing instead of leaving a ``trap-case-*`` directory (or a
-    partially installed skill) behind. A path already gone is not an error."""
-    shutil.rmtree(path, onexc=_reclaim_and_retry)
+def remove_tree(path: Path, *, what: str = "the work dir") -> None:
+    """Remove ``path`` and everything under it as far as possible, and never raise: a
+    shape prints its answer after removing the work dir, and a cleanup that fails must
+    not cost the case its answer and exit code, nor turn a refusal into some other
+    error. Whatever is left is named in one ``[trap] could not remove …`` line on stderr,
+    with the first reason; a path already gone needs nothing.
+
+    Runs only once nothing else can write under ``path``: a shape removes its work dir
+    after ``run_group`` or the ACP connection has killed the child's whole process
+    group, so no directory can be swapped for a link between the ``lstat`` that vets it
+    and the ``chmod`` that follows."""
+    root = os.fspath(path)
+    _open_up_directories(root)
+    errors: list[BaseException] = []
+    try:
+        # Each failure is recorded and skipped, never retried — ignore_errors=True, but
+        # keeping the reasons.
+        shutil.rmtree(root, onexc=lambda func, failed, exc: errors.append(exc))
+    except Exception as e:  # rmtree hands every OSError to onexc; nothing else may escape either
+        errors.append(e)
+    if os.path.lexists(root):
+        reason = errors[0] if errors else "reason unknown"
+        print(f"[trap] could not remove {what} {root}: {reason}", file=sys.stderr)
 
 
 @dataclass
@@ -254,15 +282,14 @@ class CaseSandbox:
             )
         workdir = Path(tempfile.mkdtemp(prefix="trap-case-")).resolve()
         try:
+            # Leaves the work directory private (0700) to whoever runs `tp run` — this
+            # case's own, however the inputs themselves were shared on disk.
             links = copy_tree_without_symlinks(inputs_dir, workdir)
         except OSError as e:  # shutil.Error too: an unreadable file, one that vanishes mid-copy, ...
             remove_tree(workdir)
             raise ShapeError(
                 ShapeExit.CONFIG_ERROR, f"cannot copy this case's inputs from {inputs_dir}: {e}"
             ) from None
-        # The work directory is this case's own, not shared with any other — private to
-        # whoever runs `tp run`, however the inputs themselves were shared on disk.
-        os.chmod(workdir, 0o700)
         # The copy mirrors inputs_dir's layout exactly, so a path found here is the
         # same path relative to inputs_dir — this is what a shape is about to hand a
         # program or agent, named the way the case author would recognise it.

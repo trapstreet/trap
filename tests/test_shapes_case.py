@@ -6,6 +6,7 @@ import argparse
 import json
 import locale
 import os
+import shlex
 import shutil
 import signal
 import stat
@@ -14,10 +15,12 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
+from trap.shapes import _case as case_module
 from trap.shapes._case import (
     MAX_NAMED_SYMLINKS,
     CaseSandbox,
@@ -37,9 +40,30 @@ from trap.shapes._case import (
     scrubbed_env,
 )
 
-from .conftest import INTERRUPTS, process_gone, reap, signal_main_thread_when, sleeper, wait_until
+from .conftest import INTERRUPTS, process_gone, reap, signal_main_thread_when, sleeper, unlock, wait_until
 
 pytestmark = pytest.mark.usefixtures("signal_handlers_unchanged")
+
+
+@pytest.fixture
+def scratch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """The temp directory work dirs are made in, for this test only: one a test leaves
+    behind — on purpose, or by failing — is pytest's to remove, never a stray
+    ``trap-case-*`` in the real TMPDIR, and is unlocked first whatever modes it holds."""
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    yield scratch
+    unlock(scratch)
+
+
+def _raises(error: BaseException):
+    """A stand-in for any callable that fails with ``error`` however it is called."""
+
+    def fail(*args, **kwargs):
+        raise error
+
+    return fail
 
 
 def _case(tmp_path: Path, files: dict[str, str]) -> Path:
@@ -303,8 +327,125 @@ def test_secure_and_verify_fails_closed_when_the_walk_cannot_read_a_directory(tm
         _secure_and_verify(dst)
 
 
-def test_remove_tree_tolerates_a_path_that_is_already_gone(tmp_path):
+def test_remove_tree_tolerates_a_path_that_is_already_gone(tmp_path, capsys):
     remove_tree(tmp_path / "already-gone")  # must not raise
+    assert capsys.readouterr().err == "", "nothing was left, so there is nothing to warn about"
+
+
+def test_remove_tree_never_reaches_through_a_root_that_is_a_link(tmp_path, capsys):
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "kept.txt").write_text("not the tree's")
+    target.chmod(0o550)
+    link = tmp_path / "link"
+    link.symlink_to(target)
+    try:
+        remove_tree(link)
+        assert stat.S_IMODE(target.stat().st_mode) == 0o550, "cleanup chmod'd what the link names"
+        assert (target / "kept.txt").read_text() == "not the tree's"
+    finally:
+        target.chmod(0o755)
+    assert capsys.readouterr().err.startswith(f"[trap] could not remove the work dir {link}: ")
+
+
+# --- close() removes whatever the case's program left, and never reaches past it -------
+#
+# By the time close() runs the program is gone, but the work dir was the program's to
+# shape: it can leave a directory no one can list (000), one that can be listed but not
+# searched (444), or a read-only one holding a link — to nothing, or to a file outside.
+
+LOCKED_BY_THE_CHILD = {
+    "an unlistable dir": "mkdir d && chmod 000 d",
+    "an unsearchable dir holding a file": "mkdir d && echo x > d/f && chmod 444 d",
+    "a read-only dir holding a dangling link": "mkdir d && ln -s nowhere d/l && chmod 555 d",
+}
+
+
+@pytest.mark.parametrize("script", list(LOCKED_BY_THE_CHILD.values()), ids=list(LOCKED_BY_THE_CHILD))
+def test_close_removes_whatever_the_child_left_locked(tmp_path, scratch, capsys, script):
+    case = _case(tmp_path, {"question.txt": "what?"})
+    box = CaseSandbox.open(
+        manifest_envvar="TRAP_MANIFEST", prompt_file="question.txt", environ=_manifest(case)
+    )
+    subprocess.run(["sh", "-c", script], cwd=box.workdir, check=True)
+    box.close()
+    assert not box.workdir.exists()
+    assert list(scratch.iterdir()) == [], "a trap-case-* work dir was left behind"
+    assert capsys.readouterr().err == ""
+
+
+def test_close_never_changes_a_file_outside_the_work_dir_that_a_link_names(tmp_path, scratch):
+    case = _case(tmp_path, {"question.txt": "what?"})
+    outside = tmp_path / "outside.txt"
+    outside.write_text("not the case's")
+    outside.chmod(0o444)
+    before = stat.S_IMODE(outside.stat().st_mode)
+    box = CaseSandbox.open(
+        manifest_envvar="TRAP_MANIFEST", prompt_file="question.txt", environ=_manifest(case)
+    )
+    script = f"mkdir ro && ln -s {shlex.quote(str(outside))} ro/l && chmod 555 ro"
+    subprocess.run(["sh", "-c", script], cwd=box.workdir, check=True)
+    try:
+        box.close()
+        assert (before, stat.S_IMODE(outside.stat().st_mode)) == (0o444, 0o444), (
+            "cleanup chmod'd through a link"
+        )
+        assert not box.workdir.exists()
+    finally:
+        outside.chmod(0o644)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root removes from a read-only directory regardless")
+def test_a_work_dir_that_cannot_be_removed_is_left_with_a_warning_and_its_parent_untouched(
+    tmp_path, monkeypatch, capsys
+):
+    # A read-only TMPDIR: everything inside the work dir can go, the work dir itself
+    # cannot — and the only way to change that is to reach outside the work dir.
+    parent = tmp_path / "readonly-tmp"
+    parent.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(parent))
+    case = _case(tmp_path, {"question.txt": "what?"})
+    box = CaseSandbox.open(
+        manifest_envvar="TRAP_MANIFEST", prompt_file="question.txt", environ=_manifest(case)
+    )
+    parent.chmod(0o555)
+    try:
+        box.close()  # must not raise
+        assert stat.S_IMODE(parent.stat().st_mode) == 0o555, "cleanup chmod'd the work dir's parent"
+        assert box.workdir.is_dir()
+    finally:
+        parent.chmod(0o755)
+    err = capsys.readouterr().err
+    assert err.startswith(f"[trap] could not remove the work dir {box.workdir}: ")
+    assert err.count("\n") == 1, "one line, not a traceback"
+
+
+def test_close_never_raises_even_when_the_removal_itself_fails(tmp_path, scratch, monkeypatch, capsys):
+    case = _case(tmp_path, {"question.txt": "what?"})
+    box = CaseSandbox.open(
+        manifest_envvar="TRAP_MANIFEST", prompt_file="question.txt", environ=_manifest(case)
+    )
+    monkeypatch.setattr(shutil, "rmtree", _raises(OSError("the disk went away")))
+    box.close()
+    assert (
+        capsys.readouterr().err == f"[trap] could not remove the work dir {box.workdir}: the disk went away\n"
+    )
+
+
+@pytest.mark.parametrize("refusal", ["a symlink in the inputs", "a copy that fails"])
+def test_a_refused_case_is_still_exit_24_when_its_work_dir_cannot_be_removed(
+    tmp_path, scratch, monkeypatch, capsys, refusal
+):
+    case = _case(tmp_path, {"question.txt": "what?"})
+    if refusal == "a symlink in the inputs":
+        (case / "reference.txt").symlink_to(case.parent.parent / "expected" / "c1" / "answer.txt")
+    else:
+        monkeypatch.setattr(shutil, "copytree", _raises(OSError("disk full")))
+    monkeypatch.setattr(shutil, "rmtree", _raises(OSError("the disk went away")))
+    with pytest.raises(ShapeError) as e:
+        CaseSandbox.open(manifest_envvar="TRAP_MANIFEST", prompt_file="question.txt", environ=_manifest(case))
+    assert e.value.code is ShapeExit.CONFIG_ERROR
+    assert "could not remove the work dir" in capsys.readouterr().err
 
 
 # --- the work directory is private, and writable even from a read-only input ----------
@@ -313,13 +454,39 @@ def test_remove_tree_tolerates_a_path_that_is_already_gone(tmp_path):
 def test_the_work_dir_is_private_even_when_the_inputs_dir_is_wide_open(tmp_path):
     case = _case(tmp_path, {"question.txt": "what?"})
     os.chmod(case, 0o777)
-    box = CaseSandbox.open(
-        manifest_envvar="TRAP_MANIFEST", prompt_file="question.txt", environ=_manifest(case)
-    )
     try:
-        assert stat.S_IMODE(box.workdir.stat().st_mode) == 0o700
+        box = CaseSandbox.open(
+            manifest_envvar="TRAP_MANIFEST", prompt_file="question.txt", environ=_manifest(case)
+        )
+        try:
+            assert stat.S_IMODE(box.workdir.stat().st_mode) == 0o700
+        finally:
+            box.close()
     finally:
-        box.close()
+        os.chmod(case, 0o755)
+
+
+def test_the_work_dir_is_private_before_its_copy_is_walked(tmp_path, monkeypatch):
+    # The copy takes the inputs' mode (0777 here) when copytree finishes; the walk that
+    # follows can take a while on a big case, and the work dir must not sit open to
+    # everyone meanwhile.
+    case = _case(tmp_path, {"question.txt": "what?"})
+    os.chmod(case, 0o777)
+    modes_at_the_walk: list[int] = []
+    walk = case_module._secure_and_verify
+
+    def spy(dst: Path) -> list[str]:
+        modes_at_the_walk.append(stat.S_IMODE(os.stat(dst).st_mode))
+        return walk(dst)
+
+    monkeypatch.setattr(case_module, "_secure_and_verify", spy)
+    try:
+        CaseSandbox.open(
+            manifest_envvar="TRAP_MANIFEST", prompt_file="question.txt", environ=_manifest(case)
+        ).close()
+    finally:
+        os.chmod(case, 0o755)
+    assert modes_at_the_walk == [0o700]
 
 
 def test_a_read_only_input_dir_still_yields_a_writable_copy_and_close_leaves_nothing(tmp_path):
