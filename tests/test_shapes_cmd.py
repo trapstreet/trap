@@ -143,6 +143,26 @@ def test_a_missing_program_is_a_config_error(make_project, runner, tmp_path):
     assert meta["exit_code"] == ShapeExit.CONFIG_ERROR
 
 
+def test_a_case_with_a_symlinked_input_is_refused_before_the_program_runs(make_project, runner, tmp_path):
+    sol = make_project(
+        cmd=shlex.join(
+            [PY, "-m", "trap.shapes.command", "--template", "cat reference.txt", "--deadline", "30"]
+        ),
+        inputs={"c1": {"question.txt": "hi"}},
+        expected={"c1": {"answer.txt": "secret"}},
+    )
+    (tmp_path / "task" / "inputs" / "c1" / "reference.txt").symlink_to(
+        tmp_path / "task" / "expected" / "c1" / "answer.txt"
+    )
+    res = runner.invoke(app, ["run", "--task", "t", "--no-environment"])
+    assert res.exit_code == 0, res.output  # a refused case is a fact about it, not a trap error
+    out, meta = case_capture(sol)
+    assert meta["exit_code"] == ShapeExit.CONFIG_ERROR
+    assert "secret" not in out
+    stderr = next((sol / ".trap").rglob("c1/solution/stderr")).read_text()
+    assert "secret" not in stderr
+
+
 def _venv_tp() -> bool:
     found = shutil.which("tp")
     return found is not None and Path(found).parent == Path(sys.executable).parent

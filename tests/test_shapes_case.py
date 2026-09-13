@@ -6,6 +6,7 @@ import argparse
 import json
 import locale
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -17,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from trap.shapes._case import (
+    MAX_NAMED_SYMLINKS,
     CaseSandbox,
     Deadline,
     ShapeError,
@@ -112,17 +114,105 @@ def test_a_case_without_the_prompt_file_is_a_config_error(tmp_path):
     assert "question.txt" in str(e.value)
 
 
-def test_inputs_that_cannot_be_copied_are_a_config_error_and_leave_no_work_dir(tmp_path, monkeypatch):
+def test_inputs_that_cannot_be_copied_for_another_reason_are_a_config_error_and_leave_no_work_dir(
+    tmp_path, monkeypatch
+):
     case = _case(tmp_path, {"question.txt": "what?"})
-    (case / "data.csv").symlink_to(tmp_path / "gone.csv")  # dangling: copying it fails
     scratch = tmp_path / "scratch"
     scratch.mkdir()
     monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+
+    def boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(shutil, "copytree", boom)
     with pytest.raises(ShapeError) as e:
         CaseSandbox.open(manifest_envvar="TRAP_MANIFEST", prompt_file="question.txt", environ=_manifest(case))
     assert e.value.code is ShapeExit.CONFIG_ERROR
     assert "cannot copy this case's inputs" in str(e.value)
     assert list(scratch.iterdir()) == [], "the half-filled work directory was left behind"
+
+
+# --- a symlink anywhere in a case's inputs is refused, never copied through -----------
+#
+# CaseSandbox.open's isolation promise is that a program or agent can only ever see this
+# case's own inputs — never expected/. A symlink breaks that promise regardless of what it
+# points at (the answers, another case, even a file inside this same case): a shape has no
+# way to tell a safe link from a dangerous one, so every link is refused, unconditionally.
+
+
+def test_a_symlink_to_the_answer_is_refused_by_name_and_leaves_no_work_dir(tmp_path, monkeypatch):
+    case = _case(tmp_path, {"question.txt": "what?"})
+    answer = case.parent.parent / "expected" / "c1" / "answer.txt"
+    (case / "reference.txt").symlink_to(answer)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    with pytest.raises(ShapeError) as e:
+        CaseSandbox.open(manifest_envvar="TRAP_MANIFEST", prompt_file="question.txt", environ=_manifest(case))
+    message = str(e.value)
+    assert e.value.code is ShapeExit.CONFIG_ERROR
+    assert "symlinks" in message and "reference.txt" in message
+    assert "secret" not in message, "the answer the link points at must never appear in the refusal"
+    assert list(scratch.iterdir()) == [], "a trap-case-* work dir was left behind"
+
+
+def test_a_symlinked_subdirectory_is_refused(tmp_path):
+    case = _case(tmp_path, {"question.txt": "what?"})
+    (case / "data").symlink_to(case.parent.parent / "expected" / "c1")
+    with pytest.raises(ShapeError) as e:
+        CaseSandbox.open(manifest_envvar="TRAP_MANIFEST", prompt_file="question.txt", environ=_manifest(case))
+    assert e.value.code is ShapeExit.CONFIG_ERROR
+    assert "data" in str(e.value)
+
+
+def test_a_symlink_pointing_inside_the_case_itself_is_still_refused(tmp_path):
+    # Pins the reject-all policy: this link never reaches outside the case's own inputs,
+    # yet a shape has no principled way to trust it more than one that does.
+    case = _case(tmp_path, {"question.txt": "what?"})
+    (case / "alias.txt").symlink_to("question.txt")
+    with pytest.raises(ShapeError) as e:
+        CaseSandbox.open(manifest_envvar="TRAP_MANIFEST", prompt_file="question.txt", environ=_manifest(case))
+    assert e.value.code is ShapeExit.CONFIG_ERROR
+    assert "alias.txt" in str(e.value)
+
+
+def test_the_prompt_file_itself_a_symlink_is_refused(tmp_path):
+    case = _case(tmp_path, {})
+    real = tmp_path / "real_question.txt"
+    real.write_text("what?")
+    (case / "question.txt").symlink_to(real)
+    with pytest.raises(ShapeError) as e:
+        CaseSandbox.open(manifest_envvar="TRAP_MANIFEST", prompt_file="question.txt", environ=_manifest(case))
+    assert e.value.code is ShapeExit.CONFIG_ERROR
+    assert "question.txt" in str(e.value) and "symlinks" in str(e.value)
+
+
+def test_an_inputs_dir_that_is_itself_a_symlink_is_refused(tmp_path):
+    # Only a hand-made manifest can point inputs_dir at a symlink — the runner always
+    # resolves it first — but a shape must not trust a manifest that does.
+    real_case = _case(tmp_path, {"question.txt": "what?"})
+    link = tmp_path / "task" / "inputs" / "c1-link"
+    link.symlink_to(real_case)
+    with pytest.raises(ShapeError) as e:
+        CaseSandbox.open(manifest_envvar="TRAP_MANIFEST", prompt_file="question.txt", environ=_manifest(link))
+    message = str(e.value)
+    assert e.value.code is ShapeExit.CONFIG_ERROR
+    assert "symlink" in message and str(link) in message
+
+
+def test_more_symlinks_than_the_cap_are_named_and_the_rest_are_counted(tmp_path):
+    case = _case(tmp_path, {"question.txt": "what?"})
+    target = case.parent.parent / "expected" / "c1" / "answer.txt"
+    names = [f"link{i}.txt" for i in range(MAX_NAMED_SYMLINKS + 3)]
+    for name in names:
+        (case / name).symlink_to(target)
+    with pytest.raises(ShapeError) as e:
+        CaseSandbox.open(manifest_envvar="TRAP_MANIFEST", prompt_file="question.txt", environ=_manifest(case))
+    message = str(e.value)
+    for name in sorted(names)[:MAX_NAMED_SYMLINKS]:
+        assert name in message
+    assert "and 3 more" in message
 
 
 def test_a_question_that_is_not_utf8_is_a_config_error(tmp_path):

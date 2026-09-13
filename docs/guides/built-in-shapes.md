@@ -30,8 +30,12 @@ tasks:
 - **Works in a copy.** The case's input files are copied to a fresh temporary directory
   outside the task checkout and `.trap/`; the program under test runs there and the
   directory is removed afterwards. Task questions that say "the file is in the current
-  directory" work as written. Inputs that can't be copied (a dangling symlink, an
-  unreadable file) are a configuration error (exit 24), and nothing is left behind.
+  directory" work as written. Inputs that can't be copied (an unreadable file) are a
+  configuration error (exit 24), and nothing is left behind. A symlink anywhere in a
+  case's inputs — a file, a directory, one that resolves to nothing, even one that only
+  points at another file in the same case — is refused the same way, because a shape has
+  no way to tell it apart from a link into `expected/`; replace links in a task's inputs
+  with real files.
 - **Scrubs the environment before starting a child.** `cmd` and `acp` pass a scrubbed
   copy of the environment to the program or agent they start: it never sees
   `TRAP_MANIFEST` (it points at `inputs/`, and `expected/` sits next to it), your
@@ -61,17 +65,17 @@ tasks:
   | 21 | the output ceiling was hit (a partial answer, if any) |
   | 22 | the agent hit its turn limit |
   | 23 | agent error: crash, protocol error, failed login, or a reply that is not an answer — stdout stays empty |
-  | 24 | configuration: bad arguments, a model or option the agent does not offer, input the shape cannot pass on, a missing program |
+  | 24 | configuration: bad arguments, a model or option the agent does not offer, input the shape cannot pass on (a symlink among it), a missing program |
   | 124 | the deadline (a partial answer, if any) |
 
   Like any solution's exit code these are facts about the case; they never fail `tp run`.
   `tp shape cmd` itself only ever produces 24 — its own configuration errors: an unset or
-  unreadable manifest, a question that isn't UTF-8, inputs that can't be copied, an
-  unparseable or empty template, `{repo}` with no `--repo`, a command that can't be found
-  or can't be started (no execute bit, say) — and 124, the deadline (plus 128 + the
-  signal when it is interrupted). Any other code is the wrapped program's: its own exit
-  code, or 128 + N when signal N killed it (137 for `SIGKILL`), the way a shell reports
-  it.
+  unreadable manifest, a question that isn't UTF-8, inputs that can't be copied or that
+  contain a symlink, an unparseable or empty template, `{repo}` with no `--repo`, a
+  command that can't be found or can't be started (no execute bit, say) — and 124, the
+  deadline (plus 128 + the signal when it is interrupted). Any other code is the wrapped
+  program's: its own exit code, or 128 + N when signal N killed it (137 for `SIGKILL`),
+  the way a shell reports it.
 
 ## `tp shape acp`
 

@@ -982,6 +982,25 @@ def test_the_bridge_is_a_solution_like_any_other(make_project, runner, fake, tmp
     assert report["cases_results"][0]["metrics"] == {"score": 1.0}
 
 
+def test_a_case_with_a_symlinked_input_is_refused_before_the_agent_starts(
+    make_project, runner, fake, tmp_path
+):
+    log = fake("ok")
+    sol = make_project(
+        cmd=_bridge_cmd(),
+        inputs={"c1": {"question.txt": "what is 6*7?"}},
+        expected={"c1": {"answer.txt": "secret"}},
+    )
+    (tmp_path / "task" / "inputs" / "c1" / "reference.txt").symlink_to(
+        tmp_path / "task" / "expected" / "c1" / "answer.txt"
+    )
+    res = runner.invoke(app, ["run", "--task", "t", "--no-environment"])
+    assert res.exit_code == 0, res.output  # a refused case is a fact about it, not a trap error
+    _, meta = case_capture(sol)
+    assert meta["exit_code"] == ShapeExit.CONFIG_ERROR
+    assert not log.exists(), "the agent's own startup log means it was started"
+
+
 def test_a_turn_that_is_not_an_answer_leaves_stdout_empty(make_project, runner, fake):
     fake("no_model_use")
     sol = make_project(cmd=_bridge_cmd(), inputs={"c1": {"question.txt": "q"}})

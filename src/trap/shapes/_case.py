@@ -83,6 +83,40 @@ class Deadline:
 #: Files macOS Finder and Windows Explorer write into any folder they show.
 OS_JUNK = frozenset({".DS_Store", "Thumbs.db", "desktop.ini"})
 
+#: A refusal names at most this many links before falling back to "and N more" — a case
+#: gone wrong in bulk doesn't need every path spelled out to be diagnosable.
+MAX_NAMED_SYMLINKS = 5
+
+
+def _symlinks_under(root: Path) -> list[str]:
+    """Every symlink under ``root`` — a file, a directory, or one that resolves to
+    nothing — as a sorted POSIX path relative to ``root``. Walked with
+    ``followlinks=False`` so a symlinked directory is reported and never descended
+    into; nothing a link points at is ever read to produce this list."""
+    found: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        for name in (*dirnames, *filenames):
+            entry = Path(dirpath, name)
+            if entry.is_symlink():
+                found.append(entry.relative_to(root).as_posix())
+    return sorted(found)
+
+
+def _refuse_symlinks(paths: Sequence[str]) -> NoReturn:
+    """A case whose inputs hold any symlink is refused outright, wherever it points:
+    even a link that resolves inside the case's own inputs is one a task author could
+    just as easily have pointed at ``expected/`` instead, and a shape has no way to
+    tell the two apart from here — so none are ever copied through."""
+    shown = list(paths[:MAX_NAMED_SYMLINKS])
+    remaining = len(paths) - len(shown)
+    if remaining > 0:
+        shown.append(f"and {remaining} more")
+    raise ShapeError(
+        ShapeExit.CONFIG_ERROR,
+        "this case's inputs contain symlinks — a shape never copies them, because a link "
+        f"can reach the answers: {', '.join(shown)}",
+    )
+
 
 @dataclass
 class CaseSandbox:
@@ -107,18 +141,39 @@ class CaseSandbox:
             raise ShapeError(
                 ShapeExit.CONFIG_ERROR, f"${manifest_envvar} is not a trap manifest ({e})"
             ) from None
+        if inputs_dir.is_symlink():
+            # Only a hand-made manifest reaches this — the runner always resolves
+            # inputs_dir first — but nothing stops one from pointing straight at
+            # expected/, and copytree below would silently walk through it: caught
+            # here, before a work directory even exists to clean up. inputs_dir has
+            # no path relative to itself to name, so this gets its own message
+            # rather than _refuse_symlinks', which names paths under it.
+            raise ShapeError(
+                ShapeExit.CONFIG_ERROR,
+                f"this case's inputs ({inputs_dir}) is itself a symlink — a shape never copies "
+                "inputs through a link, because it can reach the answers",
+            )
         if not (inputs_dir / prompt_file).is_file():
             raise ShapeError(
                 ShapeExit.CONFIG_ERROR, f"this case has no {prompt_file} (looked in {inputs_dir})"
             )
         workdir = Path(tempfile.mkdtemp(prefix="trap-case-")).resolve()
         try:
-            shutil.copytree(inputs_dir, workdir, dirs_exist_ok=True)
-        except OSError as e:  # shutil.Error too: an unreadable file, a dangling symlink, ...
+            # symlinks=True so a link is recreated as a link, never dereferenced into
+            # the answer it names; the walk below then decides from what actually
+            # landed in the work directory, which is what the child can see.
+            shutil.copytree(inputs_dir, workdir, symlinks=True, dirs_exist_ok=True)
+        except OSError as e:  # shutil.Error too: an unreadable file, one that vanishes mid-copy, ...
             shutil.rmtree(workdir, ignore_errors=True)
             raise ShapeError(
                 ShapeExit.CONFIG_ERROR, f"cannot copy this case's inputs from {inputs_dir}: {e}"
             ) from None
+        # The copy mirrors inputs_dir's layout exactly, so a path found here is the
+        # same path relative to inputs_dir — this is what a shape is about to hand a
+        # program or agent, named the way the case author would recognise it.
+        if links := _symlinks_under(workdir):
+            shutil.rmtree(workdir, ignore_errors=True)
+            _refuse_symlinks(links)
         return cls(inputs_dir=inputs_dir, prompt_file=prompt_file, workdir=workdir)
 
     @property
