@@ -25,7 +25,16 @@ from typing import Any
 import httpx
 
 from trap.cost.providers import provider_config
-from trap.shapes._case import Deadline, ShapeError, ShapeExit, ShapeParser, add_case_args, fail, open_case
+from trap.shapes._case import (
+    Deadline,
+    ShapeError,
+    ShapeExit,
+    ShapeParser,
+    add_case_args,
+    fail,
+    open_case,
+    print_answer,
+)
 
 ANTHROPIC_MAX_TOKENS = 16000
 ANTHROPIC_VERSION = "2023-06-01"
@@ -207,7 +216,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if why:
         print(f"[trap] {why}", file=sys.stderr)
     if code in (ShapeExit.OK, ShapeExit.REFUSAL, ShapeExit.MAX_TOKENS) and reply.text:
-        print(reply.text)
+        print_answer(reply.text)
     return int(code)
 
 

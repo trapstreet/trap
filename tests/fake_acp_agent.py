@@ -15,7 +15,11 @@ trap.shapes.acp.session.
 ``error_string``, ``list_result``, ``dict_config`` and ``junk_config`` answer with
 replies shaped unlike the protocol — an error that is a bare string, a prompt result
 that is a list, configOptions that is an object, configOptions padded with non-objects —
-so the tests can check none of them escapes the shape as a traceback."""
+so the tests can check none of them escapes the shape as a traceback.
+
+``surrogate`` answers with a message that carries a lone UTF-16 surrogate (what
+``json.loads`` turns a JSON escape like ``"\\ud800"`` into) — the same character a real
+agent's JSON-RPC reply can carry, and stdout cannot print outright."""
 
 from __future__ import annotations
 
@@ -201,6 +205,9 @@ def prompt(rid: object, sid: str) -> None:
     elif MODE == "list_result":
         say(sid, "4", "m1")
         send({"jsonrpc": "2.0", "id": rid, "result": ["end_turn"]})
+    elif MODE == "surrogate":
+        say(sid, "ok \ud800 done", "m1")
+        result(rid, {"stopReason": "end_turn", "usage": USAGE})
 
 
 def main() -> None:

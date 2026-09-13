@@ -27,6 +27,7 @@ from trap.shapes._case import (
     add_case_args,
     fail,
     open_case,
+    print_answer,
     scrubbed_env,
 )
 from trap.shapes.acp.connection import AcpError
@@ -134,5 +135,5 @@ def main(argv: Sequence[str] | None = None) -> int:
     for note in outcome.notes:
         print(f"[trap] {note}", file=sys.stderr)
     if outcome.answer:
-        print(outcome.answer)
+        print_answer(outcome.answer)
     return int(outcome.exit_code)

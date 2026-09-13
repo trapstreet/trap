@@ -426,6 +426,21 @@ def test_a_refusal_is_still_printed_as_the_answer(tmp_path, monkeypatch, capsys)
     assert "the model refused" in captured.err
 
 
+def test_a_lone_surrogate_in_the_answer_is_replaced_not_a_crash(tmp_path, monkeypatch, capsys):
+    surrogate = {**ANTHROPIC_OK, "content": [{"type": "text", "text": "ok \ud800 done"}]}
+    srv, url = _vendor(surrogate)
+    try:
+        _case(tmp_path, monkeypatch, {"question.txt": "Q?"})
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", url)
+        code = direct.main(["--model", "claude-x"])
+    finally:
+        srv.shutdown()
+    captured = capsys.readouterr()
+    assert code == ShapeExit.OK
+    assert captured.out == "ok ? done\n"
+
+
 def test_a_max_tokens_cutoff_with_no_text_prints_nothing(tmp_path, monkeypatch, capsys):
     cutoff = {**ANTHROPIC_OK, "content": [], "stop_reason": "max_tokens"}
     srv, url = _vendor(cutoff)

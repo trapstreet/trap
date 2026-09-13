@@ -129,6 +129,7 @@ AGENT_MODES = [
     "list_result",
     "dict_config",
     "junk_config",
+    "surrogate",
 ]
 
 
@@ -280,6 +281,13 @@ ANTHROPIC = ["--model", "claude-test"]
             id="reply-stop-reason-an-object",
         ),
         pytest.param({}, {}, OPENAI, _reply({"error": {"message": "overloaded"}}, 500), id="reply-http-500"),
+        pytest.param(
+            {},
+            {},
+            OPENAI,
+            _reply({"choices": [{"message": {"content": "ok \ud800 done"}, "finish_reason": "stop"}]}),
+            id="reply-a-lone-surrogate",
+        ),
         *(pytest.param(p.values[0], {}, OPENAI, None, id=p.id) for p in CASE_GARBAGE),
     ],
 )

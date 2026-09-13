@@ -55,6 +55,19 @@ def fail(error: ShapeError) -> int:
     return int(error.code)
 
 
+def print_answer(text: str) -> None:
+    """Print a case's answer, replacing whatever character stdout cannot encode instead
+    of raising. A reply is trap's to relay, not to sanitize — but a lone UTF-16 surrogate
+    (what ``json.loads`` turns a JSON escape like ``"\\ud800"`` into) has no encoding on a
+    real stream, and one such character must not cost the case its answer and its exit
+    code both."""
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        encoding = sys.stdout.encoding or "utf-8"
+        print(text.encode(encoding, errors="replace").decode(encoding, errors="replace"))
+
+
 class Deadline:
     """The case's wall-clock budget. A shape stops itself before the runner's timeout so it
     can take its children down too: the runner kills only its direct child, and an agent

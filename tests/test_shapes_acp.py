@@ -1085,6 +1085,14 @@ def test_bridge_prints_nothing_when_the_turn_is_not_an_answer(fake, tmp_path, mo
     assert capsys.readouterr().out == ""
 
 
+def test_a_lone_surrogate_in_the_answer_is_replaced_not_a_crash(fake, tmp_path, monkeypatch, capsys):
+    fake("surrogate")
+    case = _case_dir(tmp_path, {"question.txt": "q"})
+    _set_manifest(monkeypatch, case)
+    code = bridge.main(["--agent-cmd", shlex.join(AGENT), "--model", "haiku", "--deadline", "20"])
+    assert (code, capsys.readouterr().out) == (ShapeExit.OK, "ok ? done\n")
+
+
 def test_bridge_gives_claude_acp_its_meta(fake, tmp_path, monkeypatch):
     log = fake("ok")
     case = _case_dir(tmp_path, {"question.txt": "q"})
