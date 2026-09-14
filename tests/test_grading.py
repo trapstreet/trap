@@ -733,6 +733,23 @@ def test_the_pump_never_lets_an_exception_out_of_the_thread(tmp_path):
     assert grader.notice is not None and "RuntimeError" in grader.notice
 
 
+def test_the_pump_keeps_draining_until_a_wake_says_stop(tmp_path):
+    """Driven directly rather than through the thread: whether a threaded run loops even
+    once depends on scheduling, and the loop has to be exercised every time."""
+    grader = SiteGrader(client=_Site(), run_dir=tmp_path)  # type: ignore[arg-type]
+    wakes = iter([True, True, False])
+    calls: list[bool] = []
+
+    def drain_once() -> bool:
+        calls.append(next(wakes))
+        return calls[-1]
+
+    grader._drain_once = drain_once  # type: ignore[method-assign]
+    grader._pump()
+    assert calls == [True, True, False]
+    assert grader.notice is None
+
+
 # -- the summary line -----------------------------------------------------------
 
 
