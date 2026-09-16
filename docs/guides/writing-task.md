@@ -29,12 +29,16 @@ grader: { cmd: uv run python grader.py }   # optional: overall aggregation
 
 Omit `judge` to run cases unscored; omit `grader` to skip final aggregation.
 
-trap refuses to run a task that could hand a solution the answers. Nothing a solution is
-handed may be a symlink: not a case's directory, not a directory between `inputs/` and
-it, and nothing inside it — replace links with real files (`inputs/` itself may be a
-link). No answers directory may lie inside a case's inputs, and no case's answers
-directory may be or lie around a case's directory. Case ids stay inside their
-directories. An answer placed in the inputs — a copy, a hard link, or a link in
+trap refuses to run a task that could hand a solution the answers. A case's directory,
+and every directory between `inputs/` and it, must be a real directory, not a symlink
+(`inputs/` itself may be a link). Inside a case's directory, a symlink is allowed only as
+a link to a regular file under `inputs/` and outside every answers directory — so cases
+can share one copy of a large file: keep it in a folder that is not a case, like
+`inputs/context/`, and link `inputs/<id>/data.csv -> ../context/data.csv`. A link that
+leaves `inputs/`, reaches the answers, points at a directory, dangles or loops is refused;
+replace it with a real file. No answers directory may lie inside a case's inputs, and no
+case's answers directory may be or lie around a case's directory. Case ids stay inside
+their directories. An answer placed in the inputs — a copy, a hard link, or a link in
 `expected/` to an input file — isn't checked; that one is yours to avoid.
 
 ## Judge (per case)
