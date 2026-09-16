@@ -967,6 +967,21 @@ def test_install_skill_refuses_a_symlink_in_the_skill(tmp_path):
     assert not (work / ".claude" / "skills" / "my-skill").exists()
 
 
+def test_install_skill_refuses_even_a_link_to_a_file_inside_the_skill(tmp_path):
+    # A case's inputs may link to a file under the inputs root; a skill may hold no link at all.
+    skill = tmp_path / "my-skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("---\nname: my-skill\n---\n")
+    (skill / "README.md").symlink_to("SKILL.md")
+    work = tmp_path / "work"
+    work.mkdir()
+    with pytest.raises(ShapeError) as e:
+        hints.install_skill("claude-acp", skill, work)
+    assert e.value.code is ShapeExit.CONFIG_ERROR
+    assert "symlink" in str(e.value) and "README.md" in str(e.value)
+    assert not (work / ".claude" / "skills" / "my-skill").exists()
+
+
 def test_install_skill_reports_any_other_copy_failure_as_cannot_install_not_start_the_agent(
     tmp_path, monkeypatch
 ):

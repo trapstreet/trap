@@ -57,11 +57,12 @@ def install_skill(agent_id: str | None, skill_dir: Path, workdir: Path) -> None:
     """Put a skill where the agent loads it from. Claude Code only for now: project skills
     live in ``.claude/skills/<name>/`` and load under settingSources ["project"] (probe).
 
-    Copied the same way a case's inputs are: no symlink in the skill is ever created in
-    the work directory, and a skill holding one is refused rather than silently missing
-    whatever it named. Any other failure to install — the directory is missing, a file
-    could not be read — is a config error naming the skill directory, not the agent
-    (starting the agent is a separate failure, reported separately)."""
+    Copied the way a case's inputs are, but with no link allowed at all, not even one to
+    a file: no symlink in the skill is ever created in the work directory, and a skill
+    holding one is refused rather than silently missing whatever it named. Any other
+    failure to install — the directory is missing, a file could not be read — is a config
+    error naming the skill directory, not the agent (starting the agent is a separate
+    failure, reported separately)."""
     if agent_id != CLAUDE:
         raise ShapeError(ShapeExit.CONFIG_ERROR, f"installing a skill is supported for {CLAUDE} only")
     if not skill_dir.is_dir():

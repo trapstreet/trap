@@ -1,16 +1,17 @@
 """Refuse a task that could hand a solution the answers, before any case runs.
 
 A solution is handed its case's inputs directory, resolved, and nothing downstream can tell
-a link or an answers directory in it from an ordinary file. So: nothing a solution is
-handed may be a symlink, from the inputs root down to and inside each running case's
-inputs (the inputs root itself may be one); no answers directory — the expected root or
-any defined case's — may lie inside a running case's inputs, and no case's answers
-directory may be or lie around a running case's directory; and case ids stay inside their
-directories. Both roots are resolved exactly as the runner resolves them (``task_root``),
-and directories are compared as (device, inode), which sees through a different letter
-case or Unicode spelling of one directory, and through a firmlink. An answer placed in
-the inputs — a copy, a hard link, or an answers-side link to an input file — isn't
-checked, and is the task author's to avoid."""
+a link or an answers directory in it from an ordinary file. So: no directory from the
+inputs root down to each running case's inputs may be a symlink (the inputs root itself
+may be one), and a symlink inside them must resolve to a regular file under the inputs
+root, outside every answers directory — a file shared by many cases, say; no answers
+directory — the expected root or any defined case's — may lie inside a running case's
+inputs, and no case's answers directory may be or lie around a running case's directory;
+and case ids stay inside their directories. Both roots are resolved exactly as the runner
+resolves them (``task_root``), and directories are compared as (device, inode), which sees
+through a different letter case or Unicode spelling of one directory, and through a
+firmlink. An answer placed in the inputs — a copy, a hard link, or an answers-side link to
+an input file — isn't checked, and is the task author's to avoid."""
 
 from __future__ import annotations
 
@@ -49,10 +50,31 @@ def _raise(error: OSError) -> NoReturn:
     raise error
 
 
-def _walk_inputs(inputs_root: Path, case: str, held: dict[Identity, str]) -> str | None:
-    """Why ``case``'s inputs can't be handed over — a symlink, or something that can't be
-    read — or None, recording every directory in them in ``held``. A case whose folder
-    isn't there hands nothing over; anything else the walk can't read refuses."""
+def _link_problem(link: str, inputs_root: Path, answers: dict[Identity, str]) -> str | None:
+    """Why the symlink ``link`` inside a case can't be handed over, or None when it resolves
+    to a regular file under ``inputs_root`` and no directory from that file up to the root
+    is one of the ``answers``."""
+    target = Path(os.path.realpath(link))
+    try:
+        regular = stat.S_ISREG(os.lstat(target).st_mode)
+    except OSError:
+        regular = False
+    if not regular or not target.is_relative_to(inputs_root):
+        return f"inputs {link} is a symlink that does not resolve to a file inside {inputs_root}"
+    below = target.relative_to(inputs_root)
+    for path in (inputs_root / p for p in (below, *below.parents)):
+        if (k := _identity(path)) in answers:
+            return f"inputs {link} is a symlink into {answers[k]} {path}"
+    return None
+
+
+def _walk_inputs(
+    inputs_root: Path, case: str, held: dict[Identity, str], answers: dict[Identity, str]
+) -> str | None:
+    """Why ``case``'s inputs can't be handed over — a symlink on the way to them, one in
+    them that ``_link_problem`` refuses, or something that can't be read — or None,
+    recording every directory in them in ``held``. A case whose folder isn't there hands
+    nothing over; anything else the walk can't read refuses."""
     path = inputs_root
     try:
         for part in PurePath(case).parts:
@@ -66,8 +88,9 @@ def _walk_inputs(inputs_root: Path, case: str, held: dict[Identity, str]) -> str
             st = os.stat(dirpath)
             held.setdefault((st.st_dev, st.st_ino), case)
             for name in sorted(dirnames + filenames):
-                if _is_link(entry := os.path.join(dirpath, name)):
-                    return f"inputs {entry} is a symlink"
+                entry = os.path.join(dirpath, name)
+                if _is_link(entry) and (problem := _link_problem(entry, inputs_root, answers)):
+                    return problem
     except OSError as e:
         return f"inputs {e.filename} cannot be read ({e.strerror})"
     return None
@@ -91,14 +114,16 @@ def refuse_answer_leaks(
             problems[case] = f"id does not name a directory inside {inputs_root} and {expected_root}"
     defined = [c for c in defined if c not in problems]
     running = [c for c in running if c not in problems]
+    identity = cache(_identity)
+    answers = [(f"the answers of case {c!r}", expected_root / c) for c in defined]
+    every_answers = [("the expected root", expected_root), *answers]
+    named = {k: whose for whose, path in every_answers if (k := identity(path)) is not None}
     held: dict[Identity, str] = {}
     for case in running:
-        if problem := _walk_inputs(inputs_root, case, held):
+        if problem := _walk_inputs(inputs_root, case, held, named):
             problems[case] = problem
-    identity = cache(_identity)
     real = {c: Path(os.path.realpath(inputs_root / c)) for c in running}
-    answers = [(f"the answers of case {c!r}", expected_root / c) for c in defined]
-    for whose, path in [("the expected root", expected_root), *answers]:
+    for whose, path in every_answers:
         if identity(path) is not None:
             resolved = Path(os.path.realpath(path))
             for k in (identity(p) for p in (resolved, *resolved.parents)):

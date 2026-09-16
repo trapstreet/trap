@@ -161,12 +161,111 @@ def test_inputs_that_cannot_be_copied_for_another_reason_are_a_config_error_and_
     assert list(scratch.iterdir()) == [], "the half-filled work directory was left behind"
 
 
-# --- a symlink anywhere in a case's inputs is refused, never copied through -----------
+# --- a symlink in a case's inputs is never copied through ------------------------------
 #
 # CaseSandbox.open's isolation promise is that a program or agent can only ever see this
-# case's own inputs — never expected/. A symlink breaks that promise regardless of what it
-# points at (the answers, another case, even a file inside this same case): a shape has no
-# way to tell a safe link from a dangerous one, so every link is refused, unconditionally.
+# case's own inputs — never expected/. A link to a regular file under the directory that
+# holds the case (the inputs root, when the runner started the shape) is copied as that
+# file: the runner has already refused one that reaches the answers, and a shape cannot see
+# where they are. Every other link — out of that directory, to a directory, to nothing — is
+# refused, and the work dir never holds a link.
+
+
+def _shared(case: Path) -> Path:
+    """inputs/context/data.csv beside ``case``: a file every case may link to."""
+    context = case.parent / "context"
+    context.mkdir()
+    (context / "data.csv").write_text("day,count\n1,42\n")
+    return context / "data.csv"
+
+
+@pytest.mark.parametrize(
+    ("name", "target"),
+    [
+        pytest.param("data.csv", "../context/data.csv", id="beside the case"),
+        pytest.param("alias.txt", "question.txt", id="in the case itself"),
+        pytest.param("deep/data.csv", "../../context/latest.csv", id="nested, through a chain of links"),
+    ],
+)
+def test_a_link_to_a_file_under_the_inputs_root_is_copied_as_that_file(
+    tmp_path, scratch, name: str, target: str
+):
+    case = _case(tmp_path, {"question.txt": "what?"})
+    shared = _shared(case)
+    (shared.parent / "latest.csv").symlink_to("data.csv")
+    (case / name).parent.mkdir(exist_ok=True)
+    (case / name).symlink_to(target)
+    box = CaseSandbox.open(
+        manifest_envvar="TRAP_MANIFEST", prompt_file="question.txt", environ=_manifest(case)
+    )
+    try:
+        copied = box.workdir / name
+        assert not copied.is_symlink() and copied.is_file()
+        assert copied.read_text() == (case / name).read_text()
+        assert name in box.extra_inputs()
+        assert [p for p in box.workdir.rglob("*") if p.is_symlink()] == []
+    finally:
+        box.close()
+    assert list(scratch.iterdir()) == []
+
+
+def test_a_file_link_under_a_read_only_input_directory_is_still_copied(tmp_path, scratch):
+    case = _case(tmp_path, {"question.txt": "what?"})
+    _shared(case)
+    (case / "data").mkdir()
+    (case / "data" / "data.csv").symlink_to("../../context/data.csv")
+    os.chmod(case / "data", 0o555)
+    try:
+        box = CaseSandbox.open(
+            manifest_envvar="TRAP_MANIFEST", prompt_file="question.txt", environ=_manifest(case)
+        )
+        try:
+            assert (box.workdir / "data" / "data.csv").read_text() == "day,count\n1,42\n"
+        finally:
+            box.close()
+    finally:
+        os.chmod(case / "data", 0o755)
+    assert list(scratch.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("name", "make_target"),
+    [
+        pytest.param("data.csv", lambda task: task / "shared.csv", id="a file outside the inputs root"),
+        pytest.param("data", lambda task: task / "inputs" / "context", id="a directory in the inputs root"),
+        pytest.param("gone.csv", lambda task: task / "inputs" / "context" / "gone.csv", id="dangling"),
+        pytest.param("loop.csv", lambda task: task / "inputs" / "c1" / "loop.csv", id="a loop"),
+    ],
+)
+def test_any_other_link_is_refused_by_name_and_leaves_no_work_dir(tmp_path, scratch, name: str, make_target):
+    case = _case(tmp_path, {"question.txt": "what?"})
+    _shared(case)
+    task = tmp_path / "task"
+    (task / "shared.csv").write_text("s3cr3t")
+    (case / name).symlink_to(make_target(task))
+    (case / "ok.csv").symlink_to("../context/data.csv")  # one it may copy, not named
+    with pytest.raises(ShapeError) as e:
+        CaseSandbox.open(manifest_envvar="TRAP_MANIFEST", prompt_file="question.txt", environ=_manifest(case))
+    message = str(e.value)
+    assert e.value.code is ShapeExit.CONFIG_ERROR
+    assert "symlinks" in message and name in message and "ok.csv" not in message
+    assert "s3cr3t" not in message
+    assert list(scratch.iterdir()) == [], "a trap-case-* work dir was left behind"
+
+
+def test_a_link_that_lands_in_the_work_dir_while_file_links_are_copied_is_still_refused(
+    tmp_path, scratch, monkeypatch
+):
+    # The work dir is checked again after the linked files are written into it.
+    case = _case(tmp_path, {"question.txt": "what?"})
+    _shared(case)
+    (case / "data.csv").symlink_to("../context/data.csv")
+    monkeypatch.setattr(case_module, "_copy_linked_file", lambda target, dest: os.symlink(target, dest))
+    with pytest.raises(ShapeError) as e:
+        CaseSandbox.open(manifest_envvar="TRAP_MANIFEST", prompt_file="question.txt", environ=_manifest(case))
+    assert e.value.code is ShapeExit.CONFIG_ERROR
+    assert "data.csv" in str(e.value)
+    assert list(scratch.iterdir()) == []
 
 
 def test_a_symlink_to_the_answer_is_refused_by_name_and_leaves_no_work_dir(tmp_path, monkeypatch):
@@ -192,17 +291,6 @@ def test_a_symlinked_subdirectory_is_refused(tmp_path):
         CaseSandbox.open(manifest_envvar="TRAP_MANIFEST", prompt_file="question.txt", environ=_manifest(case))
     assert e.value.code is ShapeExit.CONFIG_ERROR
     assert "data" in str(e.value)
-
-
-def test_a_symlink_pointing_inside_the_case_itself_is_still_refused(tmp_path):
-    # Pins the reject-all policy: this link never reaches outside the case's own inputs,
-    # yet a shape has no principled way to trust it more than one that does.
-    case = _case(tmp_path, {"question.txt": "what?"})
-    (case / "alias.txt").symlink_to("question.txt")
-    with pytest.raises(ShapeError) as e:
-        CaseSandbox.open(manifest_envvar="TRAP_MANIFEST", prompt_file="question.txt", environ=_manifest(case))
-    assert e.value.code is ShapeExit.CONFIG_ERROR
-    assert "alias.txt" in str(e.value)
 
 
 def test_the_prompt_file_itself_a_symlink_is_refused(tmp_path):
@@ -246,6 +334,7 @@ def test_more_symlinks_than_the_cap_are_named_and_the_rest_are_counted(tmp_path)
 
 # --- copy_tree_without_symlinks: the one copy every shape uses for a case's inputs and
 # for --skill never creates a link in the destination, and reports every one it found --
+# (every link, unless it is told where a link to a file may point)
 
 
 def test_copy_tree_without_symlinks_creates_no_link_and_reports_every_one(tmp_path):
