@@ -48,11 +48,15 @@ tasks:
   where the answers are, so it copies a link only when it resolves to a regular file
   under the directory that holds the case, and refuses every other link — the case
   directory itself a link, a link to a directory, one that resolves to nothing or
-  loops, one that leaves that directory. A skill installed with `--skill` is refused if
+  loops, one that leaves that directory. So a shape run by hand, outside `tp run`, does
+  not guard answers kept under that same directory (`cases/_answers/` beside
+  `cases/<id>/`), and a nested case id (`grp/c1`) linking to a shared file above `grp/`
+  is refused by a shape though `tp run` allows it. A skill installed with `--skill` is refused if
   it contains any link at all, even one to a file. Beyond both, a shape copies exactly
   what the task declares as a case's inputs — a hard link to an answer or a copy of it
-  inside the inputs looks like an ordinary file from here, and avoiding that is the
-  task author's job, not a shape's.
+  inside the inputs looks like an ordinary file from here — a case that links to one gets
+  it copied into the work directory — and avoiding that is the task author's job, not a
+  shape's.
 - **Scrubs the environment before starting a child.** `cmd` and `acp` pass a scrubbed
   copy of the environment to the program or agent they start: it never sees
   `TRAP_MANIFEST` (it points at `inputs/`, and `expected/` sits next to it), your

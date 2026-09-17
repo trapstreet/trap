@@ -39,7 +39,10 @@ leaves `inputs/`, reaches the answers, points at a directory, dangles or loops i
 replace it with a real file. No answers directory may lie inside a case's inputs, and no
 case's answers directory may be or lie around a case's directory. Case ids stay inside
 their directories. An answer placed in the inputs — a copy, a hard link, or a link in
-`expected/` to an input file — isn't checked; that one is yours to avoid.
+`expected/` to an input file — isn't checked; that one is yours to avoid, since every
+solution, a built-in shape's work directory included, is handed it. With nested case ids
+(`grp/c1`), keep shared files under the id's own top folder (`inputs/grp/`): the built-in
+shapes only copy links that stay under the folder holding the case.
 
 ## Judge (per case)
 
