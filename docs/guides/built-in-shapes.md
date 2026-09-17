@@ -38,17 +38,25 @@ tasks:
   questions that say "the file is in the current directory" work as written. Inputs
   that can't be copied (an unreadable file) are a configuration error (exit 24), and
   nothing is left behind. Before any case runs, `tp run` itself refuses — whatever the
-  solution — a task with a symlink anywhere in what a solution is handed, with answers
+  solution — a task with a symlink on the way to a case's directory, with a symlink in a
+  case that isn't a link to a file under `inputs/` outside the answers, with answers
   inside a case's inputs, or with a case's answers directory that is or lies around a
-  case's directory ([Writing a task](writing-task.md)). A shape checks again, for a
-  hand-made manifest: a symlink anywhere in the inputs it is handed — the directory
-  itself, a file, a directory, one that resolves to nothing, even one that only points
-  at another file in the same case — is refused the same way, because a shape has no
-  way to tell it apart from a link into `expected/`; replace links in a task's inputs
-  with real files. A skill installed with `--skill` is refused the same way if it
-  contains one. Beyond both, a shape copies exactly what the task declares as a case's
-  inputs — a hard link to an answer or a copy of it inside the inputs looks like an
-  ordinary file from here, and avoiding that is the task author's job, not a shape's.
+  case's directory ([Writing a task](writing-task.md)). A link to a file shared by many
+  cases (`data.csv -> ../context/data.csv`) is copied into the work directory as a
+  regular file holding that file's contents; the work directory never holds a link. A
+  shape checks again, for a hand-made manifest, as far as it can see: it cannot see
+  where the answers are, so it copies a link only when it resolves to a regular file
+  under the directory that holds the case, and refuses every other link — the case
+  directory itself a link, a link to a directory, one that resolves to nothing or
+  loops, one that leaves that directory. So a shape run by hand, outside `tp run`, does
+  not guard answers kept under that same directory (`cases/_answers/` beside
+  `cases/<id>/`), and a nested case id (`grp/c1`) linking to a shared file above `grp/`
+  is refused by a shape though `tp run` allows it. A skill installed with `--skill` is refused if
+  it contains any link at all, even one to a file. Beyond both, a shape copies exactly
+  what the task declares as a case's inputs — a hard link to an answer or a copy of it
+  inside the inputs looks like an ordinary file from here — a case that links to one gets
+  it copied into the work directory — and avoiding that is the task author's job, not a
+  shape's.
 - **Scrubs the environment before starting a child.** `cmd` and `acp` pass a scrubbed
   copy of the environment to the program or agent they start: it never sees
   `TRAP_MANIFEST` (it points at `inputs/`, and `expected/` sits next to it), your
@@ -80,15 +88,15 @@ tasks:
   | 21 | the output ceiling was hit (a partial answer, if any) |
   | 22 | the agent hit its turn limit |
   | 23 | agent error: crash, protocol error, failed login, or a reply that is not an answer — stdout stays empty |
-  | 24 | configuration: bad arguments, a model or option the agent does not offer, input the shape cannot pass on (a symlink among it), a missing program |
+  | 24 | configuration: bad arguments, a model or option the agent does not offer, input the shape cannot pass on (a symlink it does not copy), a missing program |
   | 124 | the deadline (a partial answer, if any) |
 
   Like any solution's exit code these are facts about the case; they never fail `tp run`.
   `tp shape cmd` itself only ever produces 24 — its own configuration errors: an unset or
   unreadable manifest, a question that isn't UTF-8, inputs that can't be copied or that
-  contain a symlink, an unparseable or empty template, `{repo}` with no `--repo`, a
-  command that can't be found or can't be started (no execute bit, say) — and 124, the
-  deadline (plus 128 + the signal when it is interrupted). Any other code is the wrapped
+  contain a symlink it does not copy, an unparseable or empty template, `{repo}` with no
+  `--repo`, a command that can't be found or can't be started (no execute bit, say) — and
+  124, the deadline (plus 128 + the signal when it is interrupted). Any other code is the wrapped
   program's: its own exit code, or 128 + N when signal N killed it (137 for `SIGKILL`),
   the way a shell reports it.
 
@@ -228,7 +236,7 @@ text are replaced, not refused), and its exit code is the case's.
 ## Limits
 
 - Answers are stdout. A task whose answer is a folder of files is out of reach for now.
-- `--skill` installs skills for Claude Code only, and refuses one that contains a
-  symlink the same way a case's inputs are.
+- `--skill` installs skills for Claude Code only, and refuses one that contains any
+  symlink, even a link to a file.
 - Coming next: `tp run --agent … / --model … / --cmd …` will build these for you, without a
   `trap.yaml`.

@@ -1,14 +1,16 @@
 """A task that could hand a solution the answers is refused before any case runs.
 
-A solution is handed its case's inputs directory. Nothing in it may be a symlink, from the
-inputs root down; no answers directory may lie inside it, and no case's answers directory
-around it; and case ids stay inside their directories. The tests build those layouts with
-real links."""
+A solution is handed its case's inputs directory. No directory on the way to it from the
+inputs root may be a symlink, and a link inside it must be a link to a regular file under
+the inputs root, outside every answers directory; no answers directory may lie inside it,
+and no case's answers directory around it; and case ids stay inside their directories. The
+tests build those layouts with real links."""
 
 from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import unicodedata
 from collections.abc import Callable, Iterator
@@ -21,7 +23,7 @@ from trap.loader import ConfigError, TrapLoader, TraptaskLoader
 from trap.models import DirsConfig, TraptaskCase, TraptaskConfig
 from trap.runner import TaskRunner, refuse_answer_leaks
 
-from .conftest import JUDGE_SCORE, unlock
+from .conftest import JUDGE_SCORE, PY, case_capture, unlock
 
 #: A solution that leaves ran.txt in its cwd (the solution dir) if it ever starts.
 MARKS_THAT_IT_RAN = "sh -c 'touch ran.txt'"
@@ -143,6 +145,147 @@ def test_a_case_id_that_reads_as_markup_is_printed_as_written(make_project, runn
     _assert_refused(res, sol, f"c[/x]: inputs {task / 'inputs' / 'c['} is a symlink")
 
 
+# --- tp run: a case's file links to shared inputs (dabstep's layout) -----------------
+
+SHARED = "day,count\n1,42\n"
+
+#: A plain solution that prints its case's data.csv, found through the manifest.
+PRINTS_DATA_CSV = shlex.join(
+    [
+        PY,
+        "-c",
+        "import json, os, pathlib; "
+        "inputs = pathlib.Path(json.loads(os.environ['TRAP_MANIFEST'])['inputs_dir']); "
+        "print((inputs / 'data.csv').read_text(), end='')",
+    ]
+)
+
+
+def _shared_inputs(make_project, cmd: str, tmp_path: Path) -> tuple[Path, Path]:
+    """dabstep's layout: cases c1 and c2 each hold question.txt and data.csv, a link to the
+    one real copy in inputs/context/ (not a case); no expected dir. Returns (solution, task)."""
+    sol = make_project(
+        cmd=cmd, cases=["c1", "c2"], inputs={c: {"question.txt": f"q {c}"} for c in ("c1", "c2")}
+    )
+    task = (tmp_path / "task").resolve()
+    (task / "inputs" / "context").mkdir()
+    (task / "inputs" / "context" / "data.csv").write_text(SHARED)
+    for case in ("c1", "c2"):
+        (task / "inputs" / case / "data.csv").symlink_to("../context/data.csv")
+    return sol, task
+
+
+def test_file_links_to_shared_inputs_run_and_the_solution_reads_them(make_project, runner, tmp_path):
+    sol, _ = _shared_inputs(make_project, PRINTS_DATA_CSV, tmp_path)
+    res = runner.invoke(app, ["run", "--no-environment"])
+    assert res.exit_code == 0, res.output
+    for case in ("c1", "c2"):
+        out, meta = case_capture(sol, case)
+        assert (out, meta["exit_code"]) == (SHARED, 0)
+
+
+def test_a_shape_hands_its_program_a_file_link_to_shared_inputs_as_a_regular_file(
+    make_project, runner, tmp_path
+):
+    # The program answers only when data.csv in its work dir is a regular file, not a link.
+    template = "sh -c 'test -f data.csv && test ! -L data.csv && cat data.csv'"
+    cmd = shlex.join([PY, "-m", "trap.shapes.command", "--template", template, "--deadline", "30"])
+    sol, _ = _shared_inputs(make_project, cmd, tmp_path)
+    res = runner.invoke(app, ["run", "--no-environment"])
+    assert res.exit_code == 0, res.output
+    for case in ("c1", "c2"):
+        out, meta = case_capture(sol, case)
+        assert (out, meta["exit_code"]) == (SHARED, 0)
+
+
+def _to_the_answer(task: Path) -> str:
+    (task / "expected" / "c1").mkdir(parents=True)
+    (task / "expected" / "c1" / "answer.txt").write_text("secret")
+    (task / "inputs" / "c1" / "reference.txt").symlink_to("../../expected/c1/answer.txt")
+    return "c1/reference.txt"
+
+
+def _through_a_link_out_of_the_inputs_root(task: Path) -> str:
+    # Spelled inside inputs/context/, but esc/ there is a link out to expected/.
+    (task / "expected" / "c1").mkdir(parents=True)
+    (task / "expected" / "c1" / "answer.txt").write_text("secret")
+    (task / "inputs" / "context" / "esc").symlink_to("../../expected")
+    (task / "inputs" / "c1" / "notes.csv").symlink_to("../context/esc/c1/answer.txt")
+    return "c1/notes.csv"
+
+
+def _to_a_file_outside_the_task(task: Path) -> str:
+    (task.parent / "outside.csv").write_text("elsewhere")
+    (task / "inputs" / "c1" / "outside.csv").symlink_to(task.parent / "outside.csv")
+    return "c1/outside.csv"
+
+
+NOT_A_FILE_INSIDE = "is a symlink that does not resolve to a file inside {inputs}"
+
+
+@pytest.mark.parametrize(
+    ("make_link", "why"),
+    [
+        pytest.param(_to_the_answer, NOT_A_FILE_INSIDE, id="a file link to the answer"),
+        pytest.param(_through_a_link_out_of_the_inputs_root, NOT_A_FILE_INSIDE, id="through a link out"),
+        pytest.param(_to_a_file_outside_the_task, NOT_A_FILE_INSIDE, id="an absolute link out of the task"),
+        pytest.param(
+            lambda t: (t / "inputs/c1/data").symlink_to("../context") or "c1/data",
+            NOT_A_FILE_INSIDE,
+            id="a link to a directory",
+        ),
+        pytest.param(
+            lambda t: (t / "inputs/c1/gone.csv").symlink_to("../context/gone.csv") or "c1/gone.csv",
+            NOT_A_FILE_INSIDE,
+            id="dangling",
+        ),
+        pytest.param(
+            lambda t: (t / "inputs/c1/loop.csv").symlink_to("loop.csv") or "c1/loop.csv",
+            NOT_A_FILE_INSIDE,
+            id="a loop",
+        ),
+        pytest.param(
+            lambda t: _relink(t / "inputs/c1", "context") or "c1", "is a symlink", id="the case dir"
+        ),
+    ],
+)
+def test_any_other_link_in_a_task_with_shared_inputs_is_refused(
+    make_project, runner, tmp_path, make_link: Callable[[Path], str], why: str
+):
+    sol, task = _shared_inputs(make_project, MARKS_THAT_IT_RAN, tmp_path)
+    link = task / "inputs" / make_link(task)
+    res = runner.invoke(app, ["run", "--no-environment"])
+    _assert_refused(res, sol, f"c1: inputs {link} {why.format(inputs=task / 'inputs')}")
+    assert "secret" not in res.output and "elsewhere" not in res.output
+
+
+def test_a_file_link_into_answers_kept_inside_the_inputs_root_is_refused(make_project, runner, tmp_path):
+    sol, task = _shared_inputs(make_project, MARKS_THAT_IT_RAN, tmp_path)
+    (task / "inputs").rename(task / "cases")
+    for case in ("c1", "c2"):
+        (task / "cases" / "_answers" / case).mkdir(parents=True)
+        (task / "cases" / "_answers" / case / "answer.txt").write_text(f"secret-{case}")
+    config = json.loads((task / "traptask.yaml").read_text())
+    dirs = {"inputs": "cases/", "expected": "cases/_answers/"}
+    (task / "traptask.yaml").write_text(json.dumps({**config, "dirs": dirs}))
+    (task / "cases" / "c1" / "reference.txt").symlink_to("../_answers/c2/answer.txt")
+    res = runner.invoke(app, ["run", "--no-environment"])
+    link, answers = task / "cases" / "c1" / "reference.txt", task / "cases" / "_answers" / "c2"
+    _assert_refused(res, sol, f"c1: inputs {link} is a symlink into the answers of case 'c2' {answers}")
+    assert "secret" not in res.output
+
+
+def test_a_nested_case_reached_through_a_linked_directory_in_the_inputs_root_is_refused(
+    make_project, runner, tmp_path
+):
+    sol = make_project(cmd=MARKS_THAT_IT_RAN, cases=["grp/c1"])
+    task = (tmp_path / "task").resolve()
+    (task / "inputs" / "grp").rename(task / "inputs" / "context")
+    (task / "inputs" / "grp").symlink_to("context")
+    res = runner.invoke(app, ["run", "--no-environment"])
+    _assert_refused(res, sol, f"grp/c1: inputs {task / 'inputs' / 'grp'} is a symlink")
+
+
 # --- tp run: layouts that hand over no answers run ------------------------------------
 
 
@@ -181,7 +324,7 @@ def test_a_task_that_hands_over_no_answers_runs_and_scores(
     assert json.loads(res.stdout)["cases_results"][0]["metrics"] == {"score": 1.0}
 
 
-# --- no symlink in what a solution is handed ------------------------------------------
+# --- no link in what a solution is handed, but one to a file in the inputs ------------
 
 
 @pytest.mark.parametrize(
@@ -189,9 +332,19 @@ def test_a_task_that_hands_over_no_answers_runs_and_scores(
     [
         pytest.param(lambda t: (t / "inputs/c1/data").symlink_to("../../expected/c1"), "c1/data", id="a dir"),
         pytest.param(
+            lambda t: (t / "inputs/c1/answer.txt").symlink_to("../../expected/c1/answer.txt"),
+            "c1/answer.txt",
+            id="a file outside the inputs root",
+        ),
+        pytest.param(
+            lambda t: (t / "inputs/c1/answer.txt").symlink_to("../../Expected/c1/answer.txt"),
+            "c1/answer.txt",
+            id="another letter case of a file outside",
+        ),
+        pytest.param(
             lambda t: (t / "inputs/c1/gone.txt").symlink_to("nowhere"), "c1/gone.txt", id="dangling"
         ),
-        pytest.param(lambda t: (t / "inputs/c1/alias").symlink_to("question.txt"), "c1/alias", id="in-case"),
+        pytest.param(lambda t: (t / "inputs/c1/loop").symlink_to("loop"), "c1/loop", id="a loop"),
         pytest.param(lambda t: _relink(t / "inputs/c1", "../expected/c1"), "c1", id="the case dir"),
         pytest.param(
             lambda t: (t / "cases").mkdir() or _relink(t / "inputs/c1", "../cases"),
@@ -344,6 +497,30 @@ def test_the_first_case_in_task_order_is_named_when_one_case_holds_several_answe
     assert "case 'c2'" not in message
 
 
+@pytest.mark.parametrize(
+    ("target", "whose"),
+    [
+        pytest.param(
+            "../_answers/c2/answer.txt", "the answers of case 'c2' {answers}/c2", id="a case's answers"
+        ),
+        pytest.param("../_answers/notes.txt", "the expected root {answers}", id="the expected root"),
+        pytest.param(
+            "../_answers/c2/../c1/answer.txt", "the answers of case 'c1' {answers}/c1", id="spelled round"
+        ),
+    ],
+)
+def test_a_file_link_into_answers_inside_the_inputs_root_is_refused(tmp_path, target: str, whose: str):
+    task = _task(tmp_path, ("c1", "c2"))
+    answers = task / "inputs" / "_answers"
+    (task / "expected").rename(answers)
+    (answers / "notes.txt").write_text("secret notes")
+    link = task / "inputs" / "c1" / "reference.txt"
+    link.symlink_to(target)
+    message = _refusal(task, ["c1", "c2"], expected="inputs/_answers/")
+    assert f"c1: inputs {link} is a symlink into {whose.format(answers=answers)}" in message
+    assert "secret" not in message
+
+
 # --- no answers directory around a case's inputs; ids stay inside ---------------------
 
 
@@ -369,7 +546,7 @@ def test_every_offending_case_is_named_up_to_a_cap(tmp_path):
     cases = tuple(f"c{n}" for n in range(1, 9))
     task = _task(tmp_path, cases)
     for case in cases[1:]:
-        (task / "inputs" / case / "alias").symlink_to("question.txt")
+        (task / "inputs" / case / "gone").symlink_to("nowhere")
     lines = _refusal(task, list(cases)).splitlines()[1:]
     assert [line.split(":")[0] for line in lines[:-1]] == ["  c2", "  c3", "  c4", "  c5", "  c6"]
     assert lines[-1] == "  and 2 more"
@@ -388,6 +565,35 @@ def _inputs_at_the_task_root(task: Path) -> dict[str, str]:
     return {"inputs": "./"}
 
 
+def _shared_file(task: Path) -> None:
+    (task / "inputs" / "context").mkdir()
+    (task / "inputs" / "context" / "data.csv").write_text("shared")
+    (task / "inputs" / "c1" / "data.csv").symlink_to("../context/data.csv")
+
+
+def _a_chain_of_links_to_a_shared_file(task: Path) -> dict[str, str]:
+    _shared_file(task)
+    (task / "inputs" / "context" / "latest.csv").symlink_to("data.csv")
+    (task / "inputs" / "c1" / "latest.csv").symlink_to(task / "inputs" / "context" / "latest.csv")
+    return {}
+
+
+def _a_shared_file_with_the_answers_at_the_task_root(task: Path) -> dict[str, str]:
+    # The expected root is the task root, around the inputs root: only the directories
+    # under the inputs root are compared with the answers.
+    for case in ("c1", "c2"):
+        (task / "expected" / case).rename(task / case)
+    _shared_file(task)
+    return {"expected": "./"}
+
+
+def _a_shared_file_in_an_inputs_root_linked_elsewhere(task: Path) -> dict[str, str]:
+    _inputs_stored_elsewhere(task)
+    _shared_file(task)
+    (task / "inputs" / "c1" / "absolute.csv").symlink_to(task / "inputs" / "context" / "data.csv")
+    return {}
+
+
 @pytest.mark.parametrize(
     "layout",
     [
@@ -395,11 +601,23 @@ def _inputs_at_the_task_root(task: Path) -> dict[str, str]:
         pytest.param(lambda task: shutil.rmtree(task / "inputs" / "c1") or {}, id="a case without inputs"),
         pytest.param(_answers_in_the_inputs_root, id="answers beside the cases in the inputs root"),
         pytest.param(_inputs_at_the_task_root, id="inputs at the task root"),
+        pytest.param(lambda task: _shared_file(task) or {}, id="a file link to a shared file"),
+        pytest.param(
+            lambda task: (task / "inputs/c1/alias").symlink_to("question.txt") or {},
+            id="a file link to a file in the same case",
+        ),
+        pytest.param(
+            lambda task: (task / "inputs/c1/other.txt").symlink_to("../c2/question.txt") or {},
+            id="a file link to another case's input",
+        ),
+        pytest.param(_a_chain_of_links_to_a_shared_file, id="a chain of links to a shared file"),
+        pytest.param(_a_shared_file_with_the_answers_at_the_task_root, id="answers at the task root"),
+        pytest.param(_a_shared_file_in_an_inputs_root_linked_elsewhere, id="an inputs root linked elsewhere"),
     ],
 )
 def test_a_layout_that_hands_over_no_answers_runs(tmp_path, layout: Callable[[Path], dict[str, str]]):
-    task = _task(tmp_path)
-    assert _refusal(task, ["c1"], **layout(task)) == ""
+    task = _task(tmp_path, ("c1", "c2"))
+    assert _refusal(task, ["c1", "c2"], **layout(task)) == ""
 
 
 # --- TaskRunner.run -------------------------------------------------------------------
@@ -415,12 +633,12 @@ def test_the_runner_refuses_the_whole_run_before_its_first_case(make_project, tm
     # c1 is clean and would run first; the run is refused as a whole because of c2.
     sol = make_project(cmd=MARKS_THAT_IT_RAN, cases=["c1", "c2"])
     task = (tmp_path / "task").resolve()
-    (task / "inputs" / "c2" / "alias").symlink_to("input.txt")
+    (task / "inputs" / "c2" / "gone").symlink_to("nowhere")
     tr = _task_runner(tmp_path)
     with pytest.raises(ConfigError) as e:
         tr.run(iter(tr.traptask_config.cases))
     assert f"refusing to run task {task}" in str(e.value)
-    assert f"  c2: inputs {task / 'inputs' / 'c2' / 'alias'} is a symlink" in str(e.value)
+    assert f"  c2: inputs {task / 'inputs' / 'c2' / 'gone'} is a symlink" in str(e.value)
     assert not _solution_ran(sol)
     assert not (tmp_path / "run").exists()
 

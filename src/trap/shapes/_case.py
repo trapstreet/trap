@@ -127,50 +127,91 @@ def _secure_and_verify(dst: Path) -> list[str]:
     return links
 
 
-def copy_tree_without_symlinks(src: Path, dst: Path) -> list[str]:
+def _linked_file(link: str, root: str | None) -> str | None:
+    """The regular file ``link`` resolves to when that file lies under ``root``; None when
+    there is no ``root``, or the link resolves to anything else — a directory, nothing, a
+    loop, a file outside ``root``."""
+    if root is None:
+        return None
+    target = os.path.realpath(link)
+    try:
+        regular = stat.S_ISREG(os.lstat(target).st_mode)
+    except OSError:
+        return None
+    return target if regular and Path(target).is_relative_to(root) else None
+
+
+def _copy_linked_file(target: str, dest: Path) -> None:
+    """Write ``target``'s contents and mode to ``dest`` as a new regular file. ``dest``
+    must not exist yet, so a name the copy already holds (another spelling of it, on a
+    case-insensitive work directory) fails the copy instead of being written through."""
+    with open(target, "rb") as source, open(dest, "xb") as copy:
+        shutil.copyfileobj(source, copy)
+    shutil.copystat(target, dest)
+
+
+def copy_tree_without_symlinks(src: Path, dst: Path, *, file_links_under: Path | None = None) -> list[str]:
     """Copy every file and directory under ``src`` into ``dst``, never creating a
     symlink there — used for a case's inputs and for ``--skill``.
 
-    The ``copytree`` ``ignore`` callback records each entry ``os.path.islink`` reports
-    and drops it from the copy, whatever it names: even one that resolves inside ``src``
-    itself is left out, because nothing a link points at is ever read to decide. This
-    also closes a theoretical write-through: on a case-insensitive work directory, a
-    link ``DATA -> X`` alongside an input directory ``data/`` would otherwise make
-    copytree write *into* ``X`` when it reached the second name. ``symlinks=True`` stays
-    as a backstop, so a link that lands anyway is recreated as a link, never
-    dereferenced — see ``_secure_and_verify``, which checks for exactly that.
+    The ``copytree`` ``ignore`` callback drops each entry ``os.path.islink`` reports from
+    the copy. Given ``file_links_under`` (a case's inputs are), a link that resolves to a
+    regular file under that directory — one file many cases share — is then written into
+    ``dst`` as a regular file holding that file's contents. Every other link is recorded,
+    whatever it names: without ``file_links_under`` (``--skill``) even one that resolves
+    inside ``src`` itself. Dropping links from copytree also closes a theoretical
+    write-through: on a case-insensitive work directory, a link ``DATA -> X`` alongside an
+    input directory ``data/`` would otherwise make copytree write *into* ``X`` when it
+    reached the second name; a linked file is written only to a name not yet taken.
+    ``symlinks=True`` stays as a backstop, so a link that lands anyway is recreated as a
+    link, never dereferenced — see ``_secure_and_verify``, which checks for exactly that,
+    again after any linked file is written.
 
     ``dst`` is private to the owner (exactly 0700) from the moment copytree returns,
     before anything walks the copy: copystat has just given it ``src``'s mode, which may
     be open to everyone. Every directory copytree created below it gets the owner's
-    read/write/execute bits added on top of whatever ``copystat`` gave it from ``src``.
+    read/write/execute bits added on top of whatever ``copystat`` gave it from ``src``,
+    before a linked file is written into it.
 
-    Returns every symlink found — file, directory, or one that resolves to nothing — as
-    POSIX paths relative to ``src`` (``dst`` mirrors ``src``'s layout, so the two name
-    the same paths), sorted. Raises ``OSError`` if the copy, or verifying it, fails."""
+    Returns every symlink recorded or found — file, directory, or one that resolves to
+    nothing — as POSIX paths relative to ``src`` (``dst`` mirrors ``src``'s layout, so the
+    two name the same paths), sorted; linked files are written only when there is none.
+    Raises ``OSError`` if the copy, or verifying it, fails."""
     links: list[str] = []
+    files: list[tuple[str, str]] = []
+    root = None if file_links_under is None else os.path.realpath(file_links_under)
 
     def _ignore(dirpath: str, names: list[str]) -> set[str]:
         skip = set()
         for name in names:
-            if os.path.islink(os.path.join(dirpath, name)):
+            entry = os.path.join(dirpath, name)
+            if os.path.islink(entry):
                 skip.add(name)
-                links.append(Path(dirpath, name).relative_to(src).as_posix())
+                path = Path(entry).relative_to(src).as_posix()
+                if (target := _linked_file(entry, root)) is None:
+                    links.append(path)
+                else:
+                    files.append((target, path))
         return skip
 
     shutil.copytree(src, dst, symlinks=True, dirs_exist_ok=True, ignore=_ignore)
     os.chmod(dst, 0o700)
     links.extend(_secure_and_verify(dst))
+    if files and not links:
+        for target, path in files:
+            _copy_linked_file(target, dst / path)
+        links.extend(_secure_and_verify(dst))
     return sorted(set(links))
 
 
 def refuse_symlinks(clause: str, paths: Sequence[str]) -> NoReturn:
-    """A case or a skill whose copy would include a symlink is refused outright,
-    wherever it points: even a link that resolves inside its own source is one a task
-    author could just as easily have pointed at ``expected/`` instead, and a shape has
-    no way to tell the two apart from here — so none are ever copied through.
+    """A case or a skill whose copy would include a symlink is refused outright. In a
+    case's inputs a link to a file under the directory that holds the case is copied as a
+    plain file; any other link there, and any link at all in a skill, is one a task author
+    could just as easily have pointed at ``expected/``, and a shape has no way to tell the
+    two apart from here — so none are ever copied through.
 
-    ``clause`` names what held them (e.g. "this case's inputs contain symlinks");
+    ``clause`` names what held them (e.g. "this skill contains symlinks");
     ``paths`` are named relative to that source, capped at MAX_NAMED_SYMLINKS — a case
     gone wrong in bulk doesn't need every path spelled out to be diagnosable — with the
     rest only counted, and file contents are never shown."""
@@ -276,13 +317,13 @@ class CaseSandbox:
                 ShapeExit.CONFIG_ERROR, f"${manifest_envvar} is not a trap manifest ({e})"
             ) from None
         if inputs_dir.is_symlink():
-            # The runner refuses a task with a link anywhere in a case's inputs and
-            # hands a shape a resolved inputs_dir, so only a hand-made manifest reaches
-            # this check. Nothing stops one from pointing straight at expected/, though,
-            # and copytree below would silently walk through it: caught here, before a
-            # work directory even exists to clean up. inputs_dir has no path relative to
-            # itself to name, so this gets its own message rather than refuse_symlinks',
-            # which names paths under it.
+            # The runner refuses a task whose case directory is a link or is reached
+            # through one, and hands a shape a resolved inputs_dir, so only a hand-made
+            # manifest reaches this check. Nothing stops one from pointing straight at
+            # expected/, though, and copytree below would silently walk through it:
+            # caught here, before a work directory even exists to clean up. inputs_dir
+            # has no path relative to itself to name, so this gets its own message
+            # rather than refuse_symlinks', which names paths under it.
             raise ShapeError(
                 ShapeExit.CONFIG_ERROR,
                 f"this case's inputs ({inputs_dir}) is itself a symlink — a shape never copies "
@@ -302,11 +343,16 @@ class CaseSandbox:
             raise ShapeError(
                 ShapeExit.CONFIG_ERROR, f"this case has no {prompt_file} (looked in {inputs_dir})"
             )
+        # A link to a file shared by many cases is copied as that file. The inputs root and
+        # the answers are the runner's to know, and it has already refused a link that
+        # reaches the answers; the directory holding the case is the widest bound a shape
+        # can see, and the one a hand-made manifest is held to.
+        shared = Path(os.path.realpath(inputs_dir.parent))
         workdir = Path(tempfile.mkdtemp(prefix="trap-case-")).resolve()
         try:
             # Leaves the work directory private (0700) to whoever runs `tp run` — this
             # case's own, however the inputs themselves were shared on disk.
-            links = copy_tree_without_symlinks(inputs_dir, workdir)
+            links = copy_tree_without_symlinks(inputs_dir, workdir, file_links_under=shared)
         except OSError as e:  # shutil.Error too: an unreadable file, one that vanishes mid-copy, ...
             remove_tree(workdir)
             raise ShapeError(
@@ -317,7 +363,9 @@ class CaseSandbox:
         # program or agent, named the way the case author would recognise it.
         if links:
             remove_tree(workdir)
-            refuse_symlinks("this case's inputs contain symlinks", links)
+            refuse_symlinks(
+                f"this case's inputs contain symlinks other than links to a file in {shared}", links
+            )
         return cls(inputs_dir=inputs_dir, prompt_file=prompt_file, workdir=workdir)
 
     @property
