@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from trap.models.card import SolutionCard
+
 
 class GitProvenance(BaseModel):
     """Git origin of one checkout: {repo, commit, subdirectory}. repo and commit are
@@ -15,6 +17,12 @@ class GitProvenance(BaseModel):
     commit: str | None = None
     subdirectory: str | None = None
     issue: str | None = None
+    #: Set on the solution side only: how the solution was driven (`SolutionCard`), and
+    #: the content address the site stores beside repo and commit so two configurations
+    #: of one repository stay two solutions. Absent for a solution that carries its own
+    #: `trap.yaml` -- there the code and the configuration travel in the same commit.
+    adapter: SolutionCard | None = None
+    adapter_digest: str | None = None
 
 
 class Provenance(BaseModel):

@@ -21,6 +21,7 @@ from trap.auth import (
     ResolvedAuth,
 )
 from trap.cli._auth import auth_app
+from trap.cli._card import card_from_run
 from trap.cli._console import _die, _env_truthy, console, err_console
 from trap.display import CaseProgress, OutputFormat, SubmitRenderer, renderer_factory
 from trap.environment import EnvironmentDetector
@@ -32,6 +33,7 @@ from trap.live.sync import sync_run
 from trap.live.tracker import LiveTracker, plain_score
 from trap.loader import ConfigError, TrapLoader, TraptaskLoader
 from trap.models import Diagnosis, Provenance, ReportData
+from trap.models.card import card_digest
 from trap.runner import TaskRunner, refuse_answer_leaks
 from trap.workspace import SolutionIdentity, Workspace
 
@@ -508,6 +510,18 @@ def run(
             grader.close()
         raise
     finished_at_utc = datetime.now(UTC)
+
+    # What drove this run, as the shape itself stated it. A solution that is not a
+    # built-in shape prints no card, and the provenance stays exactly as it was.
+    card = card_from_run(ws.run_dir(ts), [case.case_id for case in case_results])
+    if card is not None:
+        provenance = provenance.model_copy(
+            update={
+                "solution": provenance.solution.model_copy(
+                    update={"adapter": card, "adapter_digest": card_digest(card)}
+                )
+            }
+        )
 
     report_data = ReportData.from_run(
         cases_results=case_results,
