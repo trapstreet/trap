@@ -7,6 +7,7 @@ import shlex
 import subprocess
 from pathlib import Path
 
+from trap.live.context import SKILLS_UNSUPPORTED
 from trap.models.card import SolutionCard
 from trap.runner.layout import CaseLayout
 from trap.shapes._case import CARD_PREFIX
@@ -106,6 +107,68 @@ def test_a_plain_solution_records_no_card(make_project, runner):
     assert runner.invoke(app, ["run", "--task", "t", "--no-environment"]).exit_code == 0
     solution = json.loads(next((sol / ".trap").rglob("report.json")).read_text())["provenance"]["solution"]
     assert solution["adapter"] is None and solution["adapter_digest"] is None
+
+
+def test_the_command_template_never_reaches_the_run_context():
+    from trap.live.context import build_context
+    from trap.models.provenance import GitProvenance, Provenance
+    from trap.models.trap_yaml import Profile
+
+    card = SolutionCard(
+        shape="cmd", shape_version=1, cmd="python main.py --key $OPENAI_API_KEY {prompt}", setup="uv sync"
+    )
+    patch = build_context(
+        profile=Profile(),
+        provenance=Provenance(solution=GitProvenance()),
+        environment=None,
+        trap_version="1.2.3",
+        card=card,
+    )
+    wire = json.dumps(patch)
+    assert "OPENAI_API_KEY" not in wire and "main.py" not in wire and "uv sync" not in wire
+
+
+# --- live sync end to end: the merge point (`card` folded into provenance) and the ---
+# --- send point (`tracker.describe(final)`) are wired together only in cli/__init__ --
+# --- -- test_the_command_template_never_reaches_the_run_context above only exercises -
+# --- a direct build_context() call, so it cannot catch a leak introduced at either ---
+# --- of those two call sites, only inside build_context() itself. ---------------------
+
+
+def test_live_sync_carries_the_cards_labels_but_never_its_command_or_setup(
+    make_project, runner, monkeypatch, tmp_path
+):
+    from tests.test_live import _FakeTracker, _use_fake_tracker
+    from trap.cli import app
+
+    tracker = _FakeTracker()
+    _use_fake_tracker(monkeypatch, tracker)
+
+    tool = tmp_path / "tool"
+    tool.mkdir()
+    (tool / "tool.py").write_text("print('hi')\n")
+    cmd = (
+        f"{PY} -m trap.shapes.command --repo {tool} "
+        f"--template '{PY} {{repo}}/tool.py --leak-marker-cmd-9f3a' "
+        "--setup 'echo leak-marker-setup-2b7c' --deadline 30"
+    )
+    make_project(cmd=cmd, inputs={"c1": {"question.txt": "q"}})
+    result = runner.invoke(app, ["run", "--task", "t", "--no-environment", "--live"])
+    assert result.exit_code == 0, result.output
+
+    # Two describe() calls: the opening one (before the card is known) and the
+    # closing one (after `card_from_run` read it back and folded it into
+    # provenance) -- the card can only ever reach the second.
+    opening, final = tracker.described
+    assert "name" not in opening["identity"]
+
+    wire = json.dumps(final)
+    for secret in ("leak-marker-cmd-9f3a", "leak-marker-setup-2b7c", "tool.py", "adapter"):
+        assert secret not in wire, secret
+    # The labels the card *is* meant to contribute are there: a `cmd`-shaped
+    # card with no name has nothing safe to call itself but its shape.
+    assert final["identity"]["name"] == "cmd"
+    assert final["skills"] == {"status": "unsupported", "reason": SKILLS_UNSUPPORTED}
 
 
 # --- card_from_run: reading the card back out of a case's captured stderr ----------

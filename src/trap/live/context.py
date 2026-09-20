@@ -12,9 +12,14 @@ Like the tracker, this module is a translation rather than a filter. Every
 field is built by name from a value this module computed, so nothing that
 belongs to a case -- its id, its name, its answer, its stdout, a path -- can
 get in by being attached to the wrong object. A group tp cannot see is said to
-be ``unsupported`` with the reason (skills and tools: tp runs a solver process
-and does not watch inside it); a group the user switched off is ``disabled``
-with the flag that did it. The site shows both as what they are.
+be ``unsupported`` with the reason: tp runs a solver process and does not watch
+inside it, so ``tools`` is always this way, and so is ``skills`` for a solution
+that is not a built-in shape. A solution card (§5.1), when there is one, can
+name the run itself (``identity.name``), the options that took effect
+(``model.config``), and whether an ACP run installed a skill (``skills``) --
+labels only, never the card's own command line (R12; see ``build_context``'s
+``card`` parameter). A group the user switched off is ``disabled`` with the
+flag that did it. The site shows all three as what they are.
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
+from trap.models.card import SolutionCard, card_label
 from trap.models.cost import ModelCost, combine_costs
 from trap.models.environment import Environment
 from trap.models.provenance import Provenance
@@ -95,6 +101,7 @@ def build_context(
     cost_enabled: bool = True,
     environment_enabled: bool = True,
     observed_at: datetime | None = None,
+    card: SolutionCard | None = None,
 ) -> dict[str, Any]:
     """The patch describing one run, ready to send.
 
@@ -104,6 +111,13 @@ def build_context(
     result (None when detection failed), and the two ``*_enabled`` flags are
     the run's ``--no-environment`` / ``--no-cost`` switches, which are reported
     as *disabled* rather than left unsaid.
+
+    ``card`` is the solution card (§5.1) a built-in shape printed, when there
+    was one -- known only once the run has finished, so only the closing call
+    ever has one. It contributes *labels* only: the run's name, the options
+    that took effect, and an ACP skill's ``repo@sha``. Its command template and
+    setup line never appear here (R12) -- that is the one thing an explicit
+    ``tp submit`` is for.
     """
     tp = {"name": "tp", "version": trap_version}
     patch: dict[str, Any] = {
@@ -111,16 +125,18 @@ def build_context(
         "source": SOURCE,
         "collector": f"tp/{trap_version}",
         "observed_at": _iso(observed_at or datetime.now(UTC)),
-        "identity": _identity(profile, tp, agent),
+        "identity": _identity(profile, tp, agent, card),
     }
     if profile.model:
         patch["model"] = {"declared": [_declared(model) for model in profile.model]}
+    if card is not None and card.options:
+        patch.setdefault("model", {})["config"] = dict(sorted(card.options.items()))
     if not environment_enabled:
         patch["environment"] = _disabled("--no-environment")
     elif environment is not None:
         patch["environment"] = _environment(environment)
     patch["reproducibility"] = _reproducibility(provenance, trap_version)
-    patch["skills"] = _unsupported(SKILLS_UNSUPPORTED)
+    patch["skills"] = _skills(card)
     patch["tools"] = _unsupported(TOOLS_UNSUPPORTED)
     if cases is not None:
         patch["timing"] = _timing(cases, started_at, finished_at)
@@ -131,14 +147,27 @@ def build_context(
     return patch
 
 
-def _identity(profile: Profile, tp: dict[str, str], agent: Mapping[str, str] | None) -> dict[str, Any]:
+def _identity(
+    profile: Profile, tp: dict[str, str], agent: Mapping[str, str] | None, card: SolutionCard | None
+) -> dict[str, Any]:
     """tp launched the solver and tp ran it; the frameworks are what trap.yaml
-    declared, and the agent is whatever launched tp, if it said."""
+    declared, and the agent is whatever launched tp, if it said.
+
+    A card names the run too, when there is one -- but never by its ``cmd`` /
+    ``setup``: those are stripped before ``card_label`` sees the card, so its own
+    fallback chain (agent, provider, cmd, shape) can never hand the command line
+    to the site. What is left to fall back to for a bare ``cmd``-shaped card with
+    no name is its shape -- ``"cmd"`` -- which is exactly why that fallback ends
+    in ``card.shape`` rather than raising: every shape has one.
+    """
     identity: dict[str, Any] = {"launcher": tp, "executor": tp}
     if profile.framework:
         identity["framework"] = [{"name": name} for name in profile.framework]
     if agent:
         identity["agent"] = dict(agent)
+    if card is not None:
+        label = card_label(card.model_copy(update={"cmd": None, "setup": None}))
+        identity["name"] = label[:120]
     return identity
 
 
@@ -221,6 +250,34 @@ def _usage_entry(provider: str, model: str, costs: Sequence[ModelCost]) -> dict[
     if reported is not None:
         entry["cost_usd_reported"] = reported
     return entry
+
+
+def _skills(card: SolutionCard | None) -> dict[str, Any]:
+    """What the card says was installed. Only an ACP card can install a skill, so
+    only the card knows whether one skill is installed, none was, or the shape --
+    ``model`` or ``cmd`` -- has no such concept at all. Without a card this is
+    exactly as unreachable as it always was."""
+    if card is None:
+        return _unsupported(SKILLS_UNSUPPORTED)
+    if card.skill:
+        return {"installed": [_skill_ref(card.skill)]}
+    if card.shape == "acp":
+        return {"installed": []}
+    return _unsupported(SKILLS_UNSUPPORTED)
+
+
+def _skill_ref(skill: str) -> dict[str, str]:
+    """``repo@sha`` names the skill by the last path segment of ``repo``, with
+    the commit alongside it; any other string (a skill directory `card_from_run`
+    could not resolve to a repo) is named by its own last path segment instead."""
+    repo, sep, commit = skill.partition("@")
+    if sep and commit:
+        return {"name": _last_segment(repo), "repo": repo, "commit": commit}
+    return {"name": _last_segment(skill)}
+
+
+def _last_segment(path: str) -> str:
+    return path.rstrip("/").rsplit("/", 1)[-1]
 
 
 def _disabled(flag: str) -> dict[str, str]:

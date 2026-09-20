@@ -392,3 +392,101 @@ def test_nothing_that_belongs_to_a_case_is_on_the_wire():
 def test_no_key_the_site_refuses_appears_at_any_depth():
     for patch in (_opening(agent={"name": "a", "version": "1"}), _final(), _final(cost_enabled=False)):
         assert not (_keys_at_any_depth(patch) & REJECTED_KEYS)
+
+
+# -- the solution card: labels only, never the command that drove the run -------
+
+SKILL = "https://github.com/a/b@0123456789abcdef0123456789abcdef01234567"
+ACP_CARD = SolutionCard(
+    shape="acp",
+    shape_version=1,
+    agent="claude-agent-acp@0.76.0",
+    model="sonnet",
+    options={"effort": "low"},
+    skill=SKILL,
+)
+
+
+def _context(**kwargs):
+    return build_context(
+        profile=PROFILE, provenance=PROVENANCE, environment=None, trap_version="1.2.3", **kwargs
+    )
+
+
+def test_a_card_names_the_run_and_states_its_options_and_skill():
+    patch = _context(card=ACP_CARD)
+    assert patch["identity"]["name"] == "claude-agent-acp@0.76.0 · sonnet · a/b@0123456"
+    assert patch["model"]["config"] == {"effort": "low"}
+    assert patch["skills"] == {
+        "installed": [
+            {
+                "name": "b",
+                "repo": "https://github.com/a/b",
+                "commit": "0123456789abcdef0123456789abcdef01234567",
+            }
+        ]
+    }
+
+
+def test_an_acp_run_without_a_skill_says_so_rather_than_unsupported():
+    patch = _context(card=ACP_CARD.model_copy(update={"skill": None}))
+    assert patch["skills"] == {"installed": []}
+
+
+def test_a_card_that_is_not_acp_leaves_skills_unsupported():
+    patch = _context(card=SolutionCard(shape="model", shape_version=1, provider="anthropic", model="m"))
+    assert patch["skills"] == {"status": "unsupported", "reason": SKILLS_UNSUPPORTED}
+
+
+def test_without_a_card_the_context_is_what_it_was():
+    patch = _context()
+    assert "name" not in patch["identity"]
+    assert patch["skills"] == {"status": "unsupported", "reason": SKILLS_UNSUPPORTED}
+    assert "config" not in patch["model"]
+
+
+def test_a_long_label_is_cut_to_what_the_site_stores():
+    patch = _context(card=ACP_CARD.model_copy(update={"name": "x" * 200}))
+    assert len(patch["identity"]["name"]) == 120
+
+
+def test_a_skill_not_resolved_to_repo_at_sha_is_named_by_its_directory():
+    # `card_from_run` leaves a non-git skill directory exactly as it found it --
+    # no "@", so there is no commit to report and the last path segment is all
+    # that is left to call it.
+    card = ACP_CARD.model_copy(update={"skill": "/Users/x/checkout/skills/my-skill"})
+    patch = _context(card=card)
+    assert patch["skills"] == {"installed": [{"name": "my-skill"}]}
+
+
+def test_a_card_without_options_adds_no_model_config():
+    # The card that is not ACP (above) also carries no options -- covers the
+    # branch where a card exists but `card.options` is empty, distinctly from
+    # "no card at all".
+    patch = _context(card=SolutionCard(shape="model", shape_version=1, provider="anthropic", model="m"))
+    assert "config" not in patch["model"]
+
+
+def test_a_carded_run_with_no_declared_model_still_gets_its_config():
+    # `patch.setdefault("model", {})` must create the group itself when
+    # `profile.model` is empty -- the ACP_CARD tests above only exercise the
+    # branch where `model` already exists from a `trap.yaml` declaration.
+    patch = build_context(
+        profile=Profile(), provenance=PROVENANCE, environment=None, trap_version="1.2.3", card=ACP_CARD
+    )
+    assert patch["model"] == {"config": {"effort": "low"}}
+
+
+def test_the_command_template_never_reaches_the_run_context():
+    # Unlike test_a_carded_solutions_command_and_setup_never_reach_reproducibility
+    # above (which only checks the `reproducibility` group), this walks the whole
+    # patch: a `cmd`-shaped card with no name has nothing safe to call itself but
+    # its shape, because `card_label`'s own fallback chain (agent, provider, cmd,
+    # shape) would otherwise hand the command line straight to `identity.name`.
+    card = SolutionCard(
+        shape="cmd", shape_version=1, cmd="python main.py --key $OPENAI_API_KEY {prompt}", setup="uv sync"
+    )
+    patch = _context(card=card)
+    wire = json.dumps(patch)
+    assert "OPENAI_API_KEY" not in wire and "main.py" not in wire and "uv sync" not in wire
+    assert patch["identity"]["name"] == "cmd"

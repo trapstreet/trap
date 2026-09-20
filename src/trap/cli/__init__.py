@@ -553,7 +553,9 @@ def run(
     diagnosis = Diagnosis.from_report_data(report_data)
 
     # The closing description: the opening one again, plus how long the solver
-    # took and what the cost proxy saw. Aggregates only -- never a case.
+    # took and what the cost proxy saw. Aggregates only -- never a case. `card`
+    # is only known now (it was read back from the finished run above), so it
+    # rides this call and not the opening one.
     final = build_context(
         profile=trap_yaml_loader.config.profile,
         provenance=provenance,
@@ -565,6 +567,7 @@ def run(
         finished_at=finished_at_utc,
         cost_enabled=cost,
         environment_enabled=environment,
+        card=card,
     )
     # Mirror the outcome, then stop. Deliberately after the report is on disk
     # and after the diagnosis is computed, and deliberately unable to change

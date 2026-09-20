@@ -69,22 +69,33 @@ to the site twice — once when it opens and once when it ends (`POST
 description on its open and the closing one on its way out) — so the run page can say what
 the run was made of, apart from what it scored. The description has eight groups, and tp
 fills them as far as it can see: `identity` (tp as launcher and executor, the
-`profile.framework` list, and the agent that launched tp when it says so through
-`TRAP_AGENT` / `TRAP_AGENT_VERSION`); `model` (the `profile.model` list, recorded as
-*declared* from `trap.yaml` — tp does not watch the calls, so it never claims a model was
-*observed*); `environment` (the same OS / CPU / RAM / Python block as `report.json`);
-`reproducibility` (the solution's and task's `{repo, commit, subdirectory}`, or the reason a
-side is unanchored, and the tp build); and, at the end, `timing` (the sum of the cases'
-durations and the run's wall time) and `usage` (the cost proxy's token counts, calls and
-priced cost, folded per provider and model — never per case; a bucket with an unpriced call
-reports its tokens and no cost). `skills` and `tools` are reported as *unsupported* with the
-reason: tp runs a solver process and does not see inside it. `--no-environment` and
-`--no-cost` report their group as *disabled* rather than leaving it out, and a group tp did
-not report is shown by the site as **not reported — never as zero**. Nothing in the
-description names a case: no ids, no answers, no output, no paths. It is descriptive only
-— never part of a score — and it cannot change the run: a description the site does not
-take is dropped with one line (it keeps no outbox and is not retried; the closing one
-repeats everything the opening one said, and `report.json` holds the same facts).
+`profile.framework` list, the agent that launched tp when it says so through
+`TRAP_AGENT` / `TRAP_AGENT_VERSION`, and, for a run driven by a built-in shape, the name it
+takes from its [solution card](solution-card.md) — `identity.name`, e.g. `claude-agent-acp@0.76.0
+· sonnet`); `model` (the `profile.model` list, recorded as *declared* from `trap.yaml` — tp
+does not watch the calls, so it never claims a model was *observed* — plus, for a carded run,
+the options that actually took effect, as `model.config`); `environment` (the same OS / CPU /
+RAM / Python block as `report.json`); `reproducibility` (the solution's and task's `{repo,
+commit, subdirectory}`, or the reason a side is unanchored, and the tp build — deliberately
+never the card itself, which is a separate matter; see below); and, at the end, `timing` (the
+sum of the cases' durations and the run's wall time) and `usage` (the cost proxy's token
+counts, calls and priced cost, folded per provider and model — never per case; a bucket with
+an unpriced call reports its tokens and no cost). `tools` is reported as *unsupported*: tp
+runs a solver process and does not see inside it. `skills` says the same for any solution
+that is not an ACP run; an ACP run's card names the skill it installed under
+`skills.installed`, and one that installed none reports `installed: []` rather than
+*unsupported* — the shape can see whether it used a skill even when the answer is none.
+`--no-environment` and `--no-cost` report their group as *disabled* rather than leaving it
+out, and a group tp did not report is shown by the site as **not reported — never as zero**.
+Nothing in the description names a case: no ids, no answers, no output, no paths — and, for a
+carded run, none of the card itself either: its command template, its setup line and its
+digest stay on the machine that ran it, live sync carries only the labels above, and the
+command line becomes public only on an explicit `tp submit` ([solution card](solution-card.md)
+has the card's full field list). It is descriptive only — never part of a score — and it
+cannot change the run: a description the site does not take is dropped with one line (it
+keeps no outbox and is not retried; the closing one repeats everything the opening one said,
+plus the card's labels once the run has finished and they are known, and `report.json` holds
+the same facts).
 
 **Site grading.** When the CLI is paired and the task checkout resolves, on the server, to an
 *admitted evaluation revision* (`GET /api/v2/evaluations/resolve` by the task's `{repo,
