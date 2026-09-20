@@ -40,6 +40,13 @@ class CaseOutcome:
     answer: str
     exit_code: int
     notes: list[str] = field(default_factory=list)
+    #: The agent's self-reported build (name@version), once the handshake has answered
+    #: -- even if the turn itself later fails, since the card wants to know what it was
+    #: talking to regardless.
+    agent: str | None = None
+    #: Every option that actually took effect, minus the model's own id (see
+    #: apply_config) so the model is not stated twice.
+    options: dict[str, str] = field(default_factory=dict)
 
 
 #: How much of an earlier agent message the case's stderr keeps.
@@ -202,6 +209,44 @@ def _readback(config_options: list[dict[str, Any]]) -> dict[str, str]:
     return {str(o.get("id")): str(o.get("currentValue")) for o in config_options if "currentValue" in o}
 
 
+def _set_option(
+    conn: Any,
+    session_id: str,
+    option: dict[str, Any],
+    value: str,
+    now: dict[str, str],
+    available: list[dict[str, Any]],
+    end: float,
+) -> tuple[dict[str, str], list[dict[str, Any]]]:
+    """Apply one option, having already checked it is offered — validate the value,
+    skip the call when it already holds, else set it and read back what took. Returns
+    the option values afterwards and what the agent now offers: an echoed
+    ``configOptions`` after the call, since setting one option (the model, above all)
+    can add or remove others, and a later option in the same ``apply_config`` call must
+    see that fresh list, not the one the case started with."""
+    option_id = str(option["id"])
+    values = option_values(option)
+    if value not in values:
+        raise ConfigMismatch(f"{option_id} {value!r} is not offered; choose one of: {', '.join(values)}")
+    if now.get(option_id) == value:
+        return now, available
+    reply = conn.call(
+        "session/set_config_option",
+        {"sessionId": session_id, "configId": option_id, "value": value},
+        max(0.0, end - time.monotonic()),
+    )
+    echoed = reply.get("configOptions")
+    if isinstance(echoed, list):
+        fresh = _objects(echoed)
+        updated = _readback(fresh)
+        if updated.get(option_id) != value:
+            raise ConfigMismatch(f"{option_id} stayed {updated.get(option_id)!r} after setting {value!r}")
+        return updated, fresh
+    now = dict(now)
+    now[option_id] = value
+    return now, available
+
+
 def apply_config(
     conn: Any,
     session_id: str,
@@ -210,67 +255,77 @@ def apply_config(
     model: str,
     options: Mapping[str, str],
     timeout: float,
+    notes: list[str] | None = None,
 ) -> dict[str, str]:
     """Set the model (the option whose ``category`` is ``model`` — its id is the agent's
-    choice), then each named option, changing only what differs. Returns every option's
-    value afterwards: what the case actually ran with. ``timeout`` is a total budget
-    across every ``session/set_config_option`` call this makes, not a fresh allowance for
-    each one — a case that already spent most of its deadline on the handshake must not
-    get a full new timeout per option it sets."""
+    choice), then each named option, changing only what differs — **skipping** one the
+    chosen model no longer offers, noted on ``notes`` rather than raised: switching models
+    can retire an option (claude-acp drops ``effort`` under haiku), and that is a fact
+    about the model, not the same failure as asking for an option the agent never had at
+    all, which stays a ``ConfigMismatch``. Returns every option's value afterwards: what
+    the case actually ran with — a skipped option is never among them, so it can never
+    reach the card as "applied". ``timeout`` is a total budget across every
+    ``session/set_config_option`` call this makes, not a fresh allowance for each one — a
+    case that already spent most of its deadline on the handshake must not get a full new
+    timeout per option it sets."""
+    notes = notes if notes is not None else []
     model_option = next((o for o in config_options if o.get("category") == "model"), None)
     if model_option is None:
         raise ConfigMismatch("the agent offers no model option (no configOption with category 'model')")
-    wanted: list[tuple[dict[str, Any], str]] = [(model_option, model)]
-    for option_id, value in options.items():
-        option = next((o for o in config_options if o.get("id") == option_id), None)
-        if option is None:
+    # An option this agent has never offered, on any model, is a hard mismatch -- checked
+    # against the option list as it stood before the model changed, the widest one this
+    # agent has shown before a model choice can narrow it.
+    for option_id in options:
+        if not any(o.get("id") == option_id for o in config_options):
             ids = ", ".join(str(o.get("id")) for o in config_options)
             raise ConfigMismatch(f"the agent has no option {option_id!r}; it has: {ids}")
-        wanted.append((option, value))
+
     now = _readback(config_options)
     end = time.monotonic() + timeout
-    for option, value in wanted:
-        values = option_values(option)
-        if value not in values:
-            raise ConfigMismatch(
-                f"{option.get('id')} {value!r} is not offered; choose one of: {', '.join(values)}"
-            )
-        if now.get(str(option["id"])) == value:
+    now, available = _set_option(conn, session_id, model_option, model, now, config_options, end)
+    for option_id, value in options.items():
+        option = next((o for o in available if o.get("id") == option_id), None)
+        if option is None:
+            notes.append(f"{option_id!r} is not offered with model {model!r} — skipped, not applied")
             continue
-        reply = conn.call(
-            "session/set_config_option",
-            {"sessionId": session_id, "configId": option["id"], "value": value},
-            max(0.0, end - time.monotonic()),
-        )
-        echoed = reply.get("configOptions")
-        if isinstance(echoed, list):
-            now = _readback(_objects(echoed))
-            if now.get(str(option["id"])) != value:
-                raise ConfigMismatch(
-                    f"{option['id']} stayed {now.get(str(option['id']))!r} after setting {value!r}"
-                )
-        else:
-            now[str(option["id"])] = value
+        now, available = _set_option(conn, session_id, option, value, now, available, end)
     return now
+
+
+def _agent_from_reply(reply: Mapping[str, Any]) -> str | None:
+    """``initialize``'s ``agentInfo``, as ``name@version`` — the name alone when there
+    is no version, ``None`` when the agent says nothing at all."""
+    info = reply.get("agentInfo") or {}
+    name = info.get("name")
+    if not name:
+        return None
+    version = info.get("version")
+    return f"{name}@{version}" if version else str(name)
 
 
 def _open_session(
     conn: AcpConnection, *, workdir: Path, meta: Mapping[str, Any] | None, timeout: float
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], str | None]:
     """``timeout`` is a total budget for both calls (``initialize`` then ``session/new``),
     not a fresh allowance for each — else the second call can still be waiting long after
     the deadline that was meant to bound the whole handshake has passed, orphaning the
-    agent once the runner's own timeout kills only this shape."""
+    agent once the runner's own timeout kills only this shape.
+
+    Returns the session and the agent's self-reported build (see ``_agent_from_reply``) —
+    kept from ``initialize``'s own reply, since ``session/new``'s has nothing to say
+    about the agent itself."""
     end = time.monotonic() + timeout
-    conn.call(
+    reply = conn.call(
         "initialize",
         {"protocolVersion": PROTOCOL_VERSION, "clientCapabilities": {}},
         max(0.0, end - time.monotonic()),
     )
+    agent = _agent_from_reply(reply)
     params: dict[str, Any] = {"cwd": str(workdir), "mcpServers": []}
     if meta:
         params["_meta"] = dict(meta)
-    return conn.call("session/new", params, max(0.0, end - time.monotonic()))
+    session = conn.call("session/new", params, max(0.0, end - time.monotonic()))
+    return session, agent
 
 
 def run_case(
@@ -317,28 +372,37 @@ def _converse(
     deadline: Deadline,
     cancel_grace: float,
 ) -> CaseOutcome:
+    #: Known as soon as the handshake answers, kept for every return below it — even one
+    #: that fails later (a bad option, a failed turn) still knew who it was talking to.
+    agent: str | None = None
     try:
-        session = _open_session(
+        session, agent = _open_session(
             conn, workdir=workdir, meta=meta, timeout=min(HANDSHAKE_TIMEOUT, deadline.remaining())
         )
         session_id = str(session["sessionId"])
+        offered = config_options(session)
         ran_with = apply_config(
             conn,
             session_id,
-            config_options(session),
+            offered,
             model=model,
             options=options,
             timeout=deadline.remaining(),
+            notes=notes,
         )
     except ConfigMismatch as e:
         notes.append(str(e))
-        return CaseOutcome("", ShapeExit.CONFIG_ERROR, notes)
+        return CaseOutcome("", ShapeExit.CONFIG_ERROR, notes, agent=agent)
     except TimeoutError:
         notes.append("deadline reached before the question was sent")
-        return CaseOutcome("", ShapeExit.TIMEOUT, notes)
+        return CaseOutcome("", ShapeExit.TIMEOUT, notes, agent=agent)
     except (AcpError, KeyError, TypeError) as e:
         notes.append(f"could not open a session: {e}")
-        return CaseOutcome("", ShapeExit.AGENT_ERROR, notes)
+        return CaseOutcome("", ShapeExit.AGENT_ERROR, notes, agent=agent)
+    # apply_config only returns once the model option was found and set, so this is
+    # always a real id -- what the card must not repeat under its own "options" field.
+    model_id = str(next(o.get("id") for o in offered if o.get("category") == "model"))
+    applied = {k: v for k, v in ran_with.items() if k != model_id}
     notes.append("agent config: " + ", ".join(f"{k}={v}" for k, v in sorted(ran_with.items())))
 
     prompt = conn.request(
@@ -353,12 +417,12 @@ def _converse(
         except (TimeoutError, AcpError):
             pass
         notes.append("deadline reached; the session was cancelled")
-        return CaseOutcome(collector.final, ShapeExit.TIMEOUT, notes)
+        return CaseOutcome(collector.final, ShapeExit.TIMEOUT, notes, agent=agent, options=applied)
     except AcpError as e:
         notes.append(f"the agent failed the turn: {e}")
         if collector.final:
             notes.append(f"its last message, not an answer: {collector.final[:500]}")
-        return CaseOutcome("", ShapeExit.AGENT_ERROR, notes)
+        return CaseOutcome("", ShapeExit.AGENT_ERROR, notes, agent=agent, options=applied)
 
     stop = result.get("stopReason")
     if isinstance(result.get("usage"), dict):
@@ -368,12 +432,12 @@ def _converse(
             "the agent reported that no model answered; its message is not an answer: "
             f"{collector.final[:500]}"
         )
-        return CaseOutcome("", ShapeExit.AGENT_ERROR, notes)
+        return CaseOutcome("", ShapeExit.AGENT_ERROR, notes, agent=agent, options=applied)
     code = STOP_EXIT.get(str(stop), ShapeExit.AGENT_ERROR)
     if code is ShapeExit.AGENT_ERROR:
         notes.append(f"unexpected stopReason {stop!r}")
-        return CaseOutcome("", code, notes)
-    return CaseOutcome(collector.final, code, notes)
+        return CaseOutcome("", code, notes, agent=agent, options=applied)
+    return CaseOutcome(collector.final, code, notes, agent=agent, options=applied)
 
 
 def describe_agent(
@@ -389,7 +453,7 @@ def describe_agent(
     conn = AcpConnection(argv, env=env, cwd=cwd, on_update=lambda update: None, on_request=grant_once([]))
     with kill_on_interrupt(conn.pid):
         try:
-            session = _open_session(conn, workdir=cwd, meta=meta, timeout=timeout)
+            session, _ = _open_session(conn, workdir=cwd, meta=meta, timeout=timeout)
         finally:
             conn.close()
     return [

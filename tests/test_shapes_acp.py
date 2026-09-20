@@ -421,7 +421,9 @@ def test_the_case_stderr_tells_the_story_and_stdout_holds_only_the_answer(
     assert (code, captured.out) == (ShapeExit.OK, "42\n")
     story = [line for line in captured.err.splitlines() if line.startswith(("[trap] agent", "[trap] tool"))]
     assert story[:4] == [
-        "[trap] agent config: effort=default, model=haiku",
+        # haiku drops the "effort" option (see fake_acp_agent.config_options), so it
+        # never reaches "agent config" here -- there was nothing to apply it to.
+        "[trap] agent config: model=haiku",
         "[trap] agent message: Let me read the file first.",
         "[trap] tool call: Read question.txt (pending)",
         "[trap] tool call: Read question.txt (completed)",
@@ -571,6 +573,40 @@ def test_open_session_treats_timeout_as_a_total_budget_not_per_call(tmp_path):
     assert conn.timeouts[1] < conn.timeouts[0]
 
 
+# --- _open_session keeps the agent's self-reported build (name@version) from initialize -
+
+
+class _HandshakeConn:
+    """Answers initialize with whatever agentInfo the test hands it, and session/new
+    with a bare session -- for _open_session's own unit tests, where only the agent
+    string it extracts matters, not the rest of the handshake."""
+
+    def __init__(self, agent_info: dict | None) -> None:
+        self._agent_info = agent_info
+
+    def call(self, method: str, params: dict, timeout: float) -> dict:
+        if method == "initialize":
+            reply: dict = {"protocolVersion": 1}
+            if self._agent_info is not None:
+                reply["agentInfo"] = self._agent_info
+            return reply
+        return {"sessionId": "s1"}
+
+
+@pytest.mark.parametrize(
+    ("agent_info", "agent"),
+    [
+        ({"name": "claude-agent-acp", "version": "0.76.0"}, "claude-agent-acp@0.76.0"),
+        ({"name": "claude-agent-acp"}, "claude-agent-acp"),
+        ({}, None),
+        (None, None),
+    ],
+)
+def test_open_session_reads_the_agents_self_reported_build(tmp_path, agent_info, agent):
+    session, reported = _open_session(_HandshakeConn(agent_info), workdir=tmp_path, meta=None, timeout=5)
+    assert (session, reported) == ({"sessionId": "s1"}, agent)
+
+
 def _run(
     tmp_path: Path, *, model: str = "haiku", options=None, deadline: float = 20.0, cancel_grace: float = 0.5
 ):
@@ -590,17 +626,21 @@ def _run(
 
 
 def test_a_case_answers_with_the_agents_last_message(fake, tmp_path):
+    # sonnet, not haiku: haiku drops "effort" (see fake_acp_agent.config_options), and
+    # this test is about the ordinary path where every requested option takes.
     log = fake("ok")
-    out = _run(tmp_path, options={"effort": "low"})
+    out = _run(tmp_path, model="sonnet", options={"effort": "low"})
     assert (out.answer, out.exit_code) == ("42", ShapeExit.OK)
     assert _sent(log, "initialize")[0]["params"] == {"protocolVersion": 1, "clientCapabilities": {}}
     new = _sent(log, "session/new")[0]["params"]
     assert new["mcpServers"] == [] and Path(new["cwd"]).is_absolute()
     assert "_meta" not in new
     sets = [(m["params"]["configId"], m["params"]["value"]) for m in _sent(log, "session/set_config_option")]
-    assert sets == [("model", "haiku"), ("effort", "low")]
-    assert any("model=haiku" in n for n in out.notes)
+    assert sets == [("model", "sonnet"), ("effort", "low")]
+    assert any("model=sonnet" in n for n in out.notes)
     assert any("self-reported session cost" in n for n in out.notes)
+    assert out.agent == "fake-acp@1.0.0"
+    assert out.options == {"effort": "low"}
 
 
 @pytest.mark.parametrize(
@@ -649,6 +689,29 @@ def test_an_unlisted_model_fails_before_the_prompt(fake, tmp_path):
     assert out.exit_code == ShapeExit.CONFIG_ERROR
     assert any("default, sonnet, haiku" in n for n in out.notes)
     assert _sent(log, "session/prompt") == []
+    # the handshake itself succeeded -- only the model choice was bad -- so the card
+    # still knows which agent it was talking to.
+    assert out.agent == "fake-acp@1.0.0"
+
+
+# --- switching models can retire an option; that is a skip, not a config mismatch ------
+
+
+def test_an_option_the_chosen_model_does_not_offer_is_skipped_not_fatal(fake, tmp_path):
+    log = fake("ok")
+    out = _run(tmp_path, model="haiku", options={"effort": "low"})
+    assert out.exit_code == ShapeExit.OK
+    assert any("haiku" in note and "effort" in note for note in out.notes)
+    assert "effort" not in out.options
+    sets = [(m["params"]["configId"], m["params"]["value"]) for m in _sent(log, "session/set_config_option")]
+    assert sets == [("model", "haiku")]  # "effort" is skipped -- no call is ever made for it
+
+
+def test_an_option_no_model_offers_is_still_a_config_error(fake, tmp_path):
+    fake("ok")
+    out = _run(tmp_path, model="haiku", options={"nonesuch": "x"})
+    assert out.exit_code == ShapeExit.CONFIG_ERROR
+    assert "nonesuch" in " ".join(out.notes)
 
 
 def test_at_the_deadline_the_session_is_cancelled(fake, tmp_path):
@@ -1056,6 +1119,41 @@ def _bridge_cmd(*extra: str) -> str:
     )
 
 
+@pytest.mark.parametrize(
+    ("build_argv", "build"),
+    [
+        (
+            ["npx", "-y", "@agentclientprotocol/claude-agent-acp@0.76.0"],
+            "@agentclientprotocol/claude-agent-acp@0.76.0",
+        ),
+        (["node", "/opt/agents/claude-acp/index.js"], None),
+        (["claude-acp"], None),
+        ([], None),
+    ],
+)
+def test_agent_build_reads_the_pinned_package_from_the_start_command(build_argv, build):
+    assert bridge._agent_build(build_argv) == build
+
+
+def test_the_acp_shape_cards_the_agent_the_model_and_the_applied_options(
+    fake, make_project, runner, tmp_path
+):
+    from tests.test_card_in_run import card_from_stderr
+
+    fake("ok")
+    # `_bridge_cmd` already passes `--model haiku`; a later `--model` wins, and sonnet is a
+    # model the scripted agent keeps the `effort` option for (see Step 4).
+    sol = make_project(
+        cmd=_bridge_cmd("--model", "sonnet", "--option", "effort=low"),
+        inputs={"c1": {"question.txt": "q"}},
+    )
+    assert runner.invoke(app, ["run", "--task", "t", "--no-environment"]).exit_code == 0
+    card = card_from_stderr((sorted((sol / ".trap").rglob("stderr"))[0]).read_text())
+    assert card.shape == "acp" and card.model == "sonnet"
+    assert card.options == {"effort": "low"}  # the model is not repeated here
+    assert card.agent == "fake-acp@1.0.0"  # what the agent said at initialize
+
+
 def test_the_bridge_is_a_solution_like_any_other(make_project, runner, fake, tmp_path, monkeypatch):
     log = fake("ok")
     monkeypatch.setenv("POINTER", str(tmp_path / "task"))
@@ -1074,7 +1172,8 @@ def test_the_bridge_is_a_solution_like_any_other(make_project, runner, fake, tmp
     assert start["files"] == ["notes.txt", "question.txt"]
     assert "TRAP_MANIFEST" not in start["env"] and "POINTER" not in start["env"]
     stderr = (next((sol / ".trap").rglob("c1/solution/stderr"))).read_text()
-    assert "agent config: effort=default, model=haiku" in stderr
+    # haiku drops "effort" (see fake_acp_agent.config_options), and no --option was given.
+    assert "agent config: model=haiku" in stderr
     report = json.loads(next((sol / ".trap").rglob("report.json")).read_text())
     assert report["cases_results"][0]["metrics"] == {"score": 1.0}
 
@@ -1230,7 +1329,9 @@ def test_bridge_omits_meta_for_an_agent_with_no_hints(fake, tmp_path, monkeypatc
     assert "_meta" not in new
 
 
-def test_bridge_installs_a_skill_for_claude_acp(fake, tmp_path, monkeypatch):
+def test_bridge_installs_a_skill_for_claude_acp(fake, tmp_path, monkeypatch, capsys):
+    from tests.test_card_in_run import card_from_stderr
+
     log = fake("ok")
     case = _case_dir(tmp_path, {"question.txt": "q"})
     _set_manifest(monkeypatch, case)
@@ -1258,6 +1359,10 @@ def test_bridge_installs_a_skill_for_claude_acp(fake, tmp_path, monkeypatch):
     # installed at the wrong depth, flattened, or truncated must fail this.
     start = next(e for e in _log(log) if "cwd" in e)
     assert start["tree"][".claude/skills/my-skill/SKILL.md"] == "hello skill"
+    # The skill is carded as the local path here -- Task 3's CLI is the only side that
+    # can resolve a repo@sha for it.
+    card = card_from_stderr(capsys.readouterr().err)
+    assert card.skill == str(skill.resolve())
 
 
 def test_bridge_refuses_a_skill_whose_symlink_reaches_a_secret(fake, tmp_path, monkeypatch, capsys):
@@ -1341,11 +1446,13 @@ def test_bridge_refuses_a_skill_for_an_unsupported_agent(fake, tmp_path, monkeyp
 
 
 def test_bridge_sets_a_named_option(fake, tmp_path, monkeypatch):
+    # sonnet, not haiku: haiku drops "effort" (see fake_acp_agent.config_options), and
+    # this test is about an option that does take, not about the skip path.
     log = fake("ok")
     case = _case_dir(tmp_path, {"question.txt": "q"})
     _set_manifest(monkeypatch, case)
     code = bridge.main(
-        ["--agent-cmd", shlex.join(AGENT), "--model", "haiku", "--option", "effort=high", "--deadline", "20"]
+        ["--agent-cmd", shlex.join(AGENT), "--model", "sonnet", "--option", "effort=high", "--deadline", "20"]
     )
     assert code == ShapeExit.OK
     sets = [(m["params"]["configId"], m["params"]["value"]) for m in _sent(log, "session/set_config_option")]

@@ -95,7 +95,9 @@ tasks:
   `tp shape cmd` itself only ever produces 24 — its own configuration errors: an unset or
   unreadable manifest, a question that isn't UTF-8, inputs that can't be copied or that
   contain a symlink it does not copy, an unparseable or empty template, `{repo}` with no
-  `--repo`, a command that can't be found or can't be started (no execute bit, say) — and
+  `--repo`, a command that can't be found or can't be started (no execute bit, say),
+  `--setup` with no `--repo`, an unparseable or empty `--setup`, or a setup command that
+  can't be found, can't be started, or exits non-zero — and
   124, the deadline (plus 128 + the signal when it is interrupted). Any other code is the wrapped
   program's: its own exit code, or 128 + N when signal N killed it (137 for `SIGKILL`),
   the way a shell reports it.
@@ -232,6 +234,16 @@ those, wrap the command in `sh -c '…'` and use `{prompt_file}`. The program ru
 work directory, so a relative path in the template resolves there: refer to your code
 through `{repo}`. Whatever it prints on stdout is the answer (bytes that aren't valid
 text are replaced, not refused), and its exit code is the case's.
+
+`--setup CMD` runs once per case — this shape is a fresh process per case, so "once" means
+before that case's own command, not once for the whole run — in `--repo` (which `--setup`
+therefore requires), a one-off install step (`pip install -e .`, `npm install`) for a
+program that needs preparing first, on the same deadline and environment as the case
+itself. It never sees the question or the case's inputs; a setup that can't be found,
+can't be started, or exits non-zero is a configuration error (exit 24), and the case's
+own command never runs. This is separate from `trap.yaml`'s own `setup_cmd`
+([trap.yaml reference](../reference/trap-yaml.md)), which prepares the solution's
+checkout once for the whole run, before any case starts.
 
 ## Limits
 

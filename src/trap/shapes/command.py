@@ -14,9 +14,10 @@ from __future__ import annotations
 
 import shlex
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+from trap.models.card import SolutionCard
 from trap.shapes._case import (
     Deadline,
     ShapeError,
@@ -25,8 +26,13 @@ from trap.shapes._case import (
     add_case_args,
     fail,
     open_case,
+    print_card,
     run_group,
 )
+
+#: Behaviour version of this shape: how the template is expanded and what the answer
+#: rule is. A change to either is a new card, not a quiet re-scoring of an old one.
+CMD_SHAPE_VERSION = 1
 
 
 def expand(
@@ -53,12 +59,45 @@ def expand(
     return argv, (None if takes_prompt else question)
 
 
+def _setup_argv(setup: str | None, repo: Path | None) -> tuple[list[str], Path] | None:
+    """``--setup``'s argv and the ``--repo`` it runs in, or ``None`` when no ``--setup``
+    was given. Parsed and validated up front, alongside the template, so a broken
+    ``--setup`` fails before the card is printed — same as a broken template."""
+    if not setup:
+        return None
+    if repo is None:
+        raise ShapeError(ShapeExit.CONFIG_ERROR, "--setup requires --repo")
+    try:
+        argv = shlex.split(setup)
+    except ValueError as e:
+        raise ShapeError(ShapeExit.CONFIG_ERROR, f"cannot parse --setup: {e}") from None
+    if not argv:
+        raise ShapeError(ShapeExit.CONFIG_ERROR, "--setup is empty")
+    return argv, repo
+
+
+def _run_setup(argv: list[str], repo: Path, *, env: Mapping[str, str], deadline: Deadline) -> None:
+    """Run ``--setup`` once, in ``--repo``, before the case's own command — same deadline
+    and env. A setup that cannot even start, or that exits non-zero, means the program was
+    never in a state to answer: a config problem, the same as a template naming a program
+    that is not there."""
+    try:
+        out, err, code = run_group(argv, cwd=repo, env=env, stdin=None, deadline=deadline)
+    except FileNotFoundError:
+        raise ShapeError(ShapeExit.CONFIG_ERROR, f"--setup command not found: {argv[0]}") from None
+    except OSError as e:
+        raise ShapeError(ShapeExit.CONFIG_ERROR, f"cannot start --setup {argv[0]}: {e.strerror}") from None
+    if code != 0:
+        raise ShapeError(ShapeExit.CONFIG_ERROR, f"--setup exited {code}: {(err or out)[-500:]}")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = ShapeParser(prog="tp shape cmd", description="Run a command template for one case.")
     parser.add_argument(
         "--template", required=True, help="the command line, e.g. 'python {repo}/main.py {prompt}'"
     )
     parser.add_argument("--repo", type=Path, help="the program's checkout, substituted for {repo}")
+    parser.add_argument("--setup", help="one-off install command, run once in --repo before the case")
     add_case_args(parser)
     args = parser.parse_args(argv)
     deadline = Deadline(args.deadline)
@@ -67,12 +106,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ShapeError as e:
         return fail(e)
     try:
+        repo = args.repo.resolve() if args.repo else None
         command, stdin = expand(
-            args.template,
-            question=sandbox.question,
-            prompt_path=sandbox.prompt_path,
-            repo=args.repo.resolve() if args.repo else None,
+            args.template, question=sandbox.question, prompt_path=sandbox.prompt_path, repo=repo
         )
+        setup = _setup_argv(args.setup, repo)
+        print_card(
+            SolutionCard(
+                shape="cmd",
+                shape_version=CMD_SHAPE_VERSION,
+                cmd=args.template,
+                setup=args.setup,
+                timeout=round(args.deadline),
+            )
+        )
+        if setup is not None:
+            _run_setup(*setup, env=env, deadline=deadline)
         try:
             out, err, code = run_group(command, cwd=sandbox.workdir, env=env, stdin=stdin, deadline=deadline)
         except FileNotFoundError:

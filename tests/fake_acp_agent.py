@@ -19,7 +19,13 @@ so the tests can check none of them escapes the shape as a traceback.
 
 ``surrogate`` answers with a message that carries a lone UTF-16 surrogate (what
 ``json.loads`` turns a JSON escape like ``"\\ud800"`` into) — the same character a real
-agent's JSON-RPC reply can carry, and stdout cannot print outright."""
+agent's JSON-RPC reply can carry, and stdout cannot print outright.
+
+Every mode's ``initialize`` reply carries ``agentInfo`` (name@version), and
+``config_options`` drops the ``effort`` option once the model is ``haiku`` — both to
+match the real claude-agent-acp, so the solution card's ``agent``/``options`` fields and
+the "skip, don't fail" behaviour in trap.shapes.acp.session have something real to
+test against."""
 
 from __future__ import annotations
 
@@ -109,10 +115,13 @@ def config_options() -> list[dict]:
             "options": [{"value": v, "name": v} for v in values],
         }
 
-    return [
-        select("model", "model", ["default", "sonnet", "haiku"]),
-        select("effort", "thought_level", ["default", "low", "high"]),
-    ]
+    options = [select("model", "model", ["default", "sonnet", "haiku"])]
+    if STATE["model"] != "haiku":
+        # The real claude-acp drops "effort" once the model is haiku -- a model switch
+        # can retire an option, which is what trap.shapes.acp.session.apply_config's
+        # "skip, don't fail" behaviour is for. sonnet (and the unset default) keep it.
+        options.append(select("effort", "thought_level", ["default", "low", "high"]))
+    return options
 
 
 def permission_prompt(rid: object, sid: str, options: list[dict]) -> None:
@@ -239,7 +248,15 @@ def main() -> None:
             send({"jsonrpc": "2.0", "id": "no-such-id", "result": {}})  # nobody is waiting on this id
             send({"jsonrpc": "2.0", "method": "session/other", "params": {}})  # a notification we ignore
         if method == "initialize":
-            result(rid, {"protocolVersion": 1, "agentCapabilities": {}, "authMethods": []})
+            result(
+                rid,
+                {
+                    "protocolVersion": 1,
+                    "agentCapabilities": {},
+                    "authMethods": [],
+                    "agentInfo": {"name": "fake-acp", "version": "1.0.0"},
+                },
+            )
         elif method == "session/new":
             if MODE == "hang_handshake":
                 pass  # never respond; the caller must hit its own deadline

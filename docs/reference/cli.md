@@ -219,7 +219,7 @@ Built-in solution programs, run as a `trap.yaml` `cmd:` rather than typed. Hidde
 ```
 tp shape acp --agent-cmd CMD [--model VALUE] [--agent-id ID] [--option ID=VALUE] [--skill DIR] [--describe]
 tp shape direct --model ID [--provider NAME] [--system-file PATH]
-tp shape cmd --template TEMPLATE [--repo PATH]
+tp shape cmd --template TEMPLATE [--repo PATH] [--setup CMD]
 ```
 
 `tp shape acp` requires `--model` unless it is given `--describe`. Every shape also takes

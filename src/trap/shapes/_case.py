@@ -27,6 +27,8 @@ from pathlib import Path
 from types import FrameType
 from typing import NoReturn
 
+from trap.models.card import SolutionCard, canonical_card_json
+
 
 class ShapeExit(IntEnum):
     """How a shape ends. TIMEOUT is the runner's own 124, so a shape that stopped at its
@@ -67,6 +69,18 @@ def print_answer(text: str) -> None:
     except UnicodeEncodeError:
         encoding = sys.stdout.encoding or "utf-8"
         print(text.encode(encoding, errors="replace").decode(encoding, errors="replace"))
+
+
+#: One line on stderr, machine-readable: `tp run` reads it back after the case and
+#: records it; a person reading the log sees the same facts, prefixed so they read past it.
+CARD_PREFIX = "[trap] card "
+
+
+def print_card(card: SolutionCard) -> None:
+    """Say, on stderr, what this run actually was. The shape is the only party that knows
+    -- which agent build answered the handshake, which options the model accepted, which
+    template was expanded -- so it states those labels as one line for `tp run` to record."""
+    print(CARD_PREFIX + canonical_card_json(card).decode(), file=sys.stderr)
 
 
 class Deadline:

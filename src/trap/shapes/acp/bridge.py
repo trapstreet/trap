@@ -19,6 +19,7 @@ import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+from trap.models.card import SolutionCard
 from trap.shapes._case import (
     Deadline,
     ShapeError,
@@ -28,11 +29,16 @@ from trap.shapes._case import (
     fail,
     open_case,
     print_answer,
+    print_card,
     scrubbed_env,
 )
 from trap.shapes.acp.connection import AcpError
 from trap.shapes.acp.hints import extra_env, install_skill, session_meta
 from trap.shapes.acp.session import describe_agent, run_case
+
+#: Behaviour version of this shape: the answer rule (the turn's last message) and what
+#: gets copied for a skill. A change to either is a new card, not a quiet re-scoring.
+ACP_SHAPE_VERSION = 1
 
 
 def _parser() -> ShapeParser:
@@ -67,6 +73,21 @@ def _options(pairs: Sequence[str]) -> dict[str, str]:
             raise ShapeError(ShapeExit.CONFIG_ERROR, f"--option wants ID=VALUE, got {pair!r}")
         options[key] = value
     return options
+
+
+def _agent_build(argv: Sequence[str]) -> str | None:
+    """The pinned package the agent's start command names, when there is one — the
+    first token that is not a flag and has an ``@`` after its last ``/`` (so ``npx -y
+    @agentclientprotocol/claude-agent-acp@0.76.0`` gives
+    ``@agentclientprotocol/claude-agent-acp@0.76.0``, while a bare path with no pinned
+    version, and a flag, are both skipped). ``None`` when nothing in the command names
+    one — the agent's own self-reported build (``CaseOutcome.agent``) is the fallback."""
+    for token in argv:
+        if token.startswith("-"):
+            continue
+        if "@" in token.rsplit("/", 1)[-1]:
+            return token
+    return None
 
 
 def _agent_start_failed(error: OSError) -> int:
@@ -132,6 +153,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _agent_start_failed(e)
     finally:
         sandbox.close()
+    print_card(
+        SolutionCard(
+            shape="acp",
+            shape_version=ACP_SHAPE_VERSION,
+            agent=_agent_build(agent) or outcome.agent,
+            model=args.model,
+            options=outcome.options,
+            skill=str(args.skill.resolve()) if args.skill else None,
+            timeout=round(args.deadline),
+        )
+    )
     for note in outcome.notes:
         print(f"[trap] {note}", file=sys.stderr)
     if outcome.answer:
