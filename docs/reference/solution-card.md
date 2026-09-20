@@ -35,7 +35,7 @@ change its identity.
 | `skill` | yes | The skill that was installed, as `repo@sha` when the CLI could resolve one. |
 | `cmd` | yes | The command template (`cmd` shape). |
 | `setup` | yes | The one-off install line a program needed before it could run. |
-| `timeout` | yes | The per-case deadline the shape ran under, in seconds. |
+| `timeout` | yes | The per-case deadline the shape ran under, in **whole seconds** (an integer, never a fraction — see below). |
 | `name` | **no** | Display only — becomes `solutions.title` on the site. Two cards that differ only in `name` have the same digest. |
 
 Two fields carry a rule that is easy to get backwards, so it is stated here rather than
@@ -67,8 +67,15 @@ digest to match:
      JSON's `separators=(",", ":")`);
    - text encoded as **UTF-8**, and non-ASCII characters left as themselves, not
      escaped as `\uXXXX` (JSON's `ensure_ascii=False`);
-   - numbers and booleans in their ordinary JSON form (`shape_version` and `timeout`
-     are numbers, not strings).
+   - **every number in a card is an integer** (`shape_version`, `timeout`), so its
+     canonical JSON never contains a decimal point. This is stated as its own rule,
+     not folded into "numbers in their ordinary JSON form", because "ordinary" differs
+     by language: JavaScript has a single numeric type, so `JSON.stringify({timeout:
+     570})` gives `570`, but Python's `json.dumps` renders a whole-number `float` as
+     `570.0` — same value, different bytes, different digest. Fixing every numeric
+     field to an integer removes the ambiguity instead of asking every implementation
+     to special-case it: there is nothing a canonicaliser can do with a decimal point
+     it never has to produce.
 
    Call the result the **canonical JSON** of the card. It is a byte string, not a
    Python `str` — the UTF-8 encoding is part of what gets hashed.
@@ -107,3 +114,26 @@ a skill, `model`-shape cards, and a `cmd`-shape card with non-ASCII text in its 
 template. Every vector's `canonical_json` and `digest` were generated from the Python
 model, never hand-written — an implementation that disagrees with a vector has a bug,
 not the other way around.
+
+A second example, to make the integer rule concrete — the `model-direct` vector, whose
+card carries a `timeout`:
+
+```json
+{"shape": "model", "shape_version": 1, "provider": "anthropic", "model": "claude-sonnet-5", "timeout": 570.0}
+```
+
+`570.0` here is only how this *input* JSON happened to spell the number — a submission
+is free to send a float, so long as it is integral. The canonical JSON always renders
+it as the integer `570`, with no decimal point:
+
+```
+{"model":"claude-sonnet-5","provider":"anthropic","shape":"model","shape_version":1,"timeout":570}
+```
+
+```
+46c1bb1251e63906313c1dfaad1fcbdd99dcbb994a5a77cfbeb08ee4ed7056d0
+```
+
+An implementation that instead reproduces the input's `570.0` verbatim (as a
+JavaScript-side canonicaliser might, if it forgot this rule) would compute a different
+digest and fail this vector.

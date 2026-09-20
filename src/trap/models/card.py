@@ -58,8 +58,13 @@ class SolutionCard(BaseModel):
     #: The command template, and the one-off install line a program needed.
     cmd: str | None = None
     setup: str | None = None
-    #: The per-case deadline the shape ran under, in seconds.
-    timeout: float | None = None
+    #: The per-case deadline the shape ran under, in whole seconds. Every number in a
+    #: card is an integer -- JSON has one numeric type in JavaScript but two in Python,
+    #: so a float that happens to be whole (``570.0``) renders differently from the int
+    #: ``570`` in each language's default JSON encoder, and the digest must not depend
+    #: on which one wrote it. A shape's deadline may be fractional; the card records
+    #: ``round(deadline)``.
+    timeout: int | None = None
     #: Display only, outside the digest: `solutions.title` on the site.
     name: str | None = None
 
@@ -73,6 +78,14 @@ def _digest_payload(card: SolutionCard) -> dict[str, Any]:
         value = getattr(card, field)
         if value is None or value == {} or value == "":
             continue
+        # Belt and braces: every numeric field is typed `int`, so ordinary validated
+        # construction never hands us a float here -- but a card built with
+        # `model_construct` (validation skipped) can, and a future numeric field could
+        # too. An integral float and its int are the same number; only Python's JSON
+        # encoder tells them apart (`570.0` vs `570`), so fold it to int before that
+        # difference can reach the digest. A genuinely fractional value is left alone.
+        if isinstance(value, float) and value.is_integer():
+            value = int(value)
         payload[field] = value
     return payload
 

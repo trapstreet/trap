@@ -81,6 +81,38 @@ def test_the_label_shows_a_skill_with_no_pinned_commit():
     assert card_label(card) == "model · sonnet · a/b"
 
 
+def test_the_label_falls_back_to_the_provider_when_there_is_no_agent():
+    card = SolutionCard(shape="model", shape_version=1, provider="anthropic", model="claude-sonnet-5")
+    assert card_label(card) == "anthropic · claude-sonnet-5"
+
+
+def test_the_label_falls_back_to_the_bare_shape_when_nothing_else_is_set():
+    card = SolutionCard(shape="acp", shape_version=1)
+    assert card_label(card) == "acp"
+
+
+def test_the_label_handles_a_skill_repo_with_no_slash():
+    card = SolutionCard(shape="model", shape_version=1, model="sonnet", skill="justarepo@abc1234567")
+    assert card_label(card) == "model · sonnet · justarepo@abc1234"
+
+
+def test_an_explicit_empty_string_is_the_same_card_as_the_field_left_unset():
+    empty = SolutionCard(shape="cmd", shape_version=1, cmd="")
+    unset = SolutionCard(shape="cmd", shape_version=1)
+    assert card_digest(empty) == card_digest(unset)
+
+
+def test_an_integral_float_in_a_digest_field_digests_like_the_int():
+    # model_construct bypasses field validation -- the one path that can still hand
+    # _digest_payload a raw float even though `timeout` is typed `int`, e.g. a card
+    # rebuilt from a foreign/older caller's already-parsed JSON. The digest must not
+    # care: json.dumps(570.0) != json.dumps(570), so without normalisation these two
+    # cards would silently mint different digests for the same card.
+    as_float = SolutionCard.model_construct(shape="cmd", shape_version=1, cmd="x", timeout=570.0)
+    as_int = SolutionCard.model_construct(shape="cmd", shape_version=1, cmd="x", timeout=570)
+    assert card_digest(as_float) == card_digest(as_int)
+
+
 @pytest.mark.parametrize("vector", json.loads(VECTORS.read_text())["vectors"], ids=lambda v: v["id"])
 def test_the_published_vectors_hold(vector):
     card = SolutionCard.model_validate(vector["card"])
