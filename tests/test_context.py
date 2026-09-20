@@ -24,6 +24,7 @@ from trap.live.context import (
     agent_from_env,
     build_context,
 )
+from trap.models.card import SolutionCard, card_digest
 from trap.models.cost import CaseCost, ModelCost
 from trap.models.environment import Cpu, Environment
 from trap.models.provenance import GitProvenance, Provenance
@@ -218,6 +219,32 @@ def test_provenance_sits_under_reproducibility_with_the_tp_build():
 def test_an_empty_provenance_side_is_left_unsaid():
     patch = build_context(profile=Profile(), provenance=Provenance(), environment=None, trap_version="x")
     assert patch["reproducibility"] == {"trap_version": "x"}
+
+
+def test_a_carded_solutions_command_and_setup_never_reach_reproducibility():
+    # The card rides on `GitProvenance.adapter`/`.adapter_digest` for the report, but
+    # live sync only ever gets labels and the digest -- never the command template
+    # itself, which routinely names paths and environment-variable names (R12).
+    card = SolutionCard(
+        shape="cmd",
+        shape_version=1,
+        cmd="python main.py --key $OPENAI_API_KEY {prompt}",
+        setup="uv sync",
+    )
+    provenance = Provenance(
+        solution=GitProvenance(
+            repo="https://github.com/o/sol",
+            commit="a" * 40,
+            adapter=card,
+            adapter_digest=card_digest(card),
+        ),
+        task=GitProvenance(issue="uncommitted changes"),
+    )
+    patch = build_context(profile=PROFILE, provenance=provenance, environment=None, trap_version="1.2.3")
+    wire = json.dumps(patch)
+    for secret in ("main.py", "OPENAI_API_KEY", "uv sync", "adapter"):
+        assert secret not in wire, secret
+    assert patch["reproducibility"]["solution"] == {"repo": "https://github.com/o/sol", "commit": "a" * 40}
 
 
 def test_the_environment_keeps_the_detectors_shape_and_adds_the_interpreter():

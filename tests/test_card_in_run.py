@@ -119,12 +119,38 @@ def _stderr_path(run_dir: Path, case_id: str) -> Path:
     return path
 
 
-def test_card_from_run_returns_none_when_a_cases_stderr_is_unreadable(tmp_path):
+def test_card_from_run_silently_tries_the_next_case_when_one_never_ran(tmp_path, capsys):
     from trap.cli._card import card_from_run
 
-    # case "a" never ran (no solution/stderr at all) -- reading it raises OSError,
-    # which must be swallowed rather than failing the run.
+    # case "a" never ran (no solution/stderr at all) -- reading it raises
+    # FileNotFoundError, which must be swallowed, quietly, rather than failing the
+    # run: this is the ordinary "not a built-in shape" / "case didn't get this far"
+    # case, not a problem worth a log line.
     assert card_from_run(tmp_path / "run", ["a"]) is None
+    assert capsys.readouterr().err == ""
+
+
+def test_card_from_run_logs_and_skips_a_stderr_it_cannot_read_for_another_reason(
+    tmp_path, monkeypatch, capsys
+):
+    from trap.cli._card import card_from_run
+
+    run_dir = tmp_path / "run"
+    stderr = _stderr_path(run_dir, "a")
+    stderr.write_text("irrelevant\n")
+
+    def denied(*_args, **_kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "read_text", denied)
+
+    # Unlike a missing case (silently tried next), a real read failure -- a
+    # PermissionError, say -- must not look identical to "this solution prints no
+    # card": it is named on stderr, distinctly, before the run moves on.
+    assert card_from_run(run_dir, ["a"]) is None
+    err = capsys.readouterr().err
+    assert err.startswith("[trap]")
+    assert str(stderr) in err and "Permission denied" in err
 
 
 def test_card_from_run_uses_the_first_case_that_printed_a_card(tmp_path):

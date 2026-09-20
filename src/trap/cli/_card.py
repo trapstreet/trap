@@ -7,7 +7,7 @@ reproducible by someone who has neither the directory nor the run."""
 
 from __future__ import annotations
 
-import json
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -22,17 +22,25 @@ from trap.shapes._case import CARD_PREFIX
 def card_from_run(run_dir: Path, case_ids: Sequence[str]) -> SolutionCard | None:
     """The card of the first case that printed one, or None for a solution that is not
     a built-in shape. A malformed line is ignored rather than failing the run: the run
-    happened, and a report without a card is still a true report."""
+    happened, and a report without a card is still a true report.
+
+    A case that never ran (no ``solution/stderr`` at all) is tried at the next case,
+    silently -- this is the ordinary "not a built-in shape" outcome. Any other read
+    failure (a permissions problem, say) is named on stderr before moving on, so it
+    never reads as indistinguishable from a card-free run."""
     for case_id in case_ids:
         stderr = CaseLayout.for_case(run_dir, case_id).solution_capture.stderr
         try:
             lines = [line for line in stderr.read_text().splitlines() if line.startswith(CARD_PREFIX)]
-        except OSError:
+        except FileNotFoundError:
+            continue
+        except OSError as e:
+            print(f"[trap] cannot read {stderr} for its card: {e}", file=sys.stderr)
             continue
         for line in reversed(lines):
             try:
                 card = SolutionCard.model_validate_json(line[len(CARD_PREFIX) :])
-            except (ValidationError, json.JSONDecodeError):
+            except ValidationError:
                 continue
             return _with_skill_origin(card)
     return None

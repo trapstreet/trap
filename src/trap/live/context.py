@@ -159,10 +159,18 @@ def _environment(environment: Environment) -> dict[str, Any]:
 
 def _reproducibility(provenance: Provenance, trap_version: str) -> dict[str, Any]:
     """Both checkouts as the report records them -- {repo, commit, subdirectory},
-    or the ``issue`` that kept a side from being anchored -- and the tp build."""
+    or the ``issue`` that kept a side from being anchored -- and the tp build.
+
+    ``GitProvenance.adapter``/``.adapter_digest`` (the solution card and its digest)
+    are deliberately left out here: this group travels on every live-sync patch, but
+    the card's own fields -- a command template, a setup line -- routinely name paths
+    and environment-variable names, and R12 makes that upload happen only on an
+    explicit `tp submit`, after the user is shown what becomes public. A later group
+    may carry the card's *labels* on purpose; this one never carries the card itself.
+    """
     group: dict[str, Any] = {}
     for side in ("solution", "task"):
-        ref = getattr(provenance, side).model_dump(exclude_none=True)
+        ref = getattr(provenance, side).model_dump(exclude_none=True, exclude={"adapter", "adapter_digest"})
         if ref:
             group[side] = ref
     group["trap_version"] = trap_version
