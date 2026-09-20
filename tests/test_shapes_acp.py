@@ -581,7 +581,7 @@ class _HandshakeConn:
     with a bare session -- for _open_session's own unit tests, where only the agent
     string it extracts matters, not the rest of the handshake."""
 
-    def __init__(self, agent_info: dict | None) -> None:
+    def __init__(self, agent_info: object) -> None:
         self._agent_info = agent_info
 
     def call(self, method: str, params: dict, timeout: float) -> dict:
@@ -600,6 +600,11 @@ class _HandshakeConn:
         ({"name": "claude-agent-acp"}, "claude-agent-acp"),
         ({}, None),
         (None, None),
+        # a malformed handshake -- agentInfo sent as a bare string (or any non-object) --
+        # must read as "nothing reported", never raise (AttributeError on .get, since a
+        # str has none): config_options already raises TypeError for exactly this shape
+        # of mistake elsewhere; here it must not raise at all.
+        ("claude", None),
     ],
 )
 def test_open_session_reads_the_agents_self_reported_build(tmp_path, agent_info, agent):
@@ -712,6 +717,20 @@ def test_an_option_no_model_offers_is_still_a_config_error(fake, tmp_path):
     out = _run(tmp_path, model="haiku", options={"nonesuch": "x"})
     assert out.exit_code == ShapeExit.CONFIG_ERROR
     assert "nonesuch" in " ".join(out.notes)
+
+
+def test_an_option_only_the_agents_own_default_model_lacked_is_not_a_false_mismatch(fake, tmp_path):
+    # The agent's *own* starting model is haiku (which drops "effort"), so effort is
+    # already missing from session/new's own configOptions before trap asks for
+    # anything. Asking for --model sonnet --option effort=low must not die with "the
+    # agent has no option effort" -- sonnet offers it; the "never offered at all" check
+    # must see the option lists from both before *and* after the model changes.
+    log = fake("haiku_default")
+    out = _run(tmp_path, model="sonnet", options={"effort": "low"})
+    assert out.exit_code == ShapeExit.OK
+    assert out.options == {"effort": "low"}
+    sets = [(m["params"]["configId"], m["params"]["value"]) for m in _sent(log, "session/set_config_option")]
+    assert sets == [("model", "sonnet"), ("effort", "low")]
 
 
 def test_at_the_deadline_the_session_is_cancelled(fake, tmp_path):
@@ -1152,6 +1171,26 @@ def test_the_acp_shape_cards_the_agent_the_model_and_the_applied_options(
     assert card.shape == "acp" and card.model == "sonnet"
     assert card.options == {"effort": "low"}  # the model is not repeated here
     assert card.agent == "fake-acp@1.0.0"  # what the agent said at initialize
+    assert isinstance(card.timeout, int)
+
+
+def test_a_pinned_package_in_agent_cmd_wins_over_the_agents_self_reported_build(
+    fake, make_project, runner, tmp_path
+):
+    from tests.test_card_in_run import card_from_stderr
+
+    # AGENT (a python interpreter + a script path) has no "@" anywhere, so every other
+    # test of the card's `agent` field only ever exercises the right-hand side of
+    # `_agent_build(agent) or outcome.agent` -- swapping the two operands would still be
+    # green. Adding a trailing, unused argv token that *does* look like a pinned package
+    # proves the left-hand side (the pinned command) wins, not the agent's own report.
+    fake("ok")
+    pinned = "@agentclientprotocol/claude-agent-acp@0.76.0"
+    pinned_cmd = shlex.join([*AGENT, pinned])
+    sol = make_project(cmd=_bridge_cmd("--agent-cmd", pinned_cmd), inputs={"c1": {"question.txt": "q"}})
+    assert runner.invoke(app, ["run", "--task", "t", "--no-environment"]).exit_code == 0
+    card = card_from_stderr((sorted((sol / ".trap").rglob("stderr"))[0]).read_text())
+    assert card.agent == pinned  # not "fake-acp@1.0.0", the agent's own self-report
 
 
 def test_the_bridge_is_a_solution_like_any_other(make_project, runner, fake, tmp_path, monkeypatch):

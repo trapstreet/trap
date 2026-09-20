@@ -25,7 +25,11 @@ Every mode's ``initialize`` reply carries ``agentInfo`` (name@version), and
 ``config_options`` drops the ``effort`` option once the model is ``haiku`` — both to
 match the real claude-agent-acp, so the solution card's ``agent``/``options`` fields and
 the "skip, don't fail" behaviour in trap.shapes.acp.session have something real to
-test against."""
+test against. ``haiku_default`` starts the agent already on ``haiku`` (so ``effort`` is
+already missing from ``session/new``'s own ``configOptions``, before trap ever asks for
+a model) — for the one case that check must not get backwards: an option a *later*,
+different ``--model`` does offer, checked against the option list as it stood before
+that model was set."""
 
 from __future__ import annotations
 
@@ -39,7 +43,10 @@ from pathlib import Path
 
 MODE = os.environ.get("FAKE_ACP_MODE", "ok")
 LOG = os.environ.get("FAKE_ACP_LOG")
-STATE = {"model": "default", "effort": "default"}
+# "haiku_default": the agent's *own* starting model already lacks "effort" (the way a
+# real agent defaulting to haiku would) -- for the one case that matters for the
+# pre-model-change option list: a later --model that *does* offer the option.
+STATE = {"model": "haiku" if MODE == "haiku_default" else "default", "effort": "default"}
 USAGE = {"inputTokens": 10, "outputTokens": 3, "totalTokens": 13}
 PENDING: dict[str, object] = {}
 
@@ -133,7 +140,7 @@ def permission_prompt(rid: object, sid: str, options: list[dict]) -> None:
 
 
 def prompt(rid: object, sid: str) -> None:
-    if MODE in ("ok", "garbage", "stray", "junk_config"):
+    if MODE in ("ok", "garbage", "stray", "junk_config", "haiku_default"):
         say(sid, "Let me read the file first.", "m1")
         tool(sid, "Read question.txt")
         say(sid, "4", "m2")

@@ -32,6 +32,7 @@ def test_the_command_shape_cards_its_template(make_project, runner, tmp_path):
     card = card_from_stderr(stderr)
     assert (card.shape, card.shape_version, card.timeout) == ("cmd", 1, 30.0)
     assert card.cmd == f"{PY} {{repo}}/tool.py" and card.model is None
+    assert isinstance(card.timeout, int)
 
 
 def test_the_direct_shape_cards_the_provider_and_model(make_project, runner, monkeypatch, tmp_path):
@@ -52,3 +53,26 @@ def test_the_direct_shape_cards_the_provider_and_model(make_project, runner, mon
     stderr = next((Path(sol) / ".trap").rglob("c1/solution/stderr")).read_text()
     card = card_from_stderr(stderr)
     assert (card.shape, card.provider, card.model, card.timeout) == ("model", "openai", "gpt-test", 30.0)
+    assert isinstance(card.timeout, int)
+
+
+# --- print_card must never cost a case its answer and exit code over an unprintable ----
+# --- label -- an argv- or agent-sourced lone UTF-16 surrogate is replaced, not raised ---
+
+
+def test_print_card_replaces_a_lone_surrogate_instead_of_raising(capsys):
+    from trap.shapes._case import print_card
+
+    card = SolutionCard(shape="cmd", shape_version=1, cmd="echo \udcff", timeout=30)
+    print_card(card)  # must not raise
+    got = card_from_stderr(capsys.readouterr().err)
+    assert got.cmd == "echo ?"  # str.encode(..., errors="replace") uses "?", not U+FFFD
+
+
+def test_print_card_still_works_normally_when_nothing_needs_replacing(capsys):
+    from trap.shapes._case import print_card
+
+    card = SolutionCard(shape="model", shape_version=1, provider="anthropic", model="claude-sonnet-5")
+    print_card(card)
+    got = card_from_stderr(capsys.readouterr().err)
+    assert (got.provider, got.model) == ("anthropic", "claude-sonnet-5")

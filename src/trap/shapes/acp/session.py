@@ -272,17 +272,23 @@ def apply_config(
     model_option = next((o for o in config_options if o.get("category") == "model"), None)
     if model_option is None:
         raise ConfigMismatch("the agent offers no model option (no configOption with category 'model')")
-    # An option this agent has never offered, on any model, is a hard mismatch -- checked
-    # against the option list as it stood before the model changed, the widest one this
-    # agent has shown before a model choice can narrow it.
-    for option_id in options:
-        if not any(o.get("id") == option_id for o in config_options):
-            ids = ", ".join(str(o.get("id")) for o in config_options)
-            raise ConfigMismatch(f"the agent has no option {option_id!r}; it has: {ids}")
 
     now = _readback(config_options)
     end = time.monotonic() + timeout
     now, available = _set_option(conn, session_id, model_option, model, now, config_options, end)
+
+    # "Never offered at all" is checked against every id this agent has shown, before
+    # *and* after the model change — not just the list the case started with. An agent
+    # can default to a model that already lacks an option a later --model does offer
+    # (claude-acp defaulting to haiku, say), so the pre-change list alone would call a
+    # perfectly valid option a mismatch; checking only the post-change list would do the
+    # same the other way around for one only the *previous* model offered.
+    known_ids = {o.get("id") for o in config_options} | {o.get("id") for o in available}
+    for option_id in options:
+        if option_id not in known_ids:
+            ids = ", ".join(str(o.get("id")) for o in config_options)
+            raise ConfigMismatch(f"the agent has no option {option_id!r}; it has: {ids}")
+
     for option_id, value in options.items():
         option = next((o for o in available if o.get("id") == option_id), None)
         if option is None:
@@ -294,8 +300,13 @@ def apply_config(
 
 def _agent_from_reply(reply: Mapping[str, Any]) -> str | None:
     """``initialize``'s ``agentInfo``, as ``name@version`` — the name alone when there
-    is no version, ``None`` when the agent says nothing at all."""
-    info = reply.get("agentInfo") or {}
+    is no version, ``None`` when the agent says nothing at all, or says it in a shape
+    that isn't an object (``agentInfo: "claude"``, say) — a malformed handshake must end
+    the case cleanly, never escape as a traceback the way ``info.get`` would on
+    anything that isn't a mapping."""
+    info = reply.get("agentInfo")
+    if not isinstance(info, Mapping):
+        return None
     name = info.get("name")
     if not name:
         return None

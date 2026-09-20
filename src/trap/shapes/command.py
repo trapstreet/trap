@@ -80,13 +80,19 @@ def _run_setup(argv: list[str], repo: Path, *, env: Mapping[str, str], deadline:
     """Run ``--setup`` once, in ``--repo``, before the case's own command — same deadline
     and env. A setup that cannot even start, or that exits non-zero, means the program was
     never in a state to answer: a config problem, the same as a template naming a program
-    that is not there."""
+    that is not there. ``run_group`` never raises on its own deadline — it kills the group
+    and hands back ``ShapeExit.TIMEOUT`` as an ordinary exit code — so that case is
+    checked first: a setup that overruns the deadline is the deadline (124), on the same
+    contract as the case's own command, never folded into the generic non-zero-exit
+    config error (24)."""
     try:
         out, err, code = run_group(argv, cwd=repo, env=env, stdin=None, deadline=deadline)
     except FileNotFoundError:
         raise ShapeError(ShapeExit.CONFIG_ERROR, f"--setup command not found: {argv[0]}") from None
     except OSError as e:
         raise ShapeError(ShapeExit.CONFIG_ERROR, f"cannot start --setup {argv[0]}: {e.strerror}") from None
+    if code == ShapeExit.TIMEOUT:
+        raise ShapeError(ShapeExit.TIMEOUT, "--setup reached the deadline")
     if code != 0:
         raise ShapeError(ShapeExit.CONFIG_ERROR, f"--setup exited {code}: {(err or out)[-500:]}")
 

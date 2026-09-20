@@ -545,3 +545,65 @@ def test_a_setup_that_exits_non_zero_is_a_config_error_and_the_command_never_run
     captured = capsys.readouterr()
     assert "--setup exited 7" in captured.err and "setup-failed" in captured.err
     assert "ran" not in captured.out
+
+
+def test_a_setup_that_hits_the_deadline_exits_124_not_24(tmp_path, monkeypatch, capsys):
+    # run_group does not raise on a timeout -- it kills the group and returns
+    # ShapeExit.TIMEOUT (124) as the code, same as the case's own command hitting the
+    # deadline. That must reach main() as 124, not fall into the generic non-zero-exit
+    # branch and come out as a config error (24).
+    case = _case_dir(tmp_path, {"question.txt": "hi"})
+    _set_manifest(monkeypatch, case)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    code = main(
+        [
+            "--template",
+            "echo ran",
+            "--repo",
+            str(repo),
+            "--setup",
+            "sleep 5",
+            "--deadline",
+            "0.3",
+        ]
+    )
+    assert code == ShapeExit.TIMEOUT
+    captured = capsys.readouterr()
+    assert "reached the deadline" in captured.err
+    assert "ran" not in captured.out
+
+
+# --- a lone surrogate in an argv-sourced card field must not cost the case its answer --
+
+
+def test_a_lone_surrogate_in_the_template_does_not_crash_the_card_or_lose_the_answer(
+    tmp_path, monkeypatch, capsys
+):
+    from tests.test_card_in_run import card_from_stderr
+
+    # An extra argument no shell script written as "echo ok" ever reads: this reaches
+    # `args.template`, and hence the card's `cmd` field, without changing what actually
+    # runs or prints. The character itself is exactly what sys.argv's own
+    # surrogateescape decoding would hand back for a non-UTF-8 byte in a real --template.
+    case = _case_dir(tmp_path, {"question.txt": "hi"})
+    _set_manifest(monkeypatch, case)
+    code = main(["--template", "sh -c 'echo ok' extra\udcff", "--deadline", "20"])
+    assert code == 0
+    captured = capsys.readouterr()
+    assert captured.out == "ok\n"
+    card = card_from_stderr(captured.err)
+    assert card.cmd == "sh -c 'echo ok' extra?"  # encode(..., "replace") uses "?", not U+FFFD
+
+
+def test_the_cards_timeout_is_an_integer_rounded_from_a_fractional_deadline(tmp_path, monkeypatch, capsys):
+    from tests.test_card_in_run import card_from_stderr
+
+    case = _case_dir(tmp_path, {"question.txt": "hi"})
+    _set_manifest(monkeypatch, case)
+    code = main(["--template", "echo {prompt}", "--deadline", "30.6"])
+    assert code == 0
+    card = card_from_stderr(capsys.readouterr().err)
+    assert type(card.timeout) is int  # not merely == 31 -- a float there breaks the
+    # cross-language digest (see docs/reference/solution-card.md)
+    assert card.timeout == 31

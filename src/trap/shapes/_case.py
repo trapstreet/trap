@@ -76,11 +76,36 @@ def print_answer(text: str) -> None:
 CARD_PREFIX = "[trap] card "
 
 
+def _desurrogate(value: object) -> object:
+    """``value`` with any lone UTF-16 surrogate character (see ``print_answer``)
+    replaced -- recursing into a dict's values, since ``SolutionCard.options`` is one.
+    Anything else (an int, ``None``, ...) is returned as-is."""
+    if isinstance(value, str):
+        return value.encode("utf-8", errors="replace").decode("utf-8")
+    if isinstance(value, dict):
+        return {_desurrogate(k): _desurrogate(v) for k, v in value.items()}
+    return value
+
+
 def print_card(card: SolutionCard) -> None:
     """Say, on stderr, what this run actually was. The shape is the only party that knows
     -- which agent build answered the handshake, which options the model accepted, which
-    template was expanded -- so it states those labels as one line for `tp run` to record."""
-    print(CARD_PREFIX + canonical_card_json(card).decode(), file=sys.stderr)
+    template was expanded -- so it states those labels as one line for `tp run` to record.
+
+    A label built from argv (a non-UTF-8 byte in --template, --setup or a --skill path,
+    decoded with surrogateescape) or from an agent's own report (agentInfo.name) can
+    carry a lone UTF-16 surrogate the same way a case's answer can -- canonical_card_json's
+    own ``.encode("utf-8")`` raises on one, and the card must not cost the case its answer
+    and exit code over one unprintable label (print_card runs before the answer is
+    printed). A card is trap's to relay, not to sanitize, so the replacement is tried only
+    once the plain form fails -- trap.models.card is shared with a future Rust/TS
+    implementation and is never touched here."""
+    try:
+        body = canonical_card_json(card)
+    except UnicodeEncodeError:
+        clean = SolutionCard.model_validate({k: _desurrogate(v) for k, v in card.model_dump().items()})
+        body = canonical_card_json(clean)
+    print(CARD_PREFIX + body.decode(), file=sys.stderr)
 
 
 class Deadline:
