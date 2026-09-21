@@ -461,7 +461,7 @@ def test_a_skill_not_resolved_to_repo_at_sha_is_named_by_its_directory():
 
 def test_a_skill_with_an_at_sign_but_no_commit_is_still_unresolved():
     # A third input class distinct from "no @ at all" (above) and "repo@sha"
-    # (test_a_card_names_the_run_...): `_resolved_skill` treats an "@" with
+    # (test_a_card_names_the_run_...): `_parse_skill` treats an "@" with
     # nothing after it as unresolved too. Written as its own test rather than
     # folded into the two above, because a single compound `if sep and commit`
     # can reach 100% branch coverage without this combination ever running --
@@ -505,7 +505,7 @@ def test_skill_ref_and_card_label_agree_on_an_unresolved_skill():
 
 def test_identity_and_skills_installed_never_leak_a_scoped_package_path():
     # round 2: an npm-scoped skill directory's "@" has nothing on both sides of
-    # it that make it a commit -- `_resolved_skill` must not be fooled by the
+    # it that make it a commit -- `_parse_skill` must not be fooled by the
     # separator's mere presence, on either surface that names the skill.
     card = ACP_CARD.model_copy(update={"skill": "/Users/alice/.cache/node_modules/@my-org/my-skill"})
     patch = _context(card=card)
@@ -523,6 +523,45 @@ def test_identity_and_skills_installed_never_leak_an_email_shaped_path():
     name = patch["identity"]["name"]
     installed_name = patch["skills"]["installed"][0]["name"]
     assert "eve" not in name and "/" not in name
+    assert installed_name == "my-skill"
+    assert name.endswith(installed_name)
+
+
+def test_skills_installed_reconstructs_the_repo_url_with_no_embedded_credentials():
+    # round 3, the severe one: `_skill_ref` used to put the resolved `repo`
+    # string into `skills.installed[0]["repo"]` verbatim -- so a skill
+    # checkout whose git remote embeds HTTP Basic credentials shipped the
+    # token to the site. The `repo` field here must be reconstructed from
+    # parsed components (host/owner/repo), never the string tp received.
+    commit = "0" * 40
+    card = ACP_CARD.model_copy(
+        update={"skill": f"https://oauth2:ghp_SECRETTOKEN1234@github.com/owner/repo@{commit}"}
+    )
+    patch = _context(card=card)
+    assert patch["skills"] == {
+        "installed": [{"name": "repo", "repo": "https://github.com/owner/repo", "commit": commit}]
+    }
+    wire = json.dumps(patch)
+    assert "ghp_SECRETTOKEN1234" not in wire and "oauth2" not in wire
+
+
+def test_identity_and_skills_installed_never_leak_a_windows_drive_path():
+    # round 3: `repo.startswith("/")` (round 2's guard) is POSIX-only.
+    card = ACP_CARD.model_copy(update={"skill": "C:\\Users\\bob\\my-skill"})
+    patch = _context(card=card)
+    name = patch["identity"]["name"]
+    installed_name = patch["skills"]["installed"][0]["name"]
+    assert "bob" not in name and "\\" not in name and "/" not in name
+    assert installed_name == "my-skill"
+    assert name.endswith(installed_name)
+
+
+def test_identity_and_skills_installed_never_leak_a_unc_path():
+    card = ACP_CARD.model_copy(update={"skill": "\\\\fileserver\\share\\my-skill"})
+    patch = _context(card=card)
+    name = patch["identity"]["name"]
+    installed_name = patch["skills"]["installed"][0]["name"]
+    assert "fileserver" not in name and "share" not in name and "\\" not in name
     assert installed_name == "my-skill"
     assert name.endswith(installed_name)
 

@@ -73,12 +73,16 @@ fills them as far as it can see: `identity` (tp as launcher and executor, the
 `TRAP_AGENT` / `TRAP_AGENT_VERSION`, and, for a run driven by a built-in shape, the name it
 takes from its [solution card](solution-card.md) — `identity.name`, e.g. `claude-agent-acp@0.76.0
 · sonnet`, or, for a bare command-template run with nothing else to call itself, just `cmd`.
-That name is always safe to publish as it stands: it is never the command line, and it is
-never a filesystem path either — a skill that did not resolve to a publishable `repo@sha`
-reference (which includes a skill directory that merely contains an unrelated `@`, such as an
-npm-scoped package path, and a git remote that is itself a local path) is named by its own
-last path segment alone, never by the directories that hold it, which routinely include a
-real username); `model` (the `profile.model` list, recorded as *declared* from `trap.yaml` — tp
+That name is always safe to publish as it stands, on the same rule that governs a skill's own
+name below: no value here is a string tp received, every value is reconstructed from parsed
+components. A skill reference parses into `(host, owner, repo, commit)`, and only those four
+values — never a slice of the original string — are ever published, so a credential embedded
+in a remote URL, a port number, or a Windows drive letter is not individually detected and
+stripped; none of them is ever read out of the parsed reference in the first place. A skill that does
+not parse that way (a plain directory, an `@` that was not actually a commit separator, a git
+remote that is itself a local path) is named by its own leaf alone — the one value taken from
+the original string that is always safe to publish); `model` (the `profile.model` list,
+recorded as *declared* from `trap.yaml` — tp
 does not watch the calls, so it never claims a model was *observed* — plus, for a carded run,
 the options that actually took effect, as `model.config`); `environment` (the same OS / CPU /
 RAM / Python block as `report.json`); `reproducibility` (the solution's and task's `{repo,

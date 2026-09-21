@@ -18,15 +18,22 @@ that is not a built-in shape. A solution card (§5.1), when there is one, can
 name the run itself (``identity.name``), the options that took effect
 (``model.config``), and whether an ACP run installed a skill (``skills``) --
 labels only, never the card's own command line (R12; see ``build_context``'s
-``card`` parameter). The label itself is never a filesystem path either: a
-skill that did not resolve to a publishable ``repo@sha`` reference -- which
-includes a directory that merely contains an unrelated ``@`` (an npm-scoped
-package path, an email-shaped username) and a git remote that is itself a
-local path -- is named by its own last path segment alone, not the
-directories that hold it (`card_label`, `trap.models.card`, carries this
-guarantee -- ``identity.name`` is a plain, unguarded call to it). A group the
-user switched off is ``disabled`` with the flag that did it. The site shows
-all three as what they are.
+``card`` parameter).
+
+A skill's name is held to the same rule the rest of this module already
+follows: no value on the wire is a string tp received, every published value
+is reconstructed from parsed components. `card_label`/`_skill_ref`
+(`trap.models.card`) parse a skill reference into ``(host, owner, repo,
+commit)`` and publish only those four values, glued into a fixed template --
+never a slice of the original string. A skill's embedded credentials, a URL's
+port, a Windows drive letter, a UNC share: none of these can reach the wire,
+not because each is individually detected and rejected (three rounds of
+review found leaks in exactly that approach), but because none of them is
+ever read out of the parsed reference in the first place. A skill that does
+not parse into those four components is named by its own leaf alone -- the
+one value derived from the original string that is always safe to publish.
+A group the user switched off is ``disabled`` with the flag that did it. The
+site shows all three as what they are.
 """
 
 from __future__ import annotations
@@ -36,7 +43,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
-from trap.models.card import SolutionCard, _last_segment, _resolved_skill, _unresolved_skill_name, card_label
+from trap.models.card import SolutionCard, _parse_skill, _skill_leaf, card_label
 from trap.models.cost import ModelCost, combine_costs
 from trap.models.environment import Environment
 from trap.models.provenance import Provenance
@@ -275,19 +282,24 @@ def _skills(card: SolutionCard | None) -> dict[str, Any]:
 
 
 def _skill_ref(skill: str) -> dict[str, str]:
-    """``repo@sha`` names the skill by the last path segment of ``repo``, with
-    the commit alongside it; anything else `_resolved_skill` would not vouch
-    for -- a plain directory, an "@" that was not actually a commit separator,
-    or a git remote that is itself a local path -- is named by its own last
-    path segment instead (`_unresolved_skill_name`). Shares its resolution test
-    (`_resolved_skill`, `trap.models.card`) with `card_label`, so the name shown
-    here and the name shown in ``identity.name`` for the same skill never
-    disagree."""
-    resolved = _resolved_skill(skill)
-    if resolved is None:
-        return {"name": _unresolved_skill_name(skill)}
-    repo, commit = resolved
-    return {"name": _last_segment(repo), "repo": repo, "commit": commit}
+    """A publishable reference names the skill by its repo alone, with a
+    ``repo`` field **reconstructed** as ``https://{host}/{owner}/{repo}`` --
+    never the string ``skill`` itself, so nothing that string carried and
+    `_parse_skill` chose not to extract (a URL's embedded credentials, a
+    port, a Windows drive letter) can appear here, structurally, not because
+    it was detected and filtered out. Anything `_parse_skill` would not parse
+    is named by its own last path segment instead (`_skill_leaf`), with no
+    ``repo`` or ``commit`` field at all -- the site's ``SkillRef`` requires
+    only ``name``, so that is schema-legal.
+
+    Shares its parse (`_parse_skill`, `trap.models.card`) with `card_label`,
+    so the name shown here and the name shown in ``identity.name`` for the
+    same skill never disagree."""
+    parsed = _parse_skill(skill)
+    if parsed is None:
+        return {"name": _skill_leaf(skill)}
+    host, owner, repo, commit = parsed
+    return {"name": repo, "repo": f"https://{host}/{owner}/{repo}", "commit": commit}
 
 
 def _disabled(flag: str) -> dict[str, str]:

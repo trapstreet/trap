@@ -48,20 +48,28 @@ only in a comment:
   up doing the work. A harness is free to substitute underneath (e.g. reach for a
   cheaper model for a sub-step); that substitution is a cost-tracking concern, reported
   per model in the run's cost data, and does not change the card or its digest.
-- **`skill` is a `repo@sha` reference only when it actually reads as one.** A skill's
-  value is a *reference* — publishable as-is, on a leaderboard row — exactly when it
-  splits (at its **last** `@`, so a repo URL that itself contains one, e.g.
-  `git@host:owner/repo`, is not split in the wrong place) into a non-empty repo that is
-  **not a filesystem path** (does not start with `/`) and a commit that is **lowercase
-  hex, 7 to 64 characters**. Anything else — no `@` at all; an `@` that is part of the
-  path rather than a commit separator (an npm-scoped package directory such as
-  `.../node_modules/@my-org/my-skill`, a username shaped like an email address such as
-  `/Users/eve@work/my-skill`); or a git remote that is itself a local path
-  (`git clone /Users/alice/repos/foo` glued to its own sha) — is a **local directory**,
-  named on the site by its own last path segment alone, never by the directories (or
-  the sha) that come with it. This is a display/labelling rule, not a digest rule: the
-  raw `skill` string is what gets hashed either way (see below), whichever form it
-  takes.
+- **`skill` is named on the site by reconstructing it, never by forwarding it.** This
+  is a display/labelling rule, not a digest rule — the raw `skill` string is what gets
+  hashed either way (see below) — but it governs what a client is allowed to *show*:
+  no value shown for a skill is ever a copy of (part of) the `skill` string itself;
+  every value shown is rebuilt from named components parsed out of it, glued into a
+  fixed template. Concretely: `skill` is parsed at its **last** `@` (so a repo URL that
+  itself contains one, e.g. `git@host:owner/repo`, is not split in the wrong place)
+  into a candidate repo and a candidate commit. It is a **publishable reference**
+  exactly when the commit half is **lowercase hex, 7 to 64 characters**, and the repo
+  half is an **http(s) URL** with a host and exactly two path segments (owner, repo,
+  an optional `.git` suffix on the repo segment stripped). A publishable reference is
+  shown as `owner/repo`, with the commit's first 7 characters alongside it — the host,
+  and anything the parse did not name (a URL's userinfo, a port, whatever came before
+  or after the parsed pieces), is simply never read again, so it cannot be shown by
+  accident. **A `skill` that does not parse this way is not filtered or rejected by
+  shape — it is a different case with a different display rule**: it is shown by its
+  own last path segment alone (splitting on both `/` and `\`, since nothing produces a
+  Windows-style `skill` today but nothing about the field's type rules one out either),
+  with no repo or commit shown at all. This one rule is what keeps a git remote's
+  embedded credentials, a URL's port, and a Windows drive letter or UNC share off the
+  site without naming any of them specifically: none of the three is a component the
+  parse ever names, so none of the three is ever available to show, in either case.
 
 ## Canonicalisation and the digest
 
