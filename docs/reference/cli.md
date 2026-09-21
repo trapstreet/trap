@@ -67,7 +67,7 @@ upload unchanged.
 [shapes](../guides/built-in-shapes.md), `tp run` reads back the card it printed on stderr and
 records it in `report.json` as `provenance.solution.adapter`, with the digest that names it as
 `provenance.solution.adapter_digest` ([solution card](solution-card.md)). A solution that isn't
-a built-in shape carries neither field.
+a built-in shape carries `null` for both.
 
 **What tp reports about the run.** Beside the progress events, `tp run` *describes* the run
 to the site twice — once when it opens and once when it ends (`POST
