@@ -16,9 +16,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+
+#: What actually distinguishes a `repo@sha` reference from an ordinary path that
+#: happens to contain an "@" (an npm-scoped package directory, a username shaped
+#: like an email address): the tail must read as a git commit sha. Lowercase hex,
+#: 7 to 64 characters -- the same bounds git itself accepts for an abbreviated-to-
+#: full sha. A separator's mere presence is not enough; round 2 of review found
+#: that `"@my-org/my-skill"` and `"eve@work/my-skill"` both satisfied "has an @
+#: with something on both sides" and were published with a real username in them.
+_COMMIT_RE = re.compile(r"[0-9a-f]{7,64}")
 
 #: Every card field except ``name``: renaming a card must not change its identity.
 DIGEST_FIELDS = (
@@ -111,18 +121,19 @@ def card_label(card: SolutionCard) -> str:
     - ``cmd``/``setup`` are not in the fallback chain at all, so a bare
       ``cmd``-shaped card with no name, agent or provider is named by its shape
       alone (``"cmd"``), never by its command line.
-    - a skill is named ``owner/repo@sha7`` only when it actually reads as
-      ``repo@sha`` (`_resolved_skill`); a skill that never resolved to a git
-      remote -- the routine outcome for a local directory that is not itself a
-      git checkout, per ``SolutionCard.skill``'s own docstring -- is named by
-      its own last path segment alone (`_last_segment`), never by the
-      directories that hold it (which routinely include a real username).
+    - a skill is named ``owner/repo@sha7`` only when `_resolved_skill` calls it
+      a *publishable* reference; anything else -- a plain directory, an "@"
+      that turned out not to be a commit separator at all (an npm-scoped
+      package directory, a username shaped like an email address), or a git
+      remote that is itself a local path -- is named by its own last path
+      segment alone (`_unresolved_skill_name`), never by the directories that
+      hold it (which routinely include a real username).
 
     This is what lets a second caller (a ``tp submit`` preview, ``tp inspect``,
     a console line) call this function and inherit both guarantees for free,
     rather than re-deriving them. `live.context`'s ``skills.installed`` uses the
-    same two helpers, so the name shown there for a given skill and the name
-    shown here for the same skill never disagree.
+    same helpers, so the name shown there for a given skill and the name shown
+    here for the same skill never disagree.
     """
     if card.name:
         return card.name
@@ -136,31 +147,68 @@ def card_label(card: SolutionCard) -> str:
             short = repo.rsplit("/", 2)[-2:] if "/" in repo else [repo]
             parts.append("/".join(short) + f"@{commit[:7]}")
         else:
-            parts.append(_last_segment(card.skill))
+            parts.append(_unresolved_skill_name(card.skill))
     return " · ".join(parts)
 
 
-def _resolved_skill(skill: str) -> tuple[str, str] | None:
-    """``(repo, commit)`` when ``skill`` reads as ``repo@sha``; ``None`` for
-    anything else -- most often a local directory that never resolved to a git
-    remote. The one test that decides whether a skill is named by its full
-    reference or only its last path segment, shared by `card_label` and
-    `live.context`'s ``skills.installed`` so the two can never disagree about
-    which skills are "resolved".
+def _skill_parts(skill: str) -> tuple[str, str] | None:
+    """``(repo, commit)`` when the tail of ``skill`` -- split at its LAST "@",
+    never the first, so a repo URL that itself contains one (``git@host:a/b``)
+    is not split in the wrong place -- reads as a git commit sha (`_COMMIT_RE`).
+    ``None`` for anything else: most often an ordinary filesystem path with no
+    "@" in it at all, or one whose "@" belongs to the path itself (an npm-scoped
+    package directory, an email-shaped username) rather than to a commit.
 
-    Two separate ``if`` statements, deliberately, rather than one compound
-    ``if sep and commit``: a skill with an "@" but nothing after it
-    (``"repo@"``) is its own input class, distinct from "no @ at all" -- and a
-    single compound condition can reach 100% branch coverage without a test
-    ever landing on that combination, since branch coverage tracks the whole
-    expression's outcome, not which half of it produced a False.
+    This says only "the tail looks like a commit". Whether the repo half is
+    something safe to *publish* is a separate question `_resolved_skill` asks
+    next -- kept apart so `_unresolved_skill_name` can still tell a local path
+    that merely isn't publishable (``/repo/path@<sha>``, still names its own
+    directory) from one whose "@" was never a commit reference in the first
+    place (``/repo/path@notasha``, names its own last segment as a whole).
     """
-    repo, sep, commit = skill.partition("@")
+    repo, sep, commit = skill.rpartition("@")
     if not sep:
         return None
-    if not commit:
+    if not _COMMIT_RE.fullmatch(commit):
+        return None
+    if not repo:
         return None
     return repo, commit
+
+
+def _resolved_skill(skill: str) -> tuple[str, str] | None:
+    """``(repo, commit)`` when ``skill`` is a *publishable* ``repo@sha``
+    reference: everything `_skill_parts` requires, plus the repo must not
+    itself be a filesystem path. A git remote CAN legitimately be a local path
+    (``git clone /Users/alice/repos/foo``), and such a "remote" is exactly as
+    unpublishable as an unresolved directory -- rejecting it here is the
+    behaviour that is wanted, not a compromise a future reader should "fix"
+    back.
+
+    Shared by `card_label` and `live.context`'s ``skills.installed`` so the two
+    can never disagree about which skills are "resolved".
+    """
+    parts = _skill_parts(skill)
+    if parts is None:
+        return None
+    repo, commit = parts
+    if repo.startswith("/"):
+        return None
+    return repo, commit
+
+
+def _unresolved_skill_name(skill: str) -> str:
+    """The name shown for a skill `_resolved_skill` would not vouch for. When
+    ``skill`` still parses as ``<directory>@<sha>`` (a local path used as a git
+    remote, rejected only because it is a path), the sha is not the skill's own
+    name -- its directory's last segment is, exactly as if no sha had ever been
+    appended. Anything else that looks unresolved -- no "@" at all, or a tail
+    that is not a plausible commit -- is an ordinary filesystem path with
+    nothing to strip, so its own last segment is used whole."""
+    parts = _skill_parts(skill)
+    if parts is not None:
+        return _last_segment(parts[0])
+    return _last_segment(skill)
 
 
 def _last_segment(path: str) -> str:

@@ -32,13 +32,13 @@ change its identity.
 | `model` | yes | The model that was **asked for**. What a harness actually used underneath (a coding agent may reach for a smaller model on its own) is reported per model in the run's cost, not here — see below. |
 | `provider` | yes | Model-direct only: which vendor API the request went to. |
 | `options` | yes | Agent options that **actually took effect**, as `id -> value`. An option the chosen model does not offer is skipped when the case runs, so it never lands here — see below. |
-| `skill` | yes | The skill that was installed, as `repo@sha` when the CLI could resolve one. |
+| `skill` | yes | The skill that was installed, as `repo@sha` when the CLI could resolve one — see below. |
 | `cmd` | yes | The command template (`cmd` shape). |
 | `setup` | yes | The one-off install line a program needed before it could run. |
 | `timeout` | yes | The per-case deadline the shape ran under, in **whole seconds** (an integer, never a fraction — see below). |
 | `name` | **no** | Display only — becomes `solutions.title` on the site. Two cards that differ only in `name` have the same digest. |
 
-Two fields carry a rule that is easy to get backwards, so it is stated here rather than
+Three fields carry a rule that is easy to get backwards, so it is stated here rather than
 only in a comment:
 
 - **`options` holds the values that took effect**, not the values requested. If a
@@ -48,6 +48,20 @@ only in a comment:
   up doing the work. A harness is free to substitute underneath (e.g. reach for a
   cheaper model for a sub-step); that substitution is a cost-tracking concern, reported
   per model in the run's cost data, and does not change the card or its digest.
+- **`skill` is a `repo@sha` reference only when it actually reads as one.** A skill's
+  value is a *reference* — publishable as-is, on a leaderboard row — exactly when it
+  splits (at its **last** `@`, so a repo URL that itself contains one, e.g.
+  `git@host:owner/repo`, is not split in the wrong place) into a non-empty repo that is
+  **not a filesystem path** (does not start with `/`) and a commit that is **lowercase
+  hex, 7 to 64 characters**. Anything else — no `@` at all; an `@` that is part of the
+  path rather than a commit separator (an npm-scoped package directory such as
+  `.../node_modules/@my-org/my-skill`, a username shaped like an email address such as
+  `/Users/eve@work/my-skill`); or a git remote that is itself a local path
+  (`git clone /Users/alice/repos/foo` glued to its own sha) — is a **local directory**,
+  named on the site by its own last path segment alone, never by the directories (or
+  the sha) that come with it. This is a display/labelling rule, not a digest rule: the
+  raw `skill` string is what gets hashed either way (see below), whichever form it
+  takes.
 
 ## Canonicalisation and the digest
 

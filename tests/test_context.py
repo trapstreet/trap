@@ -503,6 +503,30 @@ def test_skill_ref_and_card_label_agree_on_an_unresolved_skill():
     assert "alice" not in label
 
 
+def test_identity_and_skills_installed_never_leak_a_scoped_package_path():
+    # round 2: an npm-scoped skill directory's "@" has nothing on both sides of
+    # it that make it a commit -- `_resolved_skill` must not be fooled by the
+    # separator's mere presence, on either surface that names the skill.
+    card = ACP_CARD.model_copy(update={"skill": "/Users/alice/.cache/node_modules/@my-org/my-skill"})
+    patch = _context(card=card)
+    name = patch["identity"]["name"]
+    installed_name = patch["skills"]["installed"][0]["name"]
+    assert "alice" not in name and "/" not in name
+    assert installed_name == "my-skill"
+    assert name.endswith(installed_name)
+
+
+def test_identity_and_skills_installed_never_leak_an_email_shaped_path():
+    # round 2: the other way an unrelated "@" gets into a path.
+    card = ACP_CARD.model_copy(update={"skill": "/Users/eve@work/my-skill"})
+    patch = _context(card=card)
+    name = patch["identity"]["name"]
+    installed_name = patch["skills"]["installed"][0]["name"]
+    assert "eve" not in name and "/" not in name
+    assert installed_name == "my-skill"
+    assert name.endswith(installed_name)
+
+
 def test_a_card_without_options_adds_no_model_config():
     # The card that is not ACP (above) also carries no options -- covers the
     # branch where a card exists but `card.options` is empty, distinctly from

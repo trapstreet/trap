@@ -10,6 +10,7 @@ import pytest
 from trap.models.card import (
     DIGEST_FIELDS,
     SolutionCard,
+    _resolved_skill,
     canonical_card_json,
     card_digest,
     card_label,
@@ -118,6 +119,75 @@ def test_the_label_never_leaks_the_command_or_a_token_reference():
     label = card_label(card)
     assert label == "cmd"
     assert "alice" not in label and "OPENAI_API_KEY" not in label and "main.py" not in label
+
+
+def test_the_label_never_leaks_a_scoped_package_path_that_merely_contains_an_at_sign():
+    # round 2: an npm-scoped skill directory (`@my-org/...`) has an "@" with
+    # something on both sides of it, same as a real `repo@sha` -- but it is not
+    # a commit separator at all. `_resolved_skill` must tell the two apart by
+    # what the tail actually looks like, not by the mere presence of a "@".
+    card = SolutionCard(
+        shape="acp",
+        shape_version=1,
+        agent="pkg@1",
+        model="sonnet",
+        skill="/Users/alice/.cache/node_modules/@my-org/my-skill",
+    )
+    label = card_label(card)
+    assert label == "pkg@1 · sonnet · my-skill"
+    assert "alice" not in label and "/" not in label
+
+
+def test_the_label_never_leaks_an_email_shaped_username_in_a_path():
+    # round 2: same failure mode, different reason the "@" is there -- a
+    # username that happens to look like an email address.
+    card = SolutionCard(
+        shape="acp",
+        shape_version=1,
+        agent="pkg@1",
+        model="sonnet",
+        skill="/Users/eve@work/my-skill",
+    )
+    label = card_label(card)
+    assert label == "pkg@1 · sonnet · my-skill"
+    assert "eve" not in label and "/" not in label
+
+
+def test_the_label_names_a_local_path_remote_by_its_own_directory_not_its_sha():
+    # A git remote CAN legitimately be a local filesystem path
+    # (`git clone /Users/alice/repos/foo`), and such a "remote" is exactly as
+    # unpublishable as any other local directory -- rejecting it is the
+    # behaviour that is wanted, not a compromise a future reader should "fix"
+    # back. Its own directory name ("foo"), not the sha glued onto it, is what
+    # is safe to show.
+    sha = "a" * 40
+    card = SolutionCard(
+        shape="acp",
+        shape_version=1,
+        agent="pkg@1",
+        model="sonnet",
+        skill=f"/Users/alice/repos/foo@{sha}",
+    )
+    label = card_label(card)
+    assert label == "pkg@1 · sonnet · foo"
+    assert "alice" not in label and "/" not in label
+
+
+@pytest.mark.parametrize("commit", ["main", "v1.2.0"])
+def test_a_non_hex_commit_is_treated_as_unresolved(commit):
+    # "main" and "v1.2.0" are the kind of thing that sits after an "@" in
+    # ordinary text without being a commit sha at all -- neither is lowercase
+    # hex, so `_resolved_skill` must not treat either as one.
+    assert _resolved_skill(f"repo@{commit}") is None
+
+
+def test_a_skill_with_an_empty_repo_before_the_at_sign_is_unresolved():
+    # The third condition the ruling names alongside "has a separator" and "the
+    # commit looks like hex": the repo half must also be non-empty. Its own
+    # statement, its own test -- a single `sep and repo` combined with the
+    # other checks could reach 100% branch coverage without this input ever
+    # running, the same lesson as round 1's `sep and commit`.
+    assert _resolved_skill("@1234567890") is None
 
 
 def test_the_label_falls_back_to_the_provider_when_there_is_no_agent():

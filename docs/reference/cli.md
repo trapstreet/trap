@@ -74,9 +74,11 @@ fills them as far as it can see: `identity` (tp as launcher and executor, the
 takes from its [solution card](solution-card.md) — `identity.name`, e.g. `claude-agent-acp@0.76.0
 · sonnet`, or, for a bare command-template run with nothing else to call itself, just `cmd`.
 That name is always safe to publish as it stands: it is never the command line, and it is
-never a filesystem path either — a skill that never resolved to a git remote is named by its
-own last path segment, never by the directories that hold it, which routinely include a real
-username); `model` (the `profile.model` list, recorded as *declared* from `trap.yaml` — tp
+never a filesystem path either — a skill that did not resolve to a publishable `repo@sha`
+reference (which includes a skill directory that merely contains an unrelated `@`, such as an
+npm-scoped package path, and a git remote that is itself a local path) is named by its own
+last path segment alone, never by the directories that hold it, which routinely include a
+real username); `model` (the `profile.model` list, recorded as *declared* from `trap.yaml` — tp
 does not watch the calls, so it never claims a model was *observed* — plus, for a carded run,
 the options that actually took effect, as `model.config`); `environment` (the same OS / CPU /
 RAM / Python block as `report.json`); `reproducibility` (the solution's and task's `{repo,
