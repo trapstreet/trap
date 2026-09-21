@@ -754,7 +754,9 @@ def sync(
     outcome = sync_run(run_dir, server_override=server, claim=claim)
     # Sync reports; it never re-grades. Whatever happened here, the run's own
     # exit code was decided when it ran, and a queue left on disk is not an
-    # error — only a refusal (wrong account, wrong server, rejected token) is.
+    # error — only a refusal is. A refusal is whatever there is no point coming
+    # back for: the wrong account, the wrong server, a rejected token, or a
+    # graded run the site has already settled.
     if outcome.refused:
         raise _die(outcome.refusal)
     for line in outcome.lines:

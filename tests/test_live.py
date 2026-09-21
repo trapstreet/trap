@@ -2464,6 +2464,23 @@ def test_tp_sync_prints_both_halves_and_exits_two_when_the_answers_refuse(make_p
     assert result.exit_code == 2
     assert "rejected the CLI token" in result.output
 
+    # A run the site has already settled is the other way to exit 2, and the
+    # one that is not about the credential: permanent, so there is no later
+    # sync worth advising.
+    _graded(run_dir, queued=("c4",))
+    receipt = {
+        "results": [
+            {"case_id": "c3", "status": "rejected", "reason": "RUN_SETTLED"},
+            {"case_id": "c4", "status": "rejected", "reason": "RUN_SETTLED"},
+        ]
+    }
+    monkeypatch.setattr("trap.live.sync.LiveClient", lambda *_a, **_k: _SyncClient(answers=[receipt]))
+    result = runner.invoke(app, ["sync"])
+    assert result.exit_code == 2
+    assert "will take no more answers for this run" in result.output
+    assert "2 too late" in result.output  # counted, not listed case by case
+    assert "a corrected attempt is a new run" in result.output
+
 
 # -- verifying an identity, for either sidecar --------------------------------
 
