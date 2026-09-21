@@ -52,9 +52,18 @@ AnswerState = Literal["queued", "accepted", "duplicate", "rejected", "skipped", 
 #: The contract test checks these against the web source.
 RECEIPT_STATUSES: frozenset[str] = frozenset({"accepted", "duplicate", "rejected", "skipped"})
 
+#: The site's run is closed -- the worker finalised it, or the reaper closed it
+#: after hours of silence -- and it will never take another answer. Unlike every
+#: other reason this is a fact about the *run*, not the case: the bulk route
+#: tests it once, before its loop, and rejects every item of the request with it.
+#: So one case carrying it says the same thing as all of them, and the answers
+#: behind it are not worth sending. A corrected attempt is a new run.
+RUN_SETTLED = "RUN_SETTLED"
+
 #: Every reason the site can give for an answer it did not accept -- the
-#: per-case ``error`` of its submit path plus the two bulk-only skips. The
-#: contract test checks these against the web source; the summary quotes them.
+#: per-case ``error`` of its submit path, the two bulk-only skips, and the
+#: whole-run refusal above. The contract test checks these against the web
+#: source; the summary quotes them.
 KNOWN_REASONS: frozenset[str] = frozenset(
     {
         "NO_SUCH_CASE",
@@ -64,6 +73,7 @@ KNOWN_REASONS: frozenset[str] = frozenset(
         "STALE_LEASE",
         "SOLVER_ERRORED",
         "NO_ANSWER",
+        RUN_SETTLED,
     }
 )
 
@@ -306,6 +316,12 @@ class Settled:
     def any(self) -> bool:
         return bool(self.accepted or self.duplicate or self.rejected or self.skipped)
 
+    @property
+    def run_settled(self) -> bool:
+        """The site closed the run: this request bounced whole, and so will the
+        next. Read off one case because the site applies it to every case."""
+        return any(reason == RUN_SETTLED for _, reason in self.rejected)
+
 
 def apply_receipt(outbox: AnswerOutbox, sent: list[AnswerRecord], body: dict[str, Any]) -> Settled:
     """Settle each sent case by what the site said about it.
@@ -412,6 +428,9 @@ class ResendOutcome:
     skipped: list[tuple[str, str]] = field(default_factory=list)
     unreadable: list[tuple[str, str]] = field(default_factory=list)
     error: LiveApiError | None = None
+    #: The site said the run is settled. Whatever is still queued stays queued,
+    #: and the caller should stop rather than schedule another pass.
+    run_settled: bool = False
 
 
 def resend(
@@ -423,9 +442,10 @@ def resend(
     batch: int = MAX_BATCH,
 ) -> ResendOutcome:
     """Post everything still queued, oldest first, in batches, settling each by
-    its receipt. Stops at the first request the site does not take, and at the
-    first receipt that settles nothing -- the next wake starts again from the
-    queue. Never raises; the failure travels in the outcome."""
+    its receipt. Stops at the first request the site does not take, at the first
+    receipt that settles nothing, and at the first receipt saying the run is
+    settled -- the next wake starts again from the queue. Never raises; the
+    failure travels in the outcome."""
     pending = outbox.pending()
     outcome = ResendOutcome()
     for start in range(0, len(pending), batch):
@@ -450,6 +470,12 @@ def resend(
         outcome.delivered += len(settled.accepted) + len(settled.duplicate)
         outcome.rejected.extend(settled.rejected)
         outcome.skipped.extend(settled.skipped)
+        if settled.run_settled:
+            # Not this batch's problem: the site's run is closed, so the next
+            # batch would bounce identically. Stop and let the caller say so,
+            # rather than spend the rest of the queue learning it again.
+            outcome.run_settled = True
+            break
         if not settled.any:
             break
     outcome.remaining = len(outbox.pending())
@@ -462,19 +488,33 @@ def shortfall(
     unreadable: list[tuple[str, str]],
 ) -> str:
     """The cases the site will never grade from this run, for a summary line:
-    empty when there are none, else the lists and what they mean."""
+    empty when there are none, else the lists and what they mean.
+
+    ``RUN_SETTLED`` is counted rather than listed, and takes the tail. It is one
+    fact about the run repeated once per case, so naming each case would say the
+    same thing N times; and the run it names is not waiting for these answers --
+    it is closed, which is the opposite of what the usual tail claims.
+    """
+    late = [case_id for case_id, reason in rejected if reason == RUN_SETTLED]
     parts = [
         f"{len(items)} {label} ({_listed(items)})"
         for label, items in (
             ("skipped by the site", skipped),
-            ("rejected", rejected),
+            ("rejected", [item for item in rejected if item[1] != RUN_SETTLED]),
             ("unreadable here", unreadable),
         )
         if items
     ]
+    if late:
+        parts.append(f"{len(late)} too late")
     if not parts:
         return ""
-    return "; " + "; ".join(parts) + " — the site's run stays unfinished"
+    tail = (
+        " — the site had already settled this run; a corrected attempt is a new run"
+        if late
+        else " — the site's run stays unfinished"
+    )
+    return "; " + "; ".join(parts) + tail
 
 
 def _listed(items: list[tuple[str, str]], limit: int = 5) -> str:

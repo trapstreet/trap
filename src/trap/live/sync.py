@@ -454,6 +454,16 @@ def _deliver_answers(
     if outcome.error is not None:
         return _answers_failure(outcome.error, graded, outcome)
     detail = shortfall(outcome.rejected, outcome.skipped, outcome.unreadable)
+    if outcome.run_settled:
+        # Checked before the counts: a settled run empties the queue by
+        # rejecting it, and `remaining == 0` would otherwise read as delivered.
+        # Refused rather than stalled -- there is nothing to come back for.
+        return AnswerSyncReport(
+            status="refused",
+            delivered=outcome.delivered,
+            remaining=outcome.remaining,
+            message=f"{graded.url} will take no more answers for this run{detail}.",
+        )
     if outcome.remaining == 0:
         return AnswerSyncReport(
             status="delivered",

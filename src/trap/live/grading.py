@@ -298,6 +298,14 @@ class SiteGrader:
                 f"{outcome.remaining} answer(s) not submitted; kept in this run's answers outbox for tp sync"
             )
             return
+        if outcome.run_settled:
+            # The site closed the run while this one was still producing
+            # answers. Retrying is not slow here, it is impossible: every later
+            # batch bounces the same way, and so would tp sync. Stop for good.
+            self._stop(
+                f"site grading: {self._graded.url} is already settled — no more answers are sent for this run"
+            )
+            return
         if outcome.remaining:
             self._schedule_retry(now, outcome.error)
 
