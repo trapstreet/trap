@@ -127,13 +127,14 @@ def card_label(card: SolutionCard) -> str:
       ``cmd``-shaped card with no name, agent or provider is named by its shape
       alone (``"cmd"``): built from a fixed literal, never from ``card.cmd``.
     - a skill is named ``owner/repo@sha7`` only when `_parse_skill` reads it as
-      a full reference and hands back its four parts (authority, owner, repo,
-      commit) -- and even then, only ``owner``, ``repo`` and a slice of
-      ``commit`` are used; ``authority`` (host, and a port when the input had
-      one) is used by `live.context`'s ``skills.installed``, not here, and
-      everything `_parse_skill` chose not to extract -- a URL's userinfo, a
-      query string, a fragment, anything before or after the parsed pieces --
-      simply never reaches a variable either function reads. Anything
+      a full reference and hands back its five parts (scheme, authority,
+      owner, repo, commit) -- and even then, only ``owner``, ``repo`` and a
+      slice of ``commit`` are used; ``scheme`` and ``authority`` (host, and a
+      port when the input had one) are used by `live.context`'s
+      ``skills.installed``, not here, and everything `_parse_skill` chose not
+      to extract -- a URL's userinfo, a query string, a fragment, anything
+      before or after the parsed pieces -- simply never reaches a variable
+      either function reads. Anything
       `_parse_skill` would not parse -- a plain directory, an "@" that was not
       a commit separator, a git remote that is itself a local path, a Windows
       or UNC path, an owner or repo segment with a control character in it --
@@ -158,30 +159,40 @@ def card_label(card: SolutionCard) -> str:
     if card.skill:
         parsed = _parse_skill(card.skill)
         if parsed is not None:
-            _authority, owner, repo, commit = parsed
+            _scheme, _authority, owner, repo, commit = parsed
             parts.append(f"{owner}/{repo}@{commit[:7]}")
         else:
             parts.append(_skill_leaf(card.skill))
     return " · ".join(parts)
 
 
-def _parse_skill(skill: str) -> tuple[str, str, str, str] | None:
-    """``(authority, owner, repo, commit)`` when ``skill`` is a fully
+def _parse_skill(skill: str) -> tuple[str, str, str, str, str] | None:
+    """``(scheme, authority, owner, repo, commit)`` when ``skill`` is a fully
     specified, publishable reference -- an http(s) URL naming exactly one
     owner and one repo, followed by ``@<sha>`` where the sha is lowercase
-    hex, 7 to 64 characters. ``authority`` is the host `_authority` rebuilds
-    -- re-bracketed if it is an IPv6 literal, with the port appended when the
-    input had one -- never the host alone: round 4 of review found that
-    reading ``.hostname`` and never ``.port`` published a URL pointing at a
-    different endpoint than the input named (a self-hosted remote on a
-    non-default port is reachable through real code, not a crafted string --
-    see `_authority`), and that ``.hostname`` alone drops the brackets an
-    IPv6 literal needs to remain a valid URL.
+    hex, 7 to 64 characters. ``scheme`` is ``"http"`` or ``"https"``,
+    whichever the input actually used -- round 5 of review found that always
+    publishing ``https://`` regardless of the input's own scheme was the same
+    defect class as round 4's dropped port: a reconstruction that points
+    somewhere the input did not, since an internal remote that only serves
+    plain ``http`` would publish a link its own server does not answer.
+    ``authority`` is the host `_authority` rebuilds -- re-bracketed if it is
+    an IPv6 literal, with the port appended when the input had one -- never
+    the host alone: round 4 of review found that reading ``.hostname`` and
+    never ``.port`` published a URL pointing at a different endpoint than the
+    input named (a self-hosted remote on a non-default port is reachable
+    through real code, not a crafted string -- see `_authority`), and that
+    ``.hostname`` alone drops the brackets an IPv6 literal needs to remain a
+    valid URL.
 
     ``None`` for anything else: a plain filesystem path (POSIX, Windows, or
-    UNC -- none of them parses as a URL at all); an "@" that belongs to the
-    path itself rather than to a commit (an npm-scoped package directory, an
-    email-shaped username); a git remote that is itself a local path
+    UNC -- none of them parses as a URL at all); a scheme other than
+    ``http``/``https`` (an ``ssh://`` or ``git://`` remote -- or a scp-style
+    one, already normalised to an http(s) form before it ever reaches a card
+    -- has no business becoming an ``https://`` link; the leaf is the honest
+    answer for it, the same as for a filesystem path); an "@" that belongs to
+    the path itself rather than to a commit (an npm-scoped package directory,
+    an email-shaped username); a git remote that is itself a local path
     (rejected for the same reason a bare directory is: it has no host to
     publish); a URL whose port is not a plain non-negative integer in range
     (``urlsplit`` raises rather than returning ``None`` for one of those, so
@@ -199,7 +210,7 @@ def _parse_skill(skill: str) -> tuple[str, str, str, str] | None:
     caller from handing this a URL with real HTTP Basic credentials in it)
     is not split at the wrong point.
 
-    The four values returned here are the only things about ``skill`` that
+    The five values returned here are the only things about ``skill`` that
     ever reach the wire, and they are read out of ``urlsplit``'s own parsed
     fields -- ``.scheme``, ``.hostname``, ``.port``, ``.path``'s segments --
     never by slicing the original string, and never from ``.netloc`` (which
@@ -216,7 +227,8 @@ def _parse_skill(skill: str) -> tuple[str, str, str, str] | None:
     if not _COMMIT_RE.fullmatch(commit):
         return None
     parsed = urlsplit(repo_url)
-    if parsed.scheme not in ("http", "https"):
+    scheme = parsed.scheme
+    if scheme not in ("http", "https"):
         return None
     host = parsed.hostname
     if not host:
@@ -236,7 +248,7 @@ def _parse_skill(skill: str) -> tuple[str, str, str, str] | None:
         return None
     if _CONTROL_RE.search(repo):
         return None
-    return _authority(host, port), owner, repo, commit
+    return scheme, _authority(host, port), owner, repo, commit
 
 
 def _authority(host: str, port: int | None) -> str:

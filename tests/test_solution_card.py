@@ -227,7 +227,7 @@ def test_a_dot_git_suffix_on_a_real_repo_name_is_stripped_not_rejected():
     # treated as poison -- a repo segment that is MORE than just the suffix
     # still resolves normally.
     commit = "a" * 40
-    assert _parse_skill(f"https://github.com/a/b.git@{commit}") == ("github.com", "a", "b", commit)
+    assert _parse_skill(f"https://github.com/a/b.git@{commit}") == ("https", "github.com", "a", "b", commit)
 
 
 def test_a_non_default_port_is_kept_in_the_parsed_authority():
@@ -240,7 +240,7 @@ def test_a_non_default_port_is_kept_in_the_parsed_authority():
     # correctly absent does not make the published endpoint correct.
     commit = "a" * 40
     parsed = _parse_skill(f"https://user:pass@gitlab.internal.example.com:9999/owner/repo@{commit}")
-    assert parsed == ("gitlab.internal.example.com:9999", "owner", "repo", commit)
+    assert parsed == ("https", "gitlab.internal.example.com:9999", "owner", "repo", commit)
 
 
 def test_an_ipv6_host_keeps_its_brackets():
@@ -251,15 +251,33 @@ def test_an_ipv6_host_keeps_its_brackets():
     # The brackets must be added back, not merely left wherever `.hostname`
     # happened to put them (nowhere).
     commit = "a" * 40
-    assert _parse_skill(f"https://[::1]/a/b@{commit}") == ("[::1]", "a", "b", commit)
+    assert _parse_skill(f"https://[::1]/a/b@{commit}") == ("https", "[::1]", "a", "b", commit)
 
 
 def test_an_ipv6_host_with_a_port_keeps_both():
     commit = "a" * 40
     assert _parse_skill(f"https://[2001:db8::1]:8443/a/b@{commit}") == (
+        "https",
         "[2001:db8::1]:8443",
         "a",
         "b",
+        commit,
+    )
+
+
+def test_the_published_scheme_matches_the_input_instead_of_being_hardcoded():
+    # round 5, closing the exception named in round 4's report: `_skill_ref`
+    # used to build every reconstructed URL as `https://...` regardless of
+    # whether the input was `http://` -- the same defect class as the
+    # dropped port, a reconstruction that points somewhere the input did
+    # not. An `http`-only internal remote must publish an `http://` link,
+    # not one the server may not answer.
+    commit = "a" * 40
+    assert _parse_skill(f"http://gitlab.internal.example.com/owner/repo@{commit}") == (
+        "http",
+        "gitlab.internal.example.com",
+        "owner",
+        "repo",
         commit,
     )
 

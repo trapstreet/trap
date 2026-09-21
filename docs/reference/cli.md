@@ -76,18 +76,23 @@ takes from its [solution card](solution-card.md) — `identity.name`, e.g. `clau
 That name is always safe to publish as it stands, on the same rule that governs a skill's own
 name below: no value here is a string tp received, every value is reconstructed from parsed
 components. A skill reference parses into scheme, host, port, owner, repo and commit, and the
-published `repo` URL is rebuilt from the host, the port *when the input had one*, the owner and
-the repo — an IPv6 host re-bracketed, since parsing strips the brackets `[::1]`-style literals
-need — never from a slice of the original string. A credential embedded in a remote URL is
-absent for a different reason than the port is present: userinfo is simply never read out of
-the parsed reference at all, so there is nothing to strip; a port is read and kept, because the
-published URL is meant to point at the endpoint the input actually named. A Windows drive
-letter or a UNC share never reaches the wire either, but for a third reason — neither one is a
-URL to begin with, so there is no host or port to parse out of it. Any skill that does not parse
-into those parts (a plain directory, an `@` that was not actually a commit separator, a git
-remote that is itself a local path) is named by its own leaf alone — the one value taken from
-the original string that is always safe to publish, control characters stripped); `model` (the
-`profile.model` list, recorded as *declared* from `trap.yaml` — tp
+published `repo` URL is rebuilt as `{scheme}://{host}[:{port}]/{owner}/{repo}` — the scheme
+kept *as given* (`http` stays `http`; it is never upgraded to `https`, which would publish a
+link an http-only internal remote does not answer), the port included only when the input had
+one, an IPv6 host re-bracketed since parsing strips the brackets `[::1]`-style literals need —
+never from a slice of the original string. A credential embedded in a remote URL is absent for
+a different reason than the scheme and the port are present: userinfo is simply never read out
+of the parsed reference at all, so there is nothing to strip; the scheme and the port are read
+and kept as they were, because the published URL is meant to point at the endpoint the input
+actually named. A `git://`/`ssh://` remote (or scp-style, already normalised to an http(s) form
+before it reaches a card) has its scheme read too, but it is not one of the two ever
+republished, so it falls to the same case as anything else that does not parse. A Windows drive
+letter or a UNC share never reaches the wire either, but for a different reason again — neither
+one is a URL to begin with, so there is no scheme, host or port to parse out of it. Any skill
+that does not parse into those parts (a plain directory, an `@` that was not actually a commit
+separator, a git remote that is itself a local path) is named by its own leaf alone — the one
+value taken from the original string that is always safe to publish, control characters
+stripped); `model` (the `profile.model` list, recorded as *declared* from `trap.yaml` — tp
 does not watch the calls, so it never claims a model was *observed* — plus, for a carded run,
 the options that actually took effect, as `model.config`); `environment` (the same OS / CPU /
 RAM / Python block as `report.json`); `reproducibility` (the solution's and task's `{repo,

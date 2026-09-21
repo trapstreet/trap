@@ -599,6 +599,22 @@ def test_skills_installed_rebrackets_an_ipv6_host():
     assert patch["identity"]["name"] == "claude-agent-acp@0.76.0 · sonnet · a/b@" + commit[:7]
 
 
+def test_skills_installed_keeps_an_http_scheme_rather_than_upgrading_it():
+    # round 5, closing the exception named in round 4's report: an
+    # http-only internal remote must publish an `http://` link, not one the
+    # server may not answer -- the reconstruction must never point somewhere
+    # the input did not, whether that is the wrong port (round 4) or the
+    # wrong scheme (round 5).
+    commit = "a" * 40
+    card = ACP_CARD.model_copy(update={"skill": f"http://gitlab.internal.example.com/owner/repo@{commit}"})
+    patch = _context(card=card)
+    assert patch["skills"] == {
+        "installed": [
+            {"name": "repo", "repo": "http://gitlab.internal.example.com/owner/repo", "commit": commit}
+        ]
+    }
+
+
 def test_a_card_without_options_adds_no_model_config():
     # The card that is not ACP (above) also carries no options -- covers the
     # branch where a card exists but `card.options` is empty, distinctly from

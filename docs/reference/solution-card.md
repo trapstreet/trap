@@ -57,24 +57,33 @@ only in a comment:
   itself contains one, e.g. `git@host:owner/repo`, is not split in the wrong place)
   into a candidate repo and a candidate commit. It is a **publishable reference**
   exactly when the commit half is **lowercase hex, 7 to 64 characters**, and the repo
-  half is an **http(s) URL** with a host and exactly two path segments (owner, repo, an
-  optional `.git` suffix on the repo segment stripped, and a well-formed port when one
-  is present — an implementation that raises on a malformed port, as a JS `URL` getter
-  does not but a naive integer-cast would, should treat that the same as "does not
-  parse"). A publishable reference is shown as `owner/repo`, with the commit's first 7
-  characters alongside it, and its **`repo` URL is rebuilt as `https://<host>/<owner>/<repo>`
-  — with the port appended when the input had one, and an IPv6 host re-bracketed** (a
-  bare IPv6 address is not a valid URL host; `new URL(...).hostname` in JavaScript
-  strips the brackets exactly as Python's URL parser does, so both must be added back
-  by hand, not left wherever the parser happened to put them, which is nowhere). A
-  credential embedded in the input is absent from that URL for a different reason than
-  the host and port are present in it: userinfo is a component the parse never reads at
-  all, so there is nothing to strip, while the port is a component the parse does read
-  and does publish, because the rebuilt URL is meant to be the endpoint the input
-  actually named — one is "never read", the other is "read and kept", and treating them
-  as the same rule is exactly the mistake that silently drops the port. **A `skill` that
-  does not parse this way is not filtered or rejected by shape — it is a different case
-  with a different display rule**: it is shown by its own last path segment alone
+  half is an **http(s) URL** — its scheme literally `http` or `https`, nothing else —
+  with a host and exactly two path segments (owner, repo, an optional `.git` suffix on
+  the repo segment stripped, and a well-formed port when one is present — an
+  implementation that raises on a malformed port, as a JS `URL` getter does not but a
+  naive integer-cast would, should treat that the same as "does not parse"). A
+  publishable reference is shown as `owner/repo`, with the commit's first 7 characters
+  alongside it, and its **`repo` URL is rebuilt as `<scheme>://<host>/<owner>/<repo>`
+  — `<scheme>` kept exactly as the input gave it (an `http` remote is published as
+  `http://`, never upgraded to `https://`, which would name an endpoint the remote may
+  not answer), the port appended after the host when the input had one, and an IPv6
+  host re-bracketed** (a bare IPv6 address is not a valid URL host; `new
+  URL(...).hostname` in JavaScript strips the brackets exactly as Python's URL parser
+  does, so both must be added back by hand, not left wherever the parser happened to
+  put them, which is nowhere). A credential embedded in the input is absent from that
+  URL for a different reason than the scheme, host and port are present in it: userinfo
+  is a component the parse never reads at all, so there is nothing to strip, while the
+  scheme and the port are components the parse does read and does publish, exactly as
+  given, because the rebuilt URL is meant to be the endpoint the input actually named
+  — one is "never read", the others are "read and kept", and treating them as the same
+  rule is exactly the mistake that silently drops the port or upgrades the scheme. A
+  `git://` or `ssh://` remote (or a scp-style one, already normalised to an http(s)
+  form before it ever reaches a card) has its scheme read correctly too, but that
+  scheme is not one of the two ever republished, so such a reference is treated the
+  same as one that does not parse at all — not "present but downgraded", simply never a
+  candidate for reconstruction. **A `skill` that does not parse this way is not
+  filtered or rejected by shape — it is a different case with a different display
+  rule**: it is shown by its own last path segment alone
   (splitting on both `/` and `\`, since nothing produces a Windows-style `skill` today
   but nothing about the field's type rules one out either; any control character in the
   result is stripped, and a result left empty by that stripping is shown as the literal

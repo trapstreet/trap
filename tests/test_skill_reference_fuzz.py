@@ -1,14 +1,18 @@
 """A permanent, seeded fuzz corpus over `card.skill`, checked against an oracle
 that computes the *expected wire value* independently of the code under test.
 
-Four leaks have been found in this card's naming logic across four rounds of
+Five leaks have been found in this card's naming logic across five rounds of
 review: a username via an unresolved local directory; an npm-scoped path and an
 email-shaped username, both mistaken for `repo@sha` by a separator's mere
 presence; a git remote's embedded HTTP Basic credentials; a Windows drive
-letter and a UNC share, neither caught by a POSIX-only guard; and, in round 4,
-a port silently dropped and an IPv6 host's brackets silently lost -- the *other*
-failure mode of "reconstruct from parsed components", where the rebuilt value
-is not a leak but a lie about where the skill actually lives.
+letter and a UNC share, neither caught by a POSIX-only guard; a port silently
+dropped and an IPv6 host's brackets silently lost (round 4); and a scheme
+silently upgraded to `https` regardless of what the input actually said
+(round 5) -- the *other* failure mode of "reconstruct from parsed
+components", where the rebuilt value is not a leak but a lie about where the
+skill actually lives. (Round 4's version of this docstring named "a wrong
+scheme" as exactly the kind of thing an equality oracle would catch that a
+substring check could not -- before round 5's bug was found. It was right.)
 
 Round 4's fix is also a fix to this file. The round 1-3 version of this fuzzer
 checked a *substring* property: for each generated input, none of a fixed list
@@ -105,11 +109,12 @@ class _Case:
 
 
 # -- component pools ---------------------------------------------------------------
-# The classes the reviewer named across rounds 2-4: home directories including a
+# The classes the reviewer named across rounds 2-5: home directories including a
 # Windows drive path and a UNC share; npm scopes; unicode, spaces and a control
 # character in the leaf; trailing slashes; 6/7/40/64-character and uppercase hex;
-# non-hex branch/tag names; schemes including one that must never resolve; hosts
-# including IPv6 literals; ports; userinfo; query strings; fragments.
+# non-hex branch/tag names; schemes including both that must resolve (http, https
+# -- kept as given, round 5) and one that must never (ftp); hosts including IPv6
+# literals; ports; userinfo; query strings; fragments.
 
 #: path -> the tokens in it that must never reach the wire (its own leaf excluded --
 #: none of these pools' leaves share a token with a home directory or npm scope, so
@@ -223,10 +228,13 @@ def _url_cases() -> list[_Case]:
         resolves = scheme in ("https://", "http://") and _COMMIT_RE.fullmatch(commit) is not None
         forbidden = [secret] if secret else []
         if resolves:
+            # round 5: the published scheme is the input's own, never
+            # hard-coded -- an http-only remote must publish an http:// link.
+            scheme_name = scheme.removesuffix("://")
             authority = _expected_authority(host.bare, host.is_ipv6, port)
             expected_installed = {
                 "name": repo,
-                "repo": f"https://{authority}/{owner}/{repo}",
+                "repo": f"{scheme_name}://{authority}/{owner}/{repo}",
                 "commit": commit,
             }
             expected_label = f"{owner}/{repo}@{commit[:7]}"
