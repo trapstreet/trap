@@ -53,10 +53,12 @@ only in a comment:
   hashed either way (see below) — but it governs what a client is allowed to *show*:
   no value shown for a skill is ever a copy of (part of) the `skill` string itself;
   every value shown is rebuilt from named components parsed out of it, glued into a
-  fixed template, and nothing else about `skill` is ever read. Concretely: `skill` is
-  parsed at its **last** `@` (so a repo URL that itself contains one, e.g.
-  `git@host:owner/repo`, is not split in the wrong place) into a candidate repo and a
-  candidate commit.
+  fixed template, and nothing else about `skill` is ever read. Concretely: leading and
+  trailing whitespace is **stripped from the whole value first** (so an otherwise valid
+  reference that picked up a stray space still resolves, rather than falling back to a
+  leaf name with the commit stuck to it), and the result is then parsed at its **last**
+  `@` (so a repo URL that itself contains one, e.g. `git@host:owner/repo`, is not split
+  in the wrong place) into a candidate repo and a candidate commit.
 
   It is a **publishable reference** exactly when: the commit half is **lowercase hex,
   7 to 64 characters**; the repo half is an **http(s) URL** — its scheme literally

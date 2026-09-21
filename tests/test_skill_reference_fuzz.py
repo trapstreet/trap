@@ -198,7 +198,10 @@ _PORTS = [None, 9999]
 #: round 6: a `.git`-suffixed repo, so the corpus actually exercises
 #: stripping it (the reviewer's `.git` mutation passed 4/4 before this --
 #: no pool case had one).
-_OWNER_REPO = [("owner", "repo"), ("a", "b"), ("owner", "repo.git")]
+#: ``owner.git`` is here because a review mutation that stripped ``.git`` from the
+#: owner as well as the repo passed every test in this file: the oracle is
+#: independent of the implementation, but only for the shapes the pools contain.
+_OWNER_REPO = [("owner", "repo"), ("a", "b"), ("owner", "repo.git"), ("owner.git", "repo2")]
 #: Distinctive markers -- never appear anywhere else in this file's strings --
 #: so a query string or fragment leaking (the reconstruct rule applies to them
 #: too: nothing `_parse_skill` did not choose to extract should reach the wire)
