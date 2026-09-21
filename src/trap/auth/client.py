@@ -60,14 +60,26 @@ class ApiClient:
         return identifier if isinstance(identifier, str) else None
 
     def capabilities(self) -> dict[str, Any]:
-        """What this server supports (``GET /api/v2/capabilities``, unauthenticated). A
-        server that does not answer — offline, older, or a network hiccup — is read as
-        "supports nothing new": the caller then takes the conservative branch rather
+        """What this server supports (``GET /api/v2/capabilities``), sent with **no**
+        credentials — this probe can run before the user has agreed to submit anything
+        (to inform the confirmation itself), so it must not identify them to the server
+        first. Built explicitly via ``build_request``/``send`` rather than the shorter
+        ``self._client.get(...)``, so a future refactor back onto that shortcut fails a
+        test (below) instead of silently re-attaching ``self._client``'s default
+        ``authorization`` header. ``Headers.pop(..., None)`` rather than ``del``: ``del``
+        raises ``KeyError`` when the header isn't there (checked directly against this
+        codebase's httpx) — defensive here even though every request built from
+        ``self._client`` carries that default header today.
+
+        A server that does not answer — offline, older, or a network hiccup — is read
+        as "supports nothing new": the caller then takes the conservative branch rather
         than guessing. ``httpx.HTTPError`` covers both a failed request and a non-2xx
         status (``raise_for_status``); ``ValueError`` covers a body that is not valid
         JSON (``.json()`` raises ``json.JSONDecodeError``, a ``ValueError`` subclass)."""
         try:
-            response = self._client.get("/api/v2/capabilities")
+            request = self._client.build_request("GET", "/api/v2/capabilities")
+            request.headers.pop("authorization", None)
+            response = self._client.send(request)
             response.raise_for_status()
             body = response.json()
         except (httpx.HTTPError, ValueError):

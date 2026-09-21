@@ -309,7 +309,9 @@ def test_card_from_run_resolves_a_git_backed_skill_to_repo_at_sha(tmp_path):
 
 
 # --- ApiClient.capabilities(): verified against what self._client.get(...) and ----
-# --- .json() actually raise in this codebase's httpx (0.28), not assumed -----------
+# --- .json() actually raise in this codebase's httpx (0.28), not assumed; and that --
+# --- the probe carries no credentials, since it can run before the user has agreed -
+# --- to anything -------------------------------------------------------------------
 # --- (reuses test_auth.py's _client(handler) helper -- same MockTransport pattern --
 # --- as get_me / submit there; other tests in this file already cross-import from --
 # --- test_shapes_direct.py and test_live.py the same way) --------------------------
@@ -347,6 +349,27 @@ def test_capabilities_is_empty_when_the_body_is_not_json():
     from .test_auth import _client
 
     assert _client(lambda r: httpx.Response(200, text="not json")).capabilities() == {}
+
+
+def test_capabilities_sends_no_credentials():
+    """This probe can fire before the user has agreed to submit anything (it informs
+    the confirmation itself), so it must not identify them to the server first -- even
+    though every other ApiClient call, including this same client's get_me/submit,
+    stays authenticated. Asserted against what the transport actually received, not
+    against the request object `capabilities()` built, so a future refactor back onto
+    the shorter `self._client.get(...)` (which would silently re-attach the client's
+    default `authorization` header) fails this test rather than passing unnoticed."""
+    from .test_auth import _client
+
+    seen: dict[str, object] = {}
+
+    def handler(request):
+        seen["headers"] = dict(request.headers)
+        return httpx.Response(200, json={"features": {}})
+
+    client = _client(handler)
+    assert client.capabilities() == {"features": {}}  # the body still parses normally
+    assert "authorization" not in seen["headers"]
 
 
 # --- tp submit asks the server whether it stores cards -----------------------------
