@@ -103,6 +103,27 @@ tasks:
   program's: its own exit code, or 128 + N when signal N killed it (137 for `SIGKILL`),
   the way a shell reports it.
 
+## What the run records
+
+Every shape ends a case by printing one line on stderr — `[trap] card {...}` — naming
+exactly what it ran: the shape, its behaviour version, the agent build or provider, the
+model that was asked for, the options that actually took effect, the skill (if any), the
+command template and setup line (`cmd` only), and the deadline. `tp run` reads that line
+back after the case and records it in `report.json` as `provenance.solution.adapter`,
+alongside the digest that names it, `provenance.solution.adapter_digest`. A solution that
+isn't a built-in shape prints no such line, and both fields stay absent.
+
+A skill installed with `--skill DIR` is carded as that directory; `tp run` then resolves
+it to `repo@sha` when the directory is a clean git checkout with an origin remote — the
+same handle the site uses everywhere else — and leaves it as the bare directory path
+otherwise, in which case it is shown, wherever the card is displayed, by that directory's
+own name rather than the path itself.
+
+A run graded on the site is named after its card instead of "model not recorded" — see
+[Solution card](../reference/solution-card.md) for the full field list, the
+canonicalisation rules and the digest, and [Privacy and grading](privacy-and-grading.md)
+for what of this leaves the machine, and when.
+
 ## `tp shape acp`
 
 | Flag | Meaning |

@@ -63,6 +63,12 @@ is how a later `tp submit` lands on the same run page instead of creating a seco
 Reports from runs without a session — and from older CLIs — simply have no such field and
 upload unchanged.
 
+**A card in the report.** When the solution is one of tp's built-in
+[shapes](../guides/built-in-shapes.md), `tp run` reads back the card it printed on stderr and
+records it in `report.json` as `provenance.solution.adapter`, with the digest that names it as
+`provenance.solution.adapter_digest` ([solution card](solution-card.md)). A solution that isn't
+a built-in shape carries neither field.
+
 **What tp reports about the run.** Beside the progress events, `tp run` *describes* the run
 to the site twice — once when it opens and once when it ends (`POST
 /api/v2/runs/{run}/context`; the graded run, when there is one, gets the opening
