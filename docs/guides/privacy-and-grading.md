@@ -65,13 +65,16 @@ how:
 - **`tp submit` sends the whole card, verbatim, on request.** An explicit `tp submit` is
   the only thing that ever uploads `cmd` and `setup`, and it shows them to you first,
   exactly as they will appear on the site — no paraphrase, no truncation — so you read
-  precisely what is about to become public before you confirm. When the target server
-  doesn't yet store cards, trap still submits the card but withholds the repository, so two
-  different configurations of one repository can't collapse into a single, misleading
-  leaderboard row; see `tp submit` in the [CLI reference](../reference/cli.md#tp-submit)
-  for exactly how. An environment variable named inside a template (`$OPENAI_API_KEY`)
-  travels **by name only**, on either path — trap never reads or sends the value it holds
-  on your machine.
+  precisely what is about to become public before you confirm. When the run's solution is
+  anchored to a repository, `tp submit` also asks the target server whether it can
+  confirm it stores cards before uploading; short of that confirmation, the card still
+  uploads but the repository is withheld, so two different configurations of one
+  repository can't collapse into a single, misleading leaderboard row. A card whose
+  solution was never anchored has no repository to protect in the first place, and
+  uploads exactly as it always did. See `tp submit` in the [CLI
+  reference](../reference/cli.md#tp-submit) for exactly how. An environment variable
+  named inside a template (`$OPENAI_API_KEY`) travels **by name only**, on either path —
+  trap never reads or sends the value it holds on your machine.
 - **A skill is published by reconstruction, never by forwarding the string it was given.**
   The card's `skill` field is rebuilt into `owner/repo` plus the first seven characters of
   its commit from the pieces a URL parser hands back — never a copy of, or a slice out of,

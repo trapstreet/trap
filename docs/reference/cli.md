@@ -303,16 +303,22 @@ still records the payload. Any of `--yes`, `--allow-unanchored`, or
 When a checkout is unanchored the leaderboard warning (see `tp run`) prints here too.
 
 **Carded submissions and the server's capabilities.** When the saved report carries a
-[solution card](solution-card.md) (`provenance.solution.adapter`), `tp submit` asks the
-server first (`GET /api/v2/capabilities`, unauthenticated) whether it stores cards
-(`features.solution_adapter.supported`). A server that does not is not asked to fold two
-different configurations of one repository into a single leaderboard row: the run is
-submitted **without its solution repository** — a sibling `report-unanchored.json`
-alongside the run's `report.json`, never a rewrite of the saved report — so the card and
-its digest still upload, the run is kept, but it is not ranked (the anchor is dropped and
-`provenance.solution.issue` names why). A server that does store cards gets the repository
-and the card together, exactly as saved. A report with no card is submitted exactly as
-before, on every server. The pre-submit confirmation shows both facts before asking: when
+[solution card](solution-card.md) (`provenance.solution.adapter`) **and** the solution
+checkout is anchored to a repository (`provenance.solution.repo` set — an unanchored
+solution has no repository to protect, and its card is submitted exactly as it always
+was, with no probe at all), `tp submit` asks the server first (`GET /api/v2/capabilities`,
+unauthenticated) whether it can confirm it stores cards
+(`features.solution_adapter.supported`) — a server that fails to answer reads the same as
+one that answers no, since the two are indistinguishable from here. Without that
+confirmation, the repository is not risked to a server that would fold two different
+configurations of one repository into a single leaderboard row: the run is submitted
+**without its solution repository** — a sibling `report-unanchored.json` alongside the
+run's `report.json`, never a rewrite of the saved report — so the card and its digest
+still upload, the run is kept, but it is not ranked (the anchor is dropped and
+`provenance.solution.issue` names why). A server that does confirm it stores cards gets
+the repository and the card together, exactly as saved. A report with no card, or one
+whose solution isn't anchored, is submitted exactly as before, on every server. The
+pre-submit confirmation shows both facts before asking: when
 the card's command template or setup line is set, it is echoed **verbatim** — never
 paraphrased, truncated, or re-quoted, so a reader can see exactly what an explicit submit
 is about to make public (the command line is otherwise never uploaded except by this
