@@ -75,9 +75,16 @@ class ApiClient:
         as "supports nothing new": the caller then takes the conservative branch rather
         than guessing. ``httpx.HTTPError`` covers both a failed request and a non-2xx
         status (``raise_for_status``); ``ValueError`` covers a body that is not valid
-        JSON (``.json()`` raises ``json.JSONDecodeError``, a ``ValueError`` subclass)."""
+        JSON (``.json()`` raises ``json.JSONDecodeError``, a ``ValueError`` subclass).
+
+        A short 5s timeout, not this client's 30s default (as ``get_me`` also overrides
+        to 10s): this probe now runs *before* the pre-submit confirmation prints, so an
+        unresponsive or blackholing server must not leave the user waiting half a minute
+        before they can even decline. A timeout is caught by ``httpx.HTTPError`` like
+        any other failed request, landing on the same "supports nothing new" branch —
+        already the safe answer, so cutting the wait short costs nothing."""
         try:
-            request = self._client.build_request("GET", "/api/v2/capabilities")
+            request = self._client.build_request("GET", "/api/v2/capabilities", timeout=5)
             request.headers.pop("authorization", None)
             response = self._client.send(request)
             response.raise_for_status()

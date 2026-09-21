@@ -266,7 +266,7 @@ def _confirm_submit(
     the old separate `_confirm_unanchored` prompt is not run for submit. `_confirm_card`
     is folded in too, and for the same reason: --yes says the user pre-consented, not
     that they were never told what a carded submit publishes."""
-    SubmitRenderer().intent(report_data, run_id, server)
+    SubmitRenderer().intent(report_data, run_id, server, withhold_repo=withhold_repo)
     _warn_unanchored(report_data.provenance)
     _confirm_card(report_data.provenance.solution.adapter, withhold_repo=withhold_repo)
     if yes or allow_unanchored or _env_truthy("TRAP_ALLOW_UNANCHORED"):
@@ -281,8 +281,8 @@ def _confirm_submit(
 
 
 UNSTORED_CARD = (
-    "the server does not store the solution card; submitted without a repo so two cards "
-    "cannot fold into one row"
+    "the server did not confirm it stores the solution card; submitted without a repo "
+    "so two cards cannot fold into one row"
 )
 
 
@@ -301,6 +301,21 @@ def _unanchored_copy(ws: Workspace, run_id: str, data: ReportData) -> Path:
     path = ws.run_dir(run_id) / "report-unanchored.json"
     path.write_text(stripped.model_dump_json(indent=2))
     return path
+
+
+def _server_stores_cards(capabilities: dict[str, Any]) -> bool:
+    """Whether a `GET /api/v2/capabilities` body confirms `features.solution_adapter.
+    supported`. Only an explicit, correctly-typed `True` counts as "yes" — everything
+    else (a malformed body, `supported` as the *string* `"false"` rather than the
+    boolean, `solution_adapter` as `null`, `features` as a list, a body that isn't a
+    dict at all, ...) takes the conservative "no" branch and must never raise. There is
+    no way to reach this by chaining `.get(..., {})` defaults: those only fire when a
+    *key is absent*, not when a present value has the wrong type, so a body shaped
+    correctly except for one wrong type either lies (a truthy string) or crashes
+    (`.get` on `None`) instead of falling through."""
+    features = capabilities.get("features")
+    adapter_caps = features.get("solution_adapter") if isinstance(features, dict) else None
+    return isinstance(adapter_caps, dict) and adapter_caps.get("supported") is True
 
 
 def _mirrored(
@@ -784,10 +799,7 @@ def submit(
     adapter = report_data.provenance.solution.adapter
     withhold_repo = False
     if adapter is not None and report_data.provenance.solution.repo:
-        stores_cards = bool(
-            (client.capabilities().get("features") or {}).get("solution_adapter", {}).get("supported")
-        )
-        withhold_repo = not stores_cards
+        withhold_repo = not _server_stores_cards(client.capabilities())
 
     _confirm_submit(
         report_data,

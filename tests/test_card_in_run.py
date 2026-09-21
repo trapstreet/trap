@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 
 import httpx
+import pytest
 
 from trap.live.context import SKILLS_UNSUPPORTED
 from trap.models.card import SolutionCard
@@ -372,6 +373,70 @@ def test_capabilities_sends_no_credentials():
     assert "authorization" not in seen["headers"]
 
 
+def test_capabilities_uses_a_short_timeout_not_the_clients_default():
+    """This probe runs before the pre-submit confirmation prints, so an unresponsive
+    or blackholing server must not leave the user waiting through the client's
+    ordinary 30s default before they can even decline. The underlying client is built
+    with that 30s default here (matching ApiClient's own default) specifically so an
+    observed 5s can only be explained by capabilities()'s own per-request override,
+    not by happening to match some other default."""
+    from trap.auth.client import ApiClient
+
+    seen: dict[str, object] = {}
+
+    def handler(request):
+        seen["timeout"] = request.extensions.get("timeout")
+        return httpx.Response(200, json={"features": {}})
+
+    client = ApiClient("https://srv", "key", timeout=30)
+    client.__dict__["_client"] = httpx.Client(
+        base_url="https://srv",
+        transport=httpx.MockTransport(handler),
+        headers={"authorization": "Bearer key"},
+        timeout=30,
+    )
+    assert client.capabilities() == {"features": {}}
+    assert seen["timeout"] == {"connect": 5, "read": 5, "write": 5, "pool": 5}
+
+
+# --- _server_stores_cards: only an explicit, correctly-typed True is "yes" ---------
+# --- -- everything else is conservative, and none of it may raise -----------------
+
+
+@pytest.mark.parametrize(
+    "capabilities",
+    [
+        {},  # no "features" key at all
+        {"features": None},
+        {"features": "yes"},
+        {"features": []},
+        {"features": {}},  # no "solution_adapter" key
+        {"features": {"solution_adapter": None}},
+        {"features": {"solution_adapter": "supported"}},
+        {"features": {"solution_adapter": []}},
+        {"features": {"solution_adapter": {}}},  # no "supported" key
+        {"features": {"solution_adapter": {"supported": False}}},
+        {"features": {"solution_adapter": {"supported": "false"}}},  # truthy string
+        {"features": {"solution_adapter": {"supported": "true"}}},  # also just a string
+        {"features": {"solution_adapter": {"supported": 1}}},
+        {"features": {"solution_adapter": {"supported": 0}}},
+        {"features": {"solution_adapter": {"supported": None}}},
+    ],
+    ids=lambda c: json.dumps(c),
+)
+def test_server_stores_cards_is_conservative_for_everything_but_a_literal_true(capabilities):
+    import trap.cli as climod
+
+    assert climod._server_stores_cards(capabilities) is False
+
+
+def test_server_stores_cards_true_only_for_the_exact_confirmed_shape():
+    import trap.cli as climod
+
+    confirmed = {"features": {"solution_adapter": {"supported": True}}}
+    assert climod._server_stores_cards(confirmed) is True
+
+
 # --- tp submit asks the server whether it stores cards -----------------------------
 # --- and shows, before publishing, exactly what a carded submit makes public -------
 
@@ -424,7 +489,11 @@ def test_submitting_a_card_to_a_server_that_cannot_store_it_drops_the_repo(
     solution, output = _submit_with(monkeypatch, runner, {"features": {}})
     assert solution["adapter"]["shape"] == "cmd" and solution["adapter_digest"]
     assert solution["repo"] is None and solution["commit"] is None
-    assert "does not store" in (solution["issue"] or "")
+    # "did not confirm it stores", not the stronger "does not store": a capabilities
+    # probe that failed outright reads identically to genuine non-support, so the
+    # uploaded issue text -- what a third party may read on the site -- must not claim
+    # more than is actually known.
+    assert "did not confirm" in (solution["issue"] or "")
     assert "not ranked" in output
 
 
@@ -441,7 +510,7 @@ def test_a_run_without_a_card_is_submitted_as_before(make_project, runner, monke
     make_project(cmd="sh -c 'echo hi'", inputs={"c1": {"question.txt": "q"}})
     assert runner.invoke(app, ["run", "--task", "t", "--no-environment"]).exit_code == 0
     solution, output = _submit_with(monkeypatch, runner, {"features": {}})
-    assert solution["adapter"] is None and "does not store" not in output
+    assert solution["adapter"] is None and "did not confirm" not in output
 
 
 def test_a_carded_but_already_unanchored_run_never_asks_the_server(
@@ -471,7 +540,7 @@ def test_a_carded_but_already_unanchored_run_never_asks_the_server(
     result = runner.invoke(app, ["submit", "--task", "t", "--yes"])
     assert result.exit_code == 0, result.output
     assert calls == []  # never asked -- there was nothing this gate could withhold
-    assert "does not store" not in result.output
+    assert "did not confirm" not in result.output
 
 
 def test_the_confirmation_shows_the_command_template_verbatim(make_project, runner, tmp_path, monkeypatch):
@@ -491,7 +560,7 @@ def test_the_confirmation_shows_nothing_new_without_a_card(make_project, runner,
     assert runner.invoke(app, ["run", "--task", "t", "--no-environment"]).exit_code == 0
     _, output = _submit_with(monkeypatch, runner, {"features": {}})
     assert "public" not in output.lower()
-    assert "does not store" not in output
+    assert "did not confirm" not in output
 
 
 def test_confirm_card_shows_the_template_labelled_as_public(capsys):

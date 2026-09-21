@@ -78,6 +78,31 @@ def test_render_submit_intent_unanchored_and_server_assigned(capsys):
     assert "unanchored" in out and "not a git repo" in out
 
 
+def test_render_submit_intent_withheld_repo_annotates_only_the_solution_row(capsys):
+    # the solution's true anchor still shows (this table is never redacted -- see
+    # `_anchor_cell`), but it's marked as not what gets uploaded, since the pre-submit
+    # confirmation states that fact on the very next line and the two must not read as
+    # contradicting each other. The task side is untouched: this gate never withholds it.
+    solution = GitProvenance(repo="https://x/sol", commit="a" * 40)
+    task = GitProvenance(repo="https://x/task", commit="b" * 40)
+    data = _report(provenance=Provenance(solution=solution, task=task))
+    SubmitRenderer().intent(data, "ts-3", "http://local", withhold_repo=True)
+    out = capsys.readouterr().out
+    solution_line = next(line for line in out.splitlines() if "x/sol" in line)
+    task_line = next(line for line in out.splitlines() if "x/task" in line)
+    assert "not uploaded" in solution_line
+    assert "not uploaded" not in task_line
+
+
+def test_render_submit_intent_default_leaves_the_anchor_unannotated(capsys):
+    # withhold_repo defaults to False -- every pre-existing call to intent() (both
+    # above, and the one `_confirm_submit` makes for a card-less or server-accepted
+    # submit) must render exactly as it always has.
+    data = _report(provenance=Provenance(solution=GitProvenance(repo="https://x/sol", commit="a" * 40)))
+    SubmitRenderer().intent(data, "ts-4", "http://local")
+    assert "not uploaded" not in capsys.readouterr().out
+
+
 def test_render_cost_unknown_distinct_from_zero():
     # unknown (unpriced model) must read differently from a measured zero
     assert RichRenderer._render_cost(None) == "[dim]?[/dim]"
