@@ -282,6 +282,59 @@ def test_the_published_scheme_matches_the_input_instead_of_being_hardcoded():
     )
 
 
+def test_a_control_character_in_the_host_is_treated_as_unresolved():
+    # round 6, finding A: `_authority` (round 4) publishes the host into
+    # `repo`, but only `owner`/`repo` were ever checked for control
+    # characters -- a NUL in the host reached the wire intact through
+    # `json.dumps`. Fixed as one guard over the whole assembled tuple, not a
+    # third per-field `if`.
+    assert _parse_skill("https://ho\x00st/a/b@" + "a" * 40) is None
+
+
+def test_an_ipv4_address_in_brackets_does_not_crash_the_parse():
+    # round 6, finding B: `urlsplit` itself raises ValueError for this on
+    # Python >= 3.13 ("An IPv4 address cannot be in brackets") -- not merely
+    # `.port`, which round 4 already guarded. The parse must be total: any
+    # ValueError out of it means "not a publishable reference", the same
+    # state the code already handles.
+    assert _parse_skill("https://[192.168.1.1]/a/b@" + "a" * 40) is None
+
+
+def test_a_control_character_inside_brackets_does_not_crash_the_parse():
+    # `urlsplit` also raises for this ("does not appear to be an IPv4 or
+    # IPv6 address") -- a second way into the same crash finding B names.
+    assert _parse_skill("https://[ho\x00st]/a/b@" + "a" * 40) is None
+
+
+def test_a_dot_owner_segment_is_treated_as_unresolved():
+    # round 6, finding C: no forge allows a bare "." path segment, and any
+    # URL-normalising client (including the site re-parsing this reference)
+    # collapses it -- the two-segment structure tp published would not
+    # survive a re-parse.
+    assert _parse_skill("https://github.com/./repo@" + "a" * 40) is None
+
+
+def test_a_dotdot_repo_segment_is_treated_as_unresolved():
+    # Its own test, its own statement -- ".." is checked on `repo`
+    # independently of "." on `owner`, matching the round 1 lesson.
+    assert _parse_skill("https://github.com/owner/..@" + "a" * 40) is None
+
+
+def test_trailing_whitespace_after_the_commit_does_not_prevent_resolution():
+    # round 6, finding C: a trailing space is not a control character (it is
+    # printable) and not part of a URL's authority or path, so nothing else
+    # in the parse would have caught it -- without stripping first, it
+    # becomes part of the commit and fails the hex check, turning a
+    # perfectly good reference into a leaf.
+    commit = "a" * 40
+    assert _parse_skill(f"https://github.com/a/b@{commit} ") == ("https", "github.com", "a", "b", commit)
+
+
+def test_leading_whitespace_does_not_prevent_resolution():
+    commit = "a" * 40
+    assert _parse_skill(f" https://github.com/a/b@{commit}") == ("https", "github.com", "a", "b", commit)
+
+
 def test_reconstructing_from_netloc_would_reopen_the_credential_leak():
     # Documents *why* the authority is built from `.hostname` + `.port`
     # rather than from `.netloc` (which already has the brackets and the port

@@ -615,6 +615,32 @@ def test_skills_installed_keeps_an_http_scheme_rather_than_upgrading_it():
     }
 
 
+def test_a_malformed_bracketed_host_does_not_crash_build_context():
+    # round 6, finding B: `urlsplit` itself raises ValueError for an IPv4
+    # address in brackets (Python >= 3.13), not just for `.port`. This is
+    # the end-to-end check that `cli/__init__.py`'s unguarded
+    # `build_context(..., card=card)` call is safe: the parse must be total,
+    # not the call site defensive.
+    commit = "a" * 40
+    card = ACP_CARD.model_copy(update={"skill": f"https://[192.168.1.1]/a/b@{commit}"})
+    patch = _context(card=card)  # must not raise
+    assert patch["skills"] == {"installed": [{"name": "b"}]}
+
+
+def test_a_control_character_in_the_host_never_reaches_the_wire():
+    # round 6, finding A: `_authority` (round 4) publishes the host into
+    # `repo`, but only owner/repo were checked for control characters --
+    # this is the full-pipeline check that a NUL in the host is rejected
+    # (falling back to the clean leaf "b"), not published in a `repo` field.
+    # (json.dumps escapes a raw NUL byte to a six-character sequence rather
+    # than emitting the byte itself, so the exact-value check below -- no
+    # repo key, name is the unrelated leaf -- is what actually proves
+    # rejection, not a substring search over the serialised text.)
+    card = ACP_CARD.model_copy(update={"skill": "https://ho\x00st/a/b@" + "a" * 40})
+    patch = _context(card=card)
+    assert patch["skills"] == {"installed": [{"name": "b"}]}
+
+
 def test_a_card_without_options_adds_no_model_config():
     # The card that is not ACP (above) also carries no options -- covers the
     # branch where a card exists but `card.options` is empty, distinctly from

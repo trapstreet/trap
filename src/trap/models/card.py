@@ -28,7 +28,7 @@ _COMMIT_RE = re.compile(r"[0-9a-f]{7,64}")
 
 #: C0 controls and DEL. No real forge allows one of these in a remote name;
 #: cheap and defensive rather than urgent -- but no published string may
-#: contain one regardless (round 4 of review).
+#: contain one regardless.
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 #: Every card field except ``name``: renaming a card must not change its identity.
@@ -116,40 +116,17 @@ def card_digest(card: SolutionCard) -> str:
 def card_label(card: SolutionCard) -> str:
     """The row name a site-graded run gets: what was driven, by what, with what.
 
-    Safe to publish as it stands. Not because every dangerous shape of input
-    has been thought of and rejected -- three rounds of review found leaks in
-    exactly that approach, in a username, an npm-scoped path, a credential
-    embedded in a remote URL, a Windows drive letter, each one caught only
-    after the fact -- but because **no value here is a string this module
-    received; every value is reconstructed from parsed components**:
-
-    - ``cmd``/``setup`` are not in the fallback chain at all, so a bare
-      ``cmd``-shaped card with no name, agent or provider is named by its shape
-      alone (``"cmd"``): built from a fixed literal, never from ``card.cmd``.
-    - a skill is named ``owner/repo@sha7`` only when `_parse_skill` reads it as
-      a full reference and hands back its five parts (scheme, authority,
-      owner, repo, commit) -- and even then, only ``owner``, ``repo`` and a
-      slice of ``commit`` are used; ``scheme`` and ``authority`` (host, and a
-      port when the input had one) are used by `live.context`'s
-      ``skills.installed``, not here, and everything `_parse_skill` chose not
-      to extract -- a URL's userinfo, a query string, a fragment, anything
-      before or after the parsed pieces -- simply never reaches a variable
-      either function reads. Anything
-      `_parse_skill` would not parse -- a plain directory, an "@" that was not
-      a commit separator, a git remote that is itself a local path, a Windows
-      or UNC path, an owner or repo segment with a control character in it --
-      is named by `_skill_leaf`, which returns exactly one thing: the input's
-      own last path segment, control characters stripped. There is no third
-      path through this code that copies more of ``skill`` than that.
-
-    This is what lets a second caller (a ``tp submit`` preview, ``tp inspect``,
-    a console line) call this function and inherit the guarantee for free,
-    rather than re-deriving it -- and what makes the guarantee something a
-    reader can check by looking at which variables this function's return
-    value is built from, not by trying to enumerate every shape ``skill``
-    must never be. `live.context`'s ``skills.installed`` parses the same way,
-    so the name shown there for a given skill and the name shown here for the
-    same skill never disagree.
+    Safe to publish as it stands: never a command template, never a path,
+    never a secret, on the same reconstruct-only rule `_parse_skill` states
+    and holds to. A bare ``cmd``-shaped card with no name, agent or provider
+    is named by its shape alone (``"cmd"``) -- ``cmd``/``setup`` are not in
+    the fallback chain at all. A skill is named ``owner/repo@sha7`` only when
+    `_parse_skill` reads it as a full reference, using only ``owner``,
+    ``repo`` and a slice of ``commit`` from what it returns (``scheme`` and
+    ``authority`` are for `live.context`'s ``skills.installed`` instead);
+    anything `_parse_skill` would not parse is named by `_skill_leaf`'s own
+    last path segment. `live.context`'s ``skills.installed`` parses the same
+    way, so the two never disagree about one skill's name.
     """
     if card.name:
         return card.name
@@ -167,124 +144,102 @@ def card_label(card: SolutionCard) -> str:
 
 
 def _parse_skill(skill: str) -> tuple[str, str, str, str, str] | None:
-    """``(scheme, authority, owner, repo, commit)`` when ``skill`` is a fully
-    specified, publishable reference -- an http(s) URL naming exactly one
-    owner and one repo, followed by ``@<sha>`` where the sha is lowercase
-    hex, 7 to 64 characters. ``scheme`` is ``"http"`` or ``"https"``,
-    whichever the input actually used -- round 5 of review found that always
-    publishing ``https://`` regardless of the input's own scheme was the same
-    defect class as round 4's dropped port: a reconstruction that points
-    somewhere the input did not, since an internal remote that only serves
-    plain ``http`` would publish a link its own server does not answer.
-    ``authority`` is the host `_authority` rebuilds -- re-bracketed if it is
-    an IPv6 literal, with the port appended when the input had one -- never
-    the host alone: round 4 of review found that reading ``.hostname`` and
-    never ``.port`` published a URL pointing at a different endpoint than the
-    input named (a self-hosted remote on a non-default port is reachable
-    through real code, not a crafted string -- see `_authority`), and that
-    ``.hostname`` alone drops the brackets an IPv6 literal needs to remain a
-    valid URL.
+    """``(scheme, authority, owner, repo, commit)`` when ``skill`` is a
+    fully specified, publishable reference; ``None`` for anything else, in
+    which case `_skill_leaf` names it instead.
 
-    ``None`` for anything else: a plain filesystem path (POSIX, Windows, or
-    UNC -- none of them parses as a URL at all); a scheme other than
-    ``http``/``https`` (an ``ssh://`` or ``git://`` remote -- or a scp-style
-    one, already normalised to an http(s) form before it ever reaches a card
-    -- has no business becoming an ``https://`` link; the leaf is the honest
-    answer for it, the same as for a filesystem path); an "@" that belongs to
-    the path itself rather than to a commit (an npm-scoped package directory,
-    an email-shaped username); a git remote that is itself a local path
-    (rejected for the same reason a bare directory is: it has no host to
-    publish); a URL whose port is not a plain non-negative integer in range
-    (``urlsplit`` raises rather than returning ``None`` for one of those, so
-    this catches the exception); a URL with anything other than exactly two
-    path segments (a GitLab-style subgroup, say -- there is no attempt to
-    guess which segment is "the" owner or repo, only exactly two is
-    accepted); a repo segment that is nothing but a ``.git`` suffix once
-    that suffix is stripped; or an owner or repo segment with a control
-    character in it (cheap and defensive -- no real forge allows one, but no
-    published string may contain one regardless).
+    A reference is an http(s) URL naming exactly one owner and one repo,
+    followed by ``@<sha>`` (lowercase hex, 7 to 64 characters). ``scheme``
+    is ``"http"`` or ``"https"``, whichever the input used; ``authority`` is
+    the host, re-bracketed if it is an IPv6 literal, with the port appended
+    when the input had one (`_authority`). Every value here is read out of
+    ``urlsplit``'s own parsed fields and glued into the published form
+    unchanged -- never sliced from the original string, and never from
+    ``.netloc`` (right shape, wrong contents). This is why userinfo can
+    never reach the wire (nothing here ever reads ``.username``/
+    ``.password``) while the scheme and the port *do* reach it, unchanged:
+    the published values are meant to be the endpoint the input actually
+    named, and a credential is not part of that endpoint while a port is.
+    Query strings and fragments are parsed and equally never read.
+
+    ``None`` covers: a plain filesystem path (POSIX, Windows, or UNC --
+    none parses as a URL); any scheme but ``http``/``https`` (a scp-style or
+    ``ssh://`` remote is normalised to http(s) before it ever reaches a
+    card; anything still not http(s) has no business becoming one); an "@"
+    that belongs to the path itself, not a commit (an npm-scoped package
+    directory, an email-shaped username); a git remote that is itself a
+    local path; a URL whose port is not a plain integer in range, or whose
+    bracketed host is not a valid IPv6 literal (``urlsplit`` itself raises
+    for either, not just for ``.port``/``.hostname`` -- caught below, so the
+    parse never crashes its caller); anything but exactly two path segments;
+    ``.``/``..`` as either segment (no forge allows them, and any
+    URL-normalising re-parse, including the site's, collapses them); a repo
+    segment that is nothing but a stripped ``.git`` suffix; or a control
+    character anywhere in what would be published. That last check is one
+    guard over the whole assembled result, not a per-field ``if`` -- a
+    future field added to the tuple is covered by construction, not by
+    remembering to add a fourth check.
 
     Splits on the LAST "@", never the first, so a URL that itself contains
-    one for an unrelated reason (a scp-style remote is normalised to an
-    http(s) form before it ever reaches a card, but nothing stops a future
-    caller from handing this a URL with real HTTP Basic credentials in it)
-    is not split at the wrong point.
-
-    The five values returned here are the only things about ``skill`` that
-    ever reach the wire, and they are read out of ``urlsplit``'s own parsed
-    fields -- ``.scheme``, ``.hostname``, ``.port``, ``.path``'s segments --
-    never by slicing the original string, and never from ``.netloc`` (which
-    has the right shape but carries userinfo verbatim). In particular, this
-    never reads ``.username``/``.password``: a URL's userinfo is parsed by
-    ``urlsplit`` into those two attributes precisely so that code which
-    never asks for them structurally cannot leak what they hold, whatever it
-    is. A query string or a fragment, if the input had one, is parsed into
-    ``.query``/``.fragment`` and is equally never read.
+    one (real HTTP Basic credentials, or ``user@host``-shaped syntax) is not
+    split at the wrong point. Leading/trailing whitespace is stripped before
+    any of this, so it cannot turn a valid reference into an unresolved one
+    by riding along on the end of the commit.
     """
+    skill = skill.strip()
     repo_url, sep, commit = skill.rpartition("@")
     if not sep:
         return None
     if not _COMMIT_RE.fullmatch(commit):
         return None
-    parsed = urlsplit(repo_url)
-    scheme = parsed.scheme
-    if scheme not in ("http", "https"):
-        return None
-    host = parsed.hostname
-    if not host:
-        return None
     try:
+        parsed = urlsplit(repo_url)
+        scheme = parsed.scheme
+        host = parsed.hostname
         port = parsed.port
     except ValueError:
+        return None
+    if scheme not in ("http", "https"):
+        return None
+    if not host:
         return None
     segments = [segment for segment in parsed.path.split("/") if segment]
     if len(segments) != 2:
         return None
     owner, repo = segments
+    if owner in (".", ".."):
+        return None
     repo = re.sub(r"\.git$", "", repo)
-    if not repo:
+    if not repo or repo in (".", ".."):
         return None
-    if _CONTROL_RE.search(owner):
+    published = (scheme, _authority(host, port), owner, repo, commit)
+    if any(_CONTROL_RE.search(part) for part in published):
         return None
-    if _CONTROL_RE.search(repo):
-        return None
-    return scheme, _authority(host, port), owner, repo, commit
+    return published
 
 
 def _authority(host: str, port: int | None) -> str:
-    """``host[:port]``, with an IPv6 literal re-bracketed. ``urlsplit``'s
-    ``.hostname`` strips both the brackets a ``[::1]``-style host needs to
-    remain a valid URL authority and the port, so both must be added back by
-    hand rather than trusted to still be attached to whatever ``.hostname``
-    returns -- ``.netloc`` has the right shape already, but carries userinfo
-    along with it, which is the one thing that must never be reconstructed.
-    """
+    """``host[:port]``, with an IPv6 literal re-bracketed -- see
+    `_parse_skill` for why both are read and kept rather than left to
+    whatever ``.hostname`` alone would give (nothing)."""
     wrapped = f"[{host}]" if ":" in host else host
     return f"{wrapped}:{port}" if port is not None else wrapped
 
 
 def _skill_leaf(skill: str) -> str:
-    """The one thing about ``skill`` that is always safe to publish when it did
-    not parse into a full reference (`_parse_skill` returned ``None``): its own
-    leaf, whichever kind of path it happens to be written as. Splits on both
-    "/" and "\\\\" -- nothing here runs on Windows, but nothing stops ``skill``
-    from being written as a Windows or UNC path regardless (round 3 of review:
-    a POSIX-only ``startswith("/")`` guard and a "/"-only split each let a
-    drive letter or a share name straight through), and a string this module
-    did not build is not this module's to trust the shape of.
-
-    When ``skill`` still ends in something that reads as a commit sha --
-    `_parse_skill` rejected it for some other reason, most often that the part
-    before the "@" is a local path rather than a URL -- that tail is not part
-    of the skill's own name, so it is stripped before the leaf is taken.
-    Anything else (no "@" at all, or a tail that plainly is not a commit) has
-    no sha to strip, so the leaf comes from the whole string.
-
-    Control characters (round 4) are stripped from the result, not merely
-    left in: a card that installed a skill must still say so, so a leaf that
-    is nothing *but* control characters is named the literal ``"skill"``
-    rather than an empty string -- ``SkillRef`` requires a ``name``, and an
-    empty one would read as indistinguishable from "no skill".
+    """The one thing about ``skill`` that is always safe to publish when it
+    did not parse into a full reference (`_parse_skill` returned ``None``):
+    its own leaf, whichever kind of path it happens to be written as.
+    Splits on both "/" and "\\\\" -- nothing here runs on Windows, but a
+    string this module did not build is not this module's to trust the
+    shape of. When ``skill`` still ends in something that reads as a commit
+    sha (`_parse_skill` rejected it for some other reason, most often that
+    the part before the "@" is a local path rather than a URL), that tail is
+    stripped before the leaf is taken; otherwise the leaf comes from the
+    whole string. Control characters are stripped from the result, and a
+    leaf left empty by that stripping is named the literal ``"skill"`` --
+    ``SkillRef`` requires a ``name``, and a card that installed a skill must
+    not report installing none.
     """
     repo_candidate, sep, commit = skill.rpartition("@")
     base = repo_candidate if sep and _COMMIT_RE.fullmatch(commit) else skill

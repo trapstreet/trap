@@ -53,44 +53,56 @@ only in a comment:
   hashed either way (see below) — but it governs what a client is allowed to *show*:
   no value shown for a skill is ever a copy of (part of) the `skill` string itself;
   every value shown is rebuilt from named components parsed out of it, glued into a
-  fixed template. Concretely: `skill` is parsed at its **last** `@` (so a repo URL that
-  itself contains one, e.g. `git@host:owner/repo`, is not split in the wrong place)
-  into a candidate repo and a candidate commit. It is a **publishable reference**
-  exactly when the commit half is **lowercase hex, 7 to 64 characters**, and the repo
-  half is an **http(s) URL** — its scheme literally `http` or `https`, nothing else —
-  with a host and exactly two path segments (owner, repo, an optional `.git` suffix on
-  the repo segment stripped, and a well-formed port when one is present — an
-  implementation that raises on a malformed port, as a JS `URL` getter does not but a
-  naive integer-cast would, should treat that the same as "does not parse"). A
-  publishable reference is shown as `owner/repo`, with the commit's first 7 characters
-  alongside it, and its **`repo` URL is rebuilt as `<scheme>://<host>/<owner>/<repo>`
-  — `<scheme>` kept exactly as the input gave it (an `http` remote is published as
-  `http://`, never upgraded to `https://`, which would name an endpoint the remote may
-  not answer), the port appended after the host when the input had one, and an IPv6
-  host re-bracketed** (a bare IPv6 address is not a valid URL host; `new
-  URL(...).hostname` in JavaScript strips the brackets exactly as Python's URL parser
-  does, so both must be added back by hand, not left wherever the parser happened to
-  put them, which is nowhere). A credential embedded in the input is absent from that
-  URL for a different reason than the scheme, host and port are present in it: userinfo
-  is a component the parse never reads at all, so there is nothing to strip, while the
-  scheme and the port are components the parse does read and does publish, exactly as
-  given, because the rebuilt URL is meant to be the endpoint the input actually named
-  — one is "never read", the others are "read and kept", and treating them as the same
-  rule is exactly the mistake that silently drops the port or upgrades the scheme. A
-  `git://` or `ssh://` remote (or a scp-style one, already normalised to an http(s)
-  form before it ever reaches a card) has its scheme read correctly too, but that
-  scheme is not one of the two ever republished, so such a reference is treated the
-  same as one that does not parse at all — not "present but downgraded", simply never a
-  candidate for reconstruction. **A `skill` that does not parse this way is not
-  filtered or rejected by shape — it is a different case with a different display
-  rule**: it is shown by its own last path segment alone
-  (splitting on both `/` and `\`, since nothing produces a Windows-style `skill` today
-  but nothing about the field's type rules one out either; any control character in the
-  result is stripped, and a result left empty by that stripping is shown as the literal
-  `skill`), with no repo or commit shown at all. A Windows drive letter or a UNC share
-  falls into this second case for a simple reason distinct from the credential rule:
-  neither one is a URL at all, so there is no host, port, owner or repo to parse out of
-  it in the first place — not "present but withheld", simply never extracted.
+  fixed template, and nothing else about `skill` is ever read. Concretely: `skill` is
+  parsed at its **last** `@` (so a repo URL that itself contains one, e.g.
+  `git@host:owner/repo`, is not split in the wrong place) into a candidate repo and a
+  candidate commit.
+
+  It is a **publishable reference** exactly when: the commit half is **lowercase hex,
+  7 to 64 characters**; the repo half is an **http(s) URL** — its scheme literally
+  `http` or `https`, nothing else, kept in the output *exactly as given* (an `http`
+  remote is published as `http://`, never upgraded, which would name an endpoint the
+  remote may not answer) — with a host and a port (when present) both read and kept
+  as given the same way, and exactly two path segments (owner, repo, an optional
+  `.git` suffix on the repo segment stripped); and none of the host, owner or repo
+  contains a control character. Anything a parser raises on rather than cleanly
+  rejects — a malformed port, a bracketed host that is not a valid IPv6 literal (a
+  bracketed IPv4 address, say, or one with a stray character in it) — must be treated
+  as "does not parse" too, the same as a value the parser hands back cleanly: a JS
+  `URL` getter throws for exactly these inputs, the same way Python's URL parser does,
+  so an implementation must catch that rather than let it propagate. Two further
+  segment values are refused outright even though they parse cleanly: `.` and `..`,
+  since no forge allows either and any URL-normalising re-parse (including the site's
+  own) collapses them, so the two-segment structure published would not survive one.
+
+  A publishable reference is shown as `owner/repo`, with the commit's first 7
+  characters alongside it, and its **`repo` URL is rebuilt as
+  `<scheme>://<host>[:<port>]/<owner>/<repo>`, an IPv6 host re-bracketed** (a bare
+  IPv6 address is not a valid URL host; `new URL(...).hostname` in JavaScript strips
+  the brackets exactly as Python's URL parser does, so they must be added back by
+  hand). A credential embedded in the input is absent from that URL for a categorically
+  different reason than the scheme, host and port are present in it: userinfo is a
+  component the parse never reads at all, so there is nothing to strip, while the
+  scheme, host and port are components the parse does read and does publish, exactly
+  as given, because the rebuilt URL is meant to be the endpoint the input actually
+  named — conflating "never read" with "read and kept" is exactly what silently drops
+  a port or upgrades a scheme. A `git://`/`ssh://` remote (or a scp-style one, already
+  normalised to an http(s) form before it ever reaches a card) has its scheme read
+  correctly too, but that scheme is not one of the two ever republished, so it is
+  treated the same as anything else that does not parse — not "present but
+  downgraded", simply never a candidate for reconstruction.
+
+  **Anything that is not a publishable reference is not filtered or rejected by
+  shape — it is a different case with a different display rule.** It is shown by its
+  own last path segment alone (splitting on both `/` and `\`, since nothing about the
+  field's type rules out a Windows-style value even though nothing here produces one),
+  with no repo or commit shown at all — control characters stripped from the result,
+  and a result left empty by that stripping shown as the literal `skill` (a card that
+  installed a skill must not report installing none). This is the same case a Windows
+  drive letter or a UNC share falls into, and for the same reason a control character
+  in the owner or repo of an otherwise well-formed URL does too: each is a value the
+  parse either never had a scheme/host/port/owner/repo to extract from, or refuses to
+  publish once extracted — never "present but withheld", simply not a reference.
 
 ## Canonicalisation and the digest
 

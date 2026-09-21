@@ -25,29 +25,12 @@ follows: no value on the wire is a string tp received, every published value
 is reconstructed from parsed components. `card_label`/`_skill_ref`
 (`trap.models.card`) parse a skill reference into ``(scheme, authority,
 owner, repo, commit)`` and publish only those five values, glued into a
-fixed template -- never a slice of the original string. Not everything this
-rebuilds is the same kind of thing, and rounds 4 and 5 of review each found
-that treating two of them alike was itself a bug: a skill's embedded
-credentials never reach the wire because userinfo is simply never read out
-of the parsed URL, full stop -- but the scheme and the port, when the input
-had one, are read (`.scheme`, `.port`) and published *as given*, because the
-published URL is meant to be the real endpoint; silently dropping the port or
-hard-coding `https` regardless of an `http`-only remote each pointed readers
-somewhere the input did not. An IPv6 literal's brackets, which parsing strips
-and nothing but `_authority` puts back, are the same kind of "must be
-reconstructed correctly" concern as the scheme and the port, not the same
-kind of "must never be read" concern as a credential. A Windows drive letter
-or a UNC share still never reaches the wire, the same way it never did: it is
-not a URL at all, so there is no scheme or authority to parse out of it in
-the first place. A `git://`/`ssh://` remote (or a scp-style one -- already
-normalised to an http(s) form before it ever reaches a card) is rejected for
-a related but distinct reason: its scheme is read, and read correctly, but
-it is not one of the two this ever republishes, so it falls to the leaf
-exactly as a filesystem path does. A skill that does not parse into those
-five components is named by its own leaf alone -- the one value derived from
-the original string that is always safe to publish, control characters
-stripped (round 4; cheap and defensive, since no real forge allows one in a
-remote name).
+fixed template -- never a slice of the original string, and never a control
+character. `_parse_skill`'s own docstring states the rule in full (in
+particular why a credential is never read while a scheme/host/port are read
+and kept exactly as given -- those are not the same kind of guarantee); a
+skill that does not parse into a publishable reference is named by its own
+leaf alone (`_skill_leaf`).
 A group the user switched off is ``disabled`` with the flag that did it. The
 site shows all three as what they are.
 """
@@ -300,22 +283,16 @@ def _skills(card: SolutionCard | None) -> dict[str, Any]:
 def _skill_ref(skill: str) -> dict[str, str]:
     """A publishable reference names the skill by its repo alone, with a
     ``repo`` field **reconstructed** as ``{scheme}://{authority}/{owner}/{repo}``
-    -- never the string ``skill`` itself. ``scheme`` is the input's own
-    ``http``/``https`` (round 5: never hard-coded to ``https``, the same
-    defect class as dropping the port -- a reconstruction that points
-    somewhere the input did not). ``authority`` (`_authority`,
-    `trap.models.card`) is the host, re-bracketed if it is an IPv6 literal,
-    with the port appended when the input had one: the published URL is
-    meant to be the real endpoint, so unlike a credential -- which is simply
-    never read, structurally, not detected and filtered out -- the scheme
-    and the port are both read and kept, as given. Anything `_parse_skill`
-    would not parse is named by its own last path segment instead
-    (`_skill_leaf`), with no ``repo`` or ``commit`` field at all -- the
-    site's ``SkillRef`` requires only ``name``, so that is schema-legal.
+    -- never the string ``skill`` itself, and never with the scheme
+    hard-coded: `_parse_skill` (`trap.models.card`, which states the full
+    rule) returns the input's own scheme and an ``authority`` already
+    re-bracketed and ported by `_authority`. Anything `_parse_skill` would
+    not parse is named by its own last path segment instead (`_skill_leaf`),
+    with no ``repo`` or ``commit`` field at all -- the site's ``SkillRef``
+    requires only ``name``, so that is schema-legal.
 
-    Shares its parse (`_parse_skill`, `trap.models.card`) with `card_label`,
-    so the name shown here and the name shown in ``identity.name`` for the
-    same skill never disagree."""
+    Shares its parse with `card_label`, so the name shown here and the name
+    shown in ``identity.name`` for the same skill never disagree."""
     parsed = _parse_skill(skill)
     if parsed is None:
         return {"name": _skill_leaf(skill)}
