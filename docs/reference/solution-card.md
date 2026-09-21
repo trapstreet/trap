@@ -57,19 +57,31 @@ only in a comment:
   itself contains one, e.g. `git@host:owner/repo`, is not split in the wrong place)
   into a candidate repo and a candidate commit. It is a **publishable reference**
   exactly when the commit half is **lowercase hex, 7 to 64 characters**, and the repo
-  half is an **http(s) URL** with a host and exactly two path segments (owner, repo,
-  an optional `.git` suffix on the repo segment stripped). A publishable reference is
-  shown as `owner/repo`, with the commit's first 7 characters alongside it — the host,
-  and anything the parse did not name (a URL's userinfo, a port, whatever came before
-  or after the parsed pieces), is simply never read again, so it cannot be shown by
-  accident. **A `skill` that does not parse this way is not filtered or rejected by
-  shape — it is a different case with a different display rule**: it is shown by its
-  own last path segment alone (splitting on both `/` and `\`, since nothing produces a
-  Windows-style `skill` today but nothing about the field's type rules one out either),
-  with no repo or commit shown at all. This one rule is what keeps a git remote's
-  embedded credentials, a URL's port, and a Windows drive letter or UNC share off the
-  site without naming any of them specifically: none of the three is a component the
-  parse ever names, so none of the three is ever available to show, in either case.
+  half is an **http(s) URL** with a host and exactly two path segments (owner, repo, an
+  optional `.git` suffix on the repo segment stripped, and a well-formed port when one
+  is present — an implementation that raises on a malformed port, as a JS `URL` getter
+  does not but a naive integer-cast would, should treat that the same as "does not
+  parse"). A publishable reference is shown as `owner/repo`, with the commit's first 7
+  characters alongside it, and its **`repo` URL is rebuilt as `https://<host>/<owner>/<repo>`
+  — with the port appended when the input had one, and an IPv6 host re-bracketed** (a
+  bare IPv6 address is not a valid URL host; `new URL(...).hostname` in JavaScript
+  strips the brackets exactly as Python's URL parser does, so both must be added back
+  by hand, not left wherever the parser happened to put them, which is nowhere). A
+  credential embedded in the input is absent from that URL for a different reason than
+  the host and port are present in it: userinfo is a component the parse never reads at
+  all, so there is nothing to strip, while the port is a component the parse does read
+  and does publish, because the rebuilt URL is meant to be the endpoint the input
+  actually named — one is "never read", the other is "read and kept", and treating them
+  as the same rule is exactly the mistake that silently drops the port. **A `skill` that
+  does not parse this way is not filtered or rejected by shape — it is a different case
+  with a different display rule**: it is shown by its own last path segment alone
+  (splitting on both `/` and `\`, since nothing produces a Windows-style `skill` today
+  but nothing about the field's type rules one out either; any control character in the
+  result is stripped, and a result left empty by that stripping is shown as the literal
+  `skill`), with no repo or commit shown at all. A Windows drive letter or a UNC share
+  falls into this second case for a simple reason distinct from the credential rule:
+  neither one is a URL at all, so there is no host, port, owner or repo to parse out of
+  it in the first place — not "present but withheld", simply never extracted.
 
 ## Canonicalisation and the digest
 

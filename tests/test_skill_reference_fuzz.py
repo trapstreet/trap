@@ -1,38 +1,40 @@
-"""A permanent, seeded fuzz corpus over `card.skill`, and the two properties that
-would have caught every leak found in this card's naming logic so far.
+"""A permanent, seeded fuzz corpus over `card.skill`, checked against an oracle
+that computes the *expected wire value* independently of the code under test.
 
-Three rounds of review found four leaks in `card_label` / `live.context._skill_ref`
-(a username via an unresolved local directory; an npm-scoped path and an
-email-shaped username, both mistaken for `repo@sha` by a separator's mere presence;
-a git remote's embedded HTTP Basic credentials; a Windows drive letter and a UNC
-share, neither caught by a POSIX-only guard) -- and each time, a hand-built
-generator was written to catch the specific shape just found, then deleted. Branch
-coverage sat at 100% throughout: every leak was a *missing test*, not a missing
-line, so 100% coverage on its own never would have caught the next one.
+Four leaks have been found in this card's naming logic across four rounds of
+review: a username via an unresolved local directory; an npm-scoped path and an
+email-shaped username, both mistaken for `repo@sha` by a separator's mere
+presence; a git remote's embedded HTTP Basic credentials; a Windows drive
+letter and a UNC share, neither caught by a POSIX-only guard; and, in round 4,
+a port silently dropped and an IPv6 host's brackets silently lost -- the *other*
+failure mode of "reconstruct from parsed components", where the rebuilt value
+is not a leak but a lie about where the skill actually lives.
 
-This is that generator, kept, run on every test invocation instead of once by
-hand. It does not try to enumerate dangerous shapes -- that is exactly the game
-that lost three times running -- it builds inputs from named, tracked components
-and checks two properties that hold regardless of which component combination
-produced the input:
+Round 4's fix is also a fix to this file. The round 1-3 version of this fuzzer
+checked a *substring* property: for each generated input, none of a fixed list
+of "forbidden" tokens planted at generation time (a home directory, a
+credential) could appear in the wire. That property is why the port bug
+survived this fuzzer's own corpus: `_url_cases` forbade the port digits from
+appearing at all, so *dropping* the port -- exactly the round 4 bug -- made
+the forbidden-token check pass, not fail. A substring check against planted
+tokens can only ever catch a mutation that moves one of those tokens; it
+structurally cannot catch a mutation that *omits* a value the test never
+asserted should be there.
 
-1. the ``name`` field this module ever emits (`skills.installed[0]["name"]`) never
-   contains a path separator, "/" or "\\\\" -- true whether or not `_parse_skill`
-   resolved anything, since `card_label`/`_skill_ref` never emit anything else in
-   that slot.
-2. for every generated input, none of the *specific strings used to build its
-   unpublishable parts* -- a home directory's distinguishing token, an npm scope,
-   an embedded credential, a port number -- appear anywhere in the JSON patch,
-   whether or not the input happened to resolve to a publishable reference.
-   (What legitimately *does* survive resolution -- host, owner, repo, the
-   commit's first 7 characters -- is checked by the exact-value regression tests
-   in ``test_solution_card.py`` and ``test_context.py`` instead: this fuzz corpus
-   is deliberately built so that every one of its inputs' *sensitive* components
-   never has a legitimate reason to reach the wire, so property 2 needs no case
-   analysis of "resolved or not" to stay meaningful.)
+The fix: since every case here is built from named, known components, the
+test can compute -- independently of `card_label`/`_skill_ref`, by restating
+the spec rather than calling into it -- exactly what the faithful published
+value should be, and assert equality against the whole thing (`skills.installed[0]`,
+and the skill segment of `identity.name`), not just the absence of a few
+tokens. This is what makes the test able to catch a shape nobody predicted:
+a missing port, a wrong scheme, a stray `.query` byte, would all show up as an
+equality mismatch even though none of them was ever named "forbidden".
 
-No new dependency: `random.Random` with a fixed seed, plus `itertools.product`
-over the component lists below.
+The substring checks are kept anyway, as cheap extra guards for the one thing
+an equality check does not make redundant: they are what proves a *specific
+planted secret* (a credential, a home directory's username) never appears
+*anywhere* in the JSON, not merely that the one field they might have leaked
+into has the right value.
 """
 
 from __future__ import annotations
@@ -40,6 +42,8 @@ from __future__ import annotations
 import itertools
 import json
 import random
+import re
+from dataclasses import dataclass, field
 
 from trap.live.context import build_context
 from trap.models.card import SolutionCard
@@ -55,10 +59,57 @@ def _random_token(length: int) -> str:
     return "".join(_RNG.choice("abcdefghijklmnopqrstuvwxyz0123456789") for _ in range(length))
 
 
+# -- the oracle ---------------------------------------------------------------
+# Independent restatements of the spec `trap.models.card` implements -- not
+# calls into it. Re-declared here on purpose: if a future change to the
+# implementation silently drifts from the spec these encode, this file's own
+# copy does not drift with it, so the mismatch is exactly what gets caught.
+
+_COMMIT_RE = re.compile(r"[0-9a-f]{7,64}")
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _expected_leaf(skill: str) -> str:
+    """What `_skill_leaf` should return for an unresolved `skill`: strip a
+    trailing ``@<valid-hex-commit>`` if present, split on "/" and "\\", take
+    the last non-empty piece, strip control characters, fall back to "skill"
+    if that leaves nothing."""
+    repo_candidate, sep, commit = skill.rpartition("@")
+    base = repo_candidate if sep and _COMMIT_RE.fullmatch(commit) else skill
+    pieces = [piece for piece in re.split(r"[/\\]", base) if piece]
+    leaf = pieces[-1] if pieces else base
+    leaf = _CONTROL_RE.sub("", leaf)
+    return leaf or "skill"
+
+
+def _expected_authority(host: str, is_ipv6: bool, port: int | None) -> str:
+    """What `_authority` should return: the host, re-bracketed if it is an
+    IPv6 literal, with the port appended when there is one."""
+    wrapped = f"[{host}]" if is_ipv6 else host
+    return f"{wrapped}:{port}" if port is not None else wrapped
+
+
+@dataclass(frozen=True)
+class _Case:
+    skill: str
+    #: The exact expected `skills.installed[0]` dict.
+    expected_installed: dict[str, str]
+    #: The exact expected skill segment of `identity.name` (this test's card
+    #: always has a fixed agent/model, so `identity.name` is always
+    #: ``f"pkg@1 · m · {expected_label_segment}"``).
+    expected_label_segment: str
+    #: Specific strings planted at generation time that must never appear
+    #: anywhere in the wire, whatever `expected_installed` says -- a home
+    #: directory's token, a credential, a distinctive query/fragment marker.
+    forbidden: tuple[str, ...] = field(default_factory=tuple)
+
+
 # -- component pools ---------------------------------------------------------------
-# The classes the reviewer named: home directories including a Windows drive path
-# and a UNC share; npm scopes; unicode and spaces in the leaf; trailing slashes;
-# 6/7/40/64/65-character and uppercase hex; URLs with ports and with userinfo.
+# The classes the reviewer named across rounds 2-4: home directories including a
+# Windows drive path and a UNC share; npm scopes; unicode, spaces and a control
+# character in the leaf; trailing slashes; 6/7/40/64-character and uppercase hex;
+# non-hex branch/tag names; schemes including one that must never resolve; hosts
+# including IPv6 literals; ports; userinfo; query strings; fragments.
 
 #: path -> the tokens in it that must never reach the wire (its own leaf excluded --
 #: none of these pools' leaves share a token with a home directory or npm scope, so
@@ -77,7 +128,9 @@ for _path in list(_HOME_DIRS):
         _HOME_DIRS[_path] = [_path.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]]
 
 _NPM_SCOPES = ["", "@my-org"]
-_LEAVES = ["my-skill", "skill with spaces", "skïll-ünïcode"]
+#: A leaf with a control character in it (round 4) -- `_expected_leaf` strips
+#: it, same as the last non-control character it shares no other token with.
+_LEAVES = ["my-skill", "skill with spaces", "skïll-ünïcode", "skill\x00name"]
 _TRAILING = ["", "/"]
 
 _HEX7 = "a" * 7
@@ -94,19 +147,12 @@ _PATH_COMMITS: dict[str, str | None] = {
     "branchname": "main",
 }
 
-_URL_SCHEMES = ["https://", "http://", "ftp://"]
-_URL_HOSTS = ["github.com", "gitlab.example.com:9418"]  # the second carries a port
-_USERINFO = ["", "oauth2:ghp_SECRETTOKEN1234@", f"user:{_random_token(16)}@"]
-_OWNER_REPO = [("owner", "repo"), ("a", "b")]
-#: A URL case always has a commit suffix (an "@"-free URL is a `_path_cases`
-#: concern -- it would just be one more "no @ at all" input).
-_URL_COMMITS = {k: v for k, v in _PATH_COMMITS.items() if v is not None}
 
-
-def _path_cases() -> list[tuple[str, list[str]]]:
-    """``(skill, forbidden)`` for every path-shaped input: never a `scheme://`
-    URL, so `_parse_skill` can never resolve one no matter what commit-shaped
-    tail is glued on -- only the leaf may ever appear on the wire."""
+def _path_cases() -> list[_Case]:
+    """Every path-shaped input: never a `scheme://` URL, so `_parse_skill` can
+    never resolve one no matter what commit-shaped tail is glued on -- the
+    expected wire value is always the leaf alone, computed the same way
+    whether or not a (valid or invalid) commit is attached."""
     cases = []
     for home, forbidden in _HOME_DIRS.items():
         for scope in _NPM_SCOPES:
@@ -117,35 +163,100 @@ def _path_cases() -> list[tuple[str, list[str]]]:
                         skill = f"{home}/{segment}{trailing}"
                         if commit is not None:
                             skill = f"{skill}@{commit}"
+                        expected = _expected_leaf(skill)
                         case_forbidden = list(forbidden)
                         if scope:
                             case_forbidden.append(scope)
-                        cases.append((skill, case_forbidden))
+                        cases.append(_Case(skill, {"name": expected}, expected, tuple(case_forbidden)))
     return cases
 
 
-def _url_cases() -> list[tuple[str, list[str]]]:
-    """``(skill, forbidden)`` for every URL-shaped input: a legitimate host and
-    a legitimate owner/repo, with userinfo and/or a port layered on as noise.
-    Resolution may or may not succeed depending on the commit and scheme, but
-    the injected credential and port must never appear on the wire regardless
-    -- `_parse_skill` never reads a URL's userinfo, and never reads its port,
-    whether or not the rest of the URL turns out to be publishable."""
+@dataclass(frozen=True)
+class _Host:
+    bare: str  # never bracketed, never carries a port
+    is_ipv6: bool
+
+
+_HOSTS = [
+    _Host("gitlab.example.com", False),
+    _Host("::1", True),
+    _Host("2001:db8::1", True),
+]
+_PORTS = [None, 9999]
+_OWNER_REPO = [("owner", "repo"), ("a", "b")]
+#: Distinctive markers -- never appear anywhere else in this file's strings --
+#: so a query string or fragment leaking (the reconstruct rule applies to them
+#: too: nothing `_parse_skill` did not choose to extract should reach the wire)
+#: is as detectable as a credential leaking.
+_SUFFIXES = ["", "?ref=refMARKER111", "#fragMARKER222"]
+_SCHEMES = ["https://", "http://", "ftp://"]  # ftp:// must never resolve
+
+_RANDOM_CREDENTIAL = _random_token(16)
+#: (the literal userinfo text, or None; the secret substring that must never
+#: survive, or None when there is no userinfo at all).
+_USERINFO: list[tuple[str, str | None]] = [
+    ("", None),
+    ("oauth2:ghp_SECRETTOKEN1234@", "ghp_SECRETTOKEN1234"),
+    (f"user:{_RANDOM_CREDENTIAL}@", _RANDOM_CREDENTIAL),
+]
+#: A URL case always has a commit suffix -- an "@"-free URL is a `_path_cases`
+#: concern, one more "no @ at all" input.
+_URL_COMMITS = {k: v for k, v in _PATH_COMMITS.items() if v is not None}
+
+
+def _url_cases() -> list[_Case]:
+    """Every URL-shaped input: a host (plain or IPv6, with or without a port),
+    optional userinfo, optional query/fragment noise, and a commit that may or
+    may not be valid, over a scheme that may or may not be http(s). The
+    expected wire value is computed independently for each combination: a
+    faithfully reconstructed reference (port and IPv6 brackets included,
+    credentials and query/fragment excluded) when the combination should
+    resolve, the shared leaf oracle otherwise."""
     cases = []
-    for scheme, userinfo, host, (owner, repo), commit in itertools.product(
-        _URL_SCHEMES, _USERINFO, _URL_HOSTS, _OWNER_REPO, _URL_COMMITS.values()
+    for scheme, (userinfo, secret), host, port, (owner, repo), suffix, commit in itertools.product(
+        _SCHEMES, _USERINFO, _HOSTS, _PORTS, _OWNER_REPO, _SUFFIXES, _URL_COMMITS.values()
     ):
-        skill = f"{scheme}{userinfo}{host}/{owner}/{repo}@{commit}"
-        forbidden = []
-        if userinfo:
-            forbidden.append(userinfo.split(":", 1)[1].rstrip("@"))  # the secret half
-        if ":" in host:
-            forbidden.append(host.split(":", 1)[1])  # the port digits
-        cases.append((skill, forbidden))
+        host_in_url = f"[{host.bare}]" if host.is_ipv6 else host.bare
+        netloc = f"{host_in_url}:{port}" if port is not None else host_in_url
+        skill = f"{scheme}{userinfo}{netloc}/{owner}/{repo}{suffix}@{commit}"
+
+        resolves = scheme in ("https://", "http://") and _COMMIT_RE.fullmatch(commit) is not None
+        forbidden = [secret] if secret else []
+        if resolves:
+            authority = _expected_authority(host.bare, host.is_ipv6, port)
+            expected_installed = {
+                "name": repo,
+                "repo": f"https://{authority}/{owner}/{repo}",
+                "commit": commit,
+            }
+            expected_label = f"{owner}/{repo}@{commit[:7]}"
+            # Only meaningful once resolved: an *unresolved* case's leaf is
+            # computed from the whole string, marker included, by design --
+            # the equality check above already covers that value exactly, so
+            # forbidding the marker there would flag correct behaviour.
+            if suffix:
+                forbidden.append(suffix.lstrip("?#"))
+        else:
+            leaf = _expected_leaf(skill)
+            expected_installed = {"name": leaf}
+            expected_label = leaf
+
+        cases.append(_Case(skill, expected_installed, expected_label, tuple(forbidden)))
     return cases
 
 
-_CASES = _path_cases() + _url_cases()
+#: A control character in a resolved URL's owner/repo -- its own case, outside
+#: the main product (adding it as a dimension there would multiply the corpus
+#: for no extra coverage; the resolved/unresolved boundary it exercises does
+#: not interact with any of the other dimensions).
+_CONTROL_IN_PATH_CASE = _Case(
+    f"https://github.com/owner/repo\x00secret@{_HEX40}",
+    {"name": _expected_leaf(f"https://github.com/owner/repo\x00secret@{_HEX40}")},
+    _expected_leaf(f"https://github.com/owner/repo\x00secret@{_HEX40}"),
+    (),
+)
+
+_CASES = _path_cases() + _url_cases() + [_CONTROL_IN_PATH_CASE]
 
 _PROFILE = Profile()
 _PROVENANCE = Provenance(solution=GitProvenance())
@@ -163,27 +274,44 @@ def test_the_corpus_is_not_empty_and_stays_a_fixed_size():
     # above) would make every test below vacuously pass. Pinning the exact
     # count catches that, and catches the corpus silently growing unboundedly
     # slow just as fast.
-    assert len(_CASES) == len(_path_cases()) + len(_url_cases())
-    assert 500 <= len(_CASES) <= 5000
+    assert len(_CASES) == len(_path_cases()) + len(_url_cases()) + 1
+    assert 500 <= len(_CASES) <= 10000
 
 
 def test_every_emitted_skill_name_is_a_single_segment():
-    # Property 1: whether or not `_parse_skill` resolved the input, the one
-    # thing `skills.installed[0]["name"]` is ever built from -- a parsed
-    # `repo` segment, or `_skill_leaf`'s own leaf -- cannot contain a path
-    # separator.
-    for skill, _forbidden in _CASES:
-        name = _patch_for(skill)["skills"]["installed"][0]["name"]
-        assert "/" not in name and "\\" not in name, f"skill={skill!r} name={name!r}"
+    # Kept as a cheap extra guard: whether or not `_parse_skill` resolved the
+    # input, the one thing `skills.installed[0]["name"]` is ever built from --
+    # a parsed `repo` segment, or the leaf -- cannot contain a path separator.
+    for case in _CASES:
+        name = _patch_for(case.skill)["skills"]["installed"][0]["name"]
+        assert "/" not in name and "\\" not in name, f"skill={case.skill!r} name={name!r}"
 
 
-def test_no_sensitive_component_used_to_build_an_input_reaches_the_wire():
-    # Property 2: this is the one that would have caught all four leaks
-    # without anyone predicting their shape -- none of the *specific strings
-    # this test used to build the unpublishable parts of an input* (a home
-    # directory's token, an npm scope, an embedded credential, a port) may
-    # appear anywhere in the JSON patch, however that input was assembled.
-    for skill, forbidden in _CASES:
-        wire = json.dumps(_patch_for(skill))
-        for secret in forbidden:
-            assert secret not in wire, f"skill={skill!r} leaked {secret!r}"
+def test_no_planted_secret_reaches_the_wire():
+    # Kept as a cheap extra guard, narrowed from round 1-3's version: a port
+    # is no longer forbidden (round 4 -- it is now a legitimate, expected part
+    # of a resolved reference), but a planted credential, a home directory's
+    # token, and a query/fragment marker still must never appear anywhere in
+    # the JSON, regardless of what `expected_installed` says for that case.
+    for case in _CASES:
+        wire = json.dumps(_patch_for(case.skill))
+        for secret in case.forbidden:
+            assert secret not in wire, f"skill={case.skill!r} leaked {secret!r}"
+
+
+def test_every_case_matches_its_independently_expected_wire_value():
+    # The property that replaces round 1-3's substring check: every generated
+    # case's `skills.installed[0]` and `identity.name` skill segment must
+    # equal the value this file computed *from the same named components*,
+    # independently of `card_label`/`_skill_ref`/`_parse_skill`. A dropped
+    # port, a wrong scheme boundary, a stray query byte -- anything that
+    # changes the *value* rather than merely reintroducing a planted token --
+    # shows up here as an equality mismatch, which is what a substring check
+    # against a fixed forbidden list can never do.
+    for case in _CASES:
+        patch = _patch_for(case.skill)
+        installed = patch["skills"]["installed"][0]
+        name = patch["identity"]["name"]
+        assert installed == case.expected_installed, f"skill={case.skill!r} installed={installed!r}"
+        expected_name = f"pkg@1 · m · {case.expected_label_segment}"
+        assert name == expected_name, f"skill={case.skill!r} name={name!r}"

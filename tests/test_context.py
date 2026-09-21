@@ -566,6 +566,39 @@ def test_identity_and_skills_installed_never_leak_a_unc_path():
     assert name.endswith(installed_name)
 
 
+def test_skills_installed_keeps_a_non_default_port_while_dropping_the_credential():
+    # round 4, the severe one: the reviewer's exact repro. The credential is
+    # correctly gone; the published endpoint must be the real one, port
+    # included -- not the default port, which is where the input did NOT
+    # point.
+    commit = "a" * 40
+    card = ACP_CARD.model_copy(
+        update={"skill": f"https://user:pass@gitlab.internal.example.com:9999/owner/repo@{commit}"}
+    )
+    patch = _context(card=card)
+    assert patch["skills"] == {
+        "installed": [
+            {"name": "repo", "repo": "https://gitlab.internal.example.com:9999/owner/repo", "commit": commit}
+        ]
+    }
+    wire = json.dumps(patch)
+    assert "user" not in wire and "pass" not in wire
+
+
+def test_skills_installed_rebrackets_an_ipv6_host():
+    # round 4: `urlsplit(...).hostname` strips the brackets an IPv6 literal
+    # needs to remain a valid URL -- `https://[::1]:8443/a/b` must not become
+    # `https://::1:8443/a/b`, which is not a URL a browser or `new URL()`
+    # will parse the way the input intended.
+    commit = "a" * 40
+    card = ACP_CARD.model_copy(update={"skill": f"https://[::1]:8443/a/b@{commit}"})
+    patch = _context(card=card)
+    assert patch["skills"] == {
+        "installed": [{"name": "b", "repo": "https://[::1]:8443/a/b", "commit": commit}]
+    }
+    assert patch["identity"]["name"] == "claude-agent-acp@0.76.0 · sonnet · a/b@" + commit[:7]
+
+
 def test_a_card_without_options_adds_no_model_config():
     # The card that is not ACP (above) also carries no options -- covers the
     # branch where a card exists but `card.options` is empty, distinctly from

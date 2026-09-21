@@ -11,6 +11,7 @@ from trap.models.card import (
     DIGEST_FIELDS,
     SolutionCard,
     _parse_skill,
+    _skill_leaf,
     canonical_card_json,
     card_digest,
     card_label,
@@ -227,6 +228,89 @@ def test_a_dot_git_suffix_on_a_real_repo_name_is_stripped_not_rejected():
     # still resolves normally.
     commit = "a" * 40
     assert _parse_skill(f"https://github.com/a/b.git@{commit}") == ("github.com", "a", "b", commit)
+
+
+def test_a_non_default_port_is_kept_in_the_parsed_authority():
+    # round 4, the severe one: `_parse_skill` read `.hostname` and never
+    # `.port`, so a self-hosted remote on a non-standard port -- an ordinary
+    # internal GitLab or Gitea, reachable through real code via
+    # `ParsedGitUrl.normalised_url`, which returns the http(s) remote verbatim
+    # including its port -- published a URL pointing at the default port
+    # instead of the one the input actually named. The credential being
+    # correctly absent does not make the published endpoint correct.
+    commit = "a" * 40
+    parsed = _parse_skill(f"https://user:pass@gitlab.internal.example.com:9999/owner/repo@{commit}")
+    assert parsed == ("gitlab.internal.example.com:9999", "owner", "repo", commit)
+
+
+def test_an_ipv6_host_keeps_its_brackets():
+    # round 4: `urlsplit(...).hostname` strips the `[...]` an IPv6 literal
+    # needs to remain a valid URL authority -- `.hostname` for
+    # `https://[::1]/a/b` is the bare `::1`, which `new URL()` (and a Python
+    # re-parse) reads as a bare string with colons, not an IPv6 address.
+    # The brackets must be added back, not merely left wherever `.hostname`
+    # happened to put them (nowhere).
+    commit = "a" * 40
+    assert _parse_skill(f"https://[::1]/a/b@{commit}") == ("[::1]", "a", "b", commit)
+
+
+def test_an_ipv6_host_with_a_port_keeps_both():
+    commit = "a" * 40
+    assert _parse_skill(f"https://[2001:db8::1]:8443/a/b@{commit}") == (
+        "[2001:db8::1]:8443",
+        "a",
+        "b",
+        commit,
+    )
+
+
+def test_reconstructing_from_netloc_would_reopen_the_credential_leak():
+    # Documents *why* the authority is built from `.hostname` + `.port`
+    # rather than from `.netloc` (which already has the brackets and the port
+    # in the right place, and would be the "obvious" shortcut): `.netloc`
+    # also carries userinfo verbatim when the input had any.
+    from urllib.parse import urlsplit
+
+    parsed = urlsplit("https://oauth2:ghp_SECRETTOKEN1234@github.com:9999/owner/repo")
+    assert "ghp_SECRETTOKEN1234" in parsed.netloc
+    assert "ghp_SECRETTOKEN1234" not in (parsed.hostname or "")
+
+
+def test_a_malformed_port_is_treated_as_unresolved():
+    # `urlsplit(...).port` raises ValueError for a non-numeric or out-of-range
+    # port rather than returning None -- a caller that let that propagate
+    # would turn a bad port into a crash instead of "this did not resolve".
+    assert _parse_skill("https://host:not-a-port/owner/repo@" + "a" * 40) is None
+
+
+def test_a_control_character_in_the_repo_segment_is_treated_as_unresolved():
+    # round 4, cheap and defensive (no real forge allows this in a remote
+    # name): a NUL inside an otherwise well-formed segment must not reach
+    # `identity.name` or `skills.installed` verbatim.
+    assert _parse_skill("https://github.com/owner/repo\x00secret@" + "a" * 40) is None
+
+
+def test_a_control_character_in_the_owner_segment_is_treated_as_unresolved():
+    # Its own test, its own statement in `_parse_skill` -- owner and repo are
+    # checked one at a time, not folded into one `or`, so a control character
+    # in *either* half is independently exercised.
+    assert _parse_skill("https://github.com/own\x00er/repo@" + "a" * 40) is None
+
+
+def test_the_label_strips_a_control_character_from_an_unresolved_leaf():
+    card = SolutionCard(
+        shape="acp", shape_version=1, agent="pkg@1", model="sonnet", skill="/Users/alice/my-sk\x00ill"
+    )
+    label = card_label(card)
+    assert label == "pkg@1 · sonnet · my-skill"
+    assert "\x00" not in label
+
+
+def test_a_leaf_that_is_only_control_characters_is_named_literally_skill():
+    # A card that installed a skill must not report that it installed none --
+    # `SkillRef` requires a `name`, so an empty string is not schema-legal,
+    # and would be indistinguishable from "no skill" besides.
+    assert _skill_leaf("/Users/alice/\x00\x01\x7f") == "skill"
 
 
 def test_the_label_never_leaks_credentials_embedded_in_a_skills_remote_url():

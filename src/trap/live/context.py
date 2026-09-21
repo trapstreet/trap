@@ -23,15 +23,24 @@ labels only, never the card's own command line (R12; see ``build_context``'s
 A skill's name is held to the same rule the rest of this module already
 follows: no value on the wire is a string tp received, every published value
 is reconstructed from parsed components. `card_label`/`_skill_ref`
-(`trap.models.card`) parse a skill reference into ``(host, owner, repo,
+(`trap.models.card`) parse a skill reference into ``(authority, owner, repo,
 commit)`` and publish only those four values, glued into a fixed template --
-never a slice of the original string. A skill's embedded credentials, a URL's
-port, a Windows drive letter, a UNC share: none of these can reach the wire,
-not because each is individually detected and rejected (three rounds of
-review found leaks in exactly that approach), but because none of them is
-ever read out of the parsed reference in the first place. A skill that does
+never a slice of the original string. Two of the things this rebuilds are not
+the same kind of thing, and round 4 of review found that treating them alike
+was itself a bug: a skill's embedded credentials never reach the wire because
+userinfo is simply never read out of the parsed URL, full stop -- but a port,
+when the input had one, is read (`.port`) and published, because the
+published URL is meant to be the real endpoint; dropping it silently pointed
+readers at the wrong host. An IPv6 literal's brackets, which parsing strips
+and nothing but `_authority` puts back, are the same kind of "must be
+reconstructed correctly" concern as the port, not the same kind of "must
+never be read" concern as a credential. A Windows drive letter or a UNC share
+still never reaches the wire, the same way it never did: it is not a URL at
+all, so there is no authority to parse in the first place. A skill that does
 not parse into those four components is named by its own leaf alone -- the
-one value derived from the original string that is always safe to publish.
+one value derived from the original string that is always safe to publish,
+control characters stripped (round 4; cheap and defensive, since no real
+forge allows one in a remote name).
 A group the user switched off is ``disabled`` with the flag that did it. The
 site shows all three as what they are.
 """
@@ -283,14 +292,16 @@ def _skills(card: SolutionCard | None) -> dict[str, Any]:
 
 def _skill_ref(skill: str) -> dict[str, str]:
     """A publishable reference names the skill by its repo alone, with a
-    ``repo`` field **reconstructed** as ``https://{host}/{owner}/{repo}`` --
-    never the string ``skill`` itself, so nothing that string carried and
-    `_parse_skill` chose not to extract (a URL's embedded credentials, a
-    port, a Windows drive letter) can appear here, structurally, not because
-    it was detected and filtered out. Anything `_parse_skill` would not parse
-    is named by its own last path segment instead (`_skill_leaf`), with no
-    ``repo`` or ``commit`` field at all -- the site's ``SkillRef`` requires
-    only ``name``, so that is schema-legal.
+    ``repo`` field **reconstructed** as ``https://{authority}/{owner}/{repo}``
+    -- never the string ``skill`` itself. ``authority`` (`_authority`,
+    `trap.models.card`) is the host, re-bracketed if it is an IPv6 literal,
+    with the port appended when the input had one: the published URL is
+    meant to be the real endpoint, so unlike a credential -- which is simply
+    never read, structurally, not detected and filtered out -- the port is
+    read and kept. Anything `_parse_skill` would not parse is named by its
+    own last path segment instead (`_skill_leaf`), with no ``repo`` or
+    ``commit`` field at all -- the site's ``SkillRef`` requires only
+    ``name``, so that is schema-legal.
 
     Shares its parse (`_parse_skill`, `trap.models.card`) with `card_label`,
     so the name shown here and the name shown in ``identity.name`` for the
@@ -298,8 +309,8 @@ def _skill_ref(skill: str) -> dict[str, str]:
     parsed = _parse_skill(skill)
     if parsed is None:
         return {"name": _skill_leaf(skill)}
-    host, owner, repo, commit = parsed
-    return {"name": repo, "repo": f"https://{host}/{owner}/{repo}", "commit": commit}
+    authority, owner, repo, commit = parsed
+    return {"name": repo, "repo": f"https://{authority}/{owner}/{repo}", "commit": commit}
 
 
 def _disabled(flag: str) -> dict[str, str]:
