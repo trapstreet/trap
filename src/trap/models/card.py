@@ -10,6 +10,12 @@ The rules here are shared with the server, which recomputes the digest from what
 received and refuses a submission whose declared digest disagrees. Both sides run
 ``tests/data/solution_card_vectors.json``; the format is written down in
 ``docs/reference/solution-card.md``.
+
+`_parse_skill`, `_skill_leaf` and `_authority` are underscored because nothing
+outside this repository should call them, but they are part of this module's
+contract with `trap.live.context`, which shares them so that ``identity.name``
+and ``skills.installed`` can never disagree about whether a skill resolved.
+Rename them with that caller in hand.
 """
 
 from __future__ import annotations

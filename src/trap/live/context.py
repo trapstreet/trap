@@ -291,8 +291,10 @@ def _skill_ref(skill: str) -> dict[str, str]:
     with no ``repo`` or ``commit`` field at all -- the site's ``SkillRef``
     requires only ``name``, so that is schema-legal.
 
-    Shares its parse with `card_label`, so the name shown here and the name
-    shown in ``identity.name`` for the same skill never disagree."""
+    Shares its parse with `card_label`, so the two never disagree about
+    whether a skill *resolved* -- the text differs on purpose (``repo`` here,
+    ``owner/repo@sha7`` there), but a skill named by its leaf in one is never
+    named by a reference in the other."""
     parsed = _parse_skill(skill)
     if parsed is None:
         return {"name": _skill_leaf(skill)}

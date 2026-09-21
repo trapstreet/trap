@@ -510,7 +510,7 @@ def test_a_run_without_a_card_is_submitted_as_before(make_project, runner, monke
     make_project(cmd="sh -c 'echo hi'", inputs={"c1": {"question.txt": "q"}})
     assert runner.invoke(app, ["run", "--task", "t", "--no-environment"]).exit_code == 0
     solution, output = _submit_with(monkeypatch, runner, {"features": {}})
-    assert solution["adapter"] is None and "did not confirm" not in output
+    assert solution["adapter"] is None and "hasn't confirmed" not in output
 
 
 def test_a_carded_but_already_unanchored_run_never_asks_the_server(
@@ -540,7 +540,7 @@ def test_a_carded_but_already_unanchored_run_never_asks_the_server(
     result = runner.invoke(app, ["submit", "--task", "t", "--yes"])
     assert result.exit_code == 0, result.output
     assert calls == []  # never asked -- there was nothing this gate could withhold
-    assert "did not confirm" not in result.output
+    assert "hasn't confirmed" not in result.output
 
 
 def test_the_confirmation_shows_the_command_template_verbatim(make_project, runner, tmp_path, monkeypatch):
@@ -560,7 +560,7 @@ def test_the_confirmation_shows_nothing_new_without_a_card(make_project, runner,
     assert runner.invoke(app, ["run", "--task", "t", "--no-environment"]).exit_code == 0
     _, output = _submit_with(monkeypatch, runner, {"features": {}})
     assert "public" not in output.lower()
-    assert "did not confirm" not in output
+    assert "hasn't confirmed" not in output
 
 
 def test_confirm_card_shows_the_template_labelled_as_public(capsys):
