@@ -39,7 +39,8 @@ solution's `outputs/` clean.
                 │   ├── outbox.jsonl          # progress events, durable before sending
                 │   ├── grading.json          # the site-graded run the answers go to
                 │   └── answers.jsonl         # each answer's state — never the answer text
-                └── report.json               # full serialised run report
+                ├── report.json               # full serialised run report
+                └── report-unanchored.json    # only if `tp submit` withheld the solution repo
 ```
 
 ## The solution key
@@ -121,6 +122,14 @@ unreadable, not sent as a different answer). Each line carries:
 unconfirmed answers and progress only; the run, its artifacts and its report are untouched.
 
 **`report.json`** — the full run report in JSON format. Use `tp report --output json` to print it to stdout instead of reading the file directly. When the run's answers were also submitted for the site to judge, it carries `site_grading: {run_id, url}` naming the graded run; the per-case receipts live in `live/answers.jsonl`, and `client_run_id` names the live session.
+
+**`report-unanchored.json`** — written by `tp submit`, never by `tp run`, only when the
+saved report carries a [solution card](solution-card.md) and the server does not report
+`solution_adapter` support (see `reference/cli.md`'s `tp submit`): the same report with
+the solution's `repo` / `commit` / `subdirectory` withheld and `issue` naming why, so two
+different configurations of one repository can't fold into one leaderboard row. This is
+what gets uploaded; `report.json` itself is never rewritten, so the local record stays
+true to the run that actually happened.
 
 ## Re-displaying a run
 

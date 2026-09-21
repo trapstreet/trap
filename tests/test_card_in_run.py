@@ -7,6 +7,8 @@ import shlex
 import subprocess
 from pathlib import Path
 
+import httpx
+
 from trap.live.context import SKILLS_UNSUPPORTED
 from trap.models.card import SolutionCard
 from trap.runner.layout import CaseLayout
@@ -304,3 +306,238 @@ def test_card_from_run_resolves_a_git_backed_skill_to_repo_at_sha(tmp_path):
 
     got = card_from_run(run_dir, ["a"])
     assert got is not None and got.skill == f"https://github.com/o/r@{sha}"
+
+
+# --- ApiClient.capabilities(): verified against what self._client.get(...) and ----
+# --- .json() actually raise in this codebase's httpx (0.28), not assumed -----------
+# --- (reuses test_auth.py's _client(handler) helper -- same MockTransport pattern --
+# --- as get_me / submit there; other tests in this file already cross-import from --
+# --- test_shapes_direct.py and test_live.py the same way) --------------------------
+
+
+def test_capabilities_returns_the_parsed_body():
+    from .test_auth import _client
+
+    body = {"features": {"solution_adapter": {"supported": True}}}
+    assert _client(lambda r: httpx.Response(200, json=body)).capabilities() == body
+
+
+def test_capabilities_is_empty_when_the_body_is_not_a_dict():
+    from .test_auth import _client
+
+    assert _client(lambda r: httpx.Response(200, json=[1, 2])).capabilities() == {}
+
+
+def test_capabilities_is_empty_on_an_http_error_status():
+    from .test_auth import _client
+
+    assert _client(lambda r: httpx.Response(500)).capabilities() == {}
+
+
+def test_capabilities_is_empty_when_the_server_is_unreachable():
+    from .test_auth import _client
+
+    def boom(r):
+        raise httpx.ConnectError("down")
+
+    assert _client(boom).capabilities() == {}
+
+
+def test_capabilities_is_empty_when_the_body_is_not_json():
+    from .test_auth import _client
+
+    assert _client(lambda r: httpx.Response(200, text="not json")).capabilities() == {}
+
+
+# --- tp submit asks the server whether it stores cards -----------------------------
+# --- and shows, before publishing, exactly what a carded submit makes public -------
+
+
+def _carded_run(make_project, runner, tmp_path):
+    """A finished run whose report has a card and an anchored solution repo."""
+    from trap.cli import app
+
+    tool = tmp_path / "tool"
+    tool.mkdir()
+    (tool / "tool.py").write_text("print('hi')\n")
+    cmd = f"{PY} -m trap.shapes.command --repo {tool} --template '{PY} {{repo}}/tool.py' --deadline 30"
+    sol = make_project(cmd=cmd, inputs={"c1": {"question.txt": "q"}})
+    assert runner.invoke(app, ["run", "--task", "t", "--no-environment"]).exit_code == 0
+    report_path = next((sol / ".trap").rglob("report.json"))
+    report = json.loads(report_path.read_text())
+    report["provenance"]["solution"] |= {
+        "repo": "https://github.com/o/sol",
+        "commit": "a" * 40,
+        "issue": None,
+    }
+    report_path.write_text(json.dumps(report))
+    return sol
+
+
+def _submit_with(monkeypatch, runner, capabilities):
+    """Run `tp submit --yes` against a server with these capabilities; return what was
+    uploaded and what the user was told. `--yes` skips the interactive prompt only --
+    the credential-store stand-in is the same one-line monkeypatch the existing submit
+    tests in tests/test_cli.py (328-410) use (`TRAPSTREET_API_KEY` set, no dedicated
+    fixture exists there to reuse)."""
+    from trap.cli import app
+
+    monkeypatch.setenv("TRAPSTREET_API_KEY", "k")
+    sent: dict[str, object] = {}
+    monkeypatch.setattr("trap.auth.client.ApiClient.capabilities", lambda self: capabilities)
+    monkeypatch.setattr(
+        "trap.auth.client.ApiClient.submit",
+        lambda self, path: sent.update(payload=json.loads(Path(path).read_text())) or {"run": {"id": "r1"}},
+    )
+    result = runner.invoke(app, ["submit", "--task", "t", "--yes"])
+    assert result.exit_code == 0, result.output
+    return sent["payload"]["provenance"]["solution"], result.output
+
+
+def test_submitting_a_card_to_a_server_that_cannot_store_it_drops_the_repo(
+    make_project, runner, tmp_path, monkeypatch
+):
+    _carded_run(make_project, runner, tmp_path)
+    solution, output = _submit_with(monkeypatch, runner, {"features": {}})
+    assert solution["adapter"]["shape"] == "cmd" and solution["adapter_digest"]
+    assert solution["repo"] is None and solution["commit"] is None
+    assert "does not store" in (solution["issue"] or "")
+    assert "not ranked" in output
+
+
+def test_a_server_that_stores_cards_gets_the_repo_and_the_card(make_project, runner, tmp_path, monkeypatch):
+    _carded_run(make_project, runner, tmp_path)
+    solution, _ = _submit_with(monkeypatch, runner, {"features": {"solution_adapter": {"supported": True}}})
+    assert solution["repo"] == "https://github.com/o/sol"
+    assert solution["adapter"]["shape"] == "cmd" and solution["adapter_digest"]
+
+
+def test_a_run_without_a_card_is_submitted_as_before(make_project, runner, monkeypatch):
+    from trap.cli import app
+
+    make_project(cmd="sh -c 'echo hi'", inputs={"c1": {"question.txt": "q"}})
+    assert runner.invoke(app, ["run", "--task", "t", "--no-environment"]).exit_code == 0
+    solution, output = _submit_with(monkeypatch, runner, {"features": {}})
+    assert solution["adapter"] is None and "does not store" not in output
+
+
+def test_a_carded_but_already_unanchored_run_never_asks_the_server(
+    make_project, runner, tmp_path, monkeypatch
+):
+    """The gate only matters when there is a repo to withhold. A card recorded on a
+    solution that was never anchored to begin with (the ordinary `make_project`
+    scaffold: not a git repo) has no repo for the gate to touch, so `capabilities()`
+    must not even be called -- this is the `adapter is not None and ... .repo` branch
+    where `.repo` is falsy."""
+    from trap.cli import app
+
+    tool = tmp_path / "tool"
+    tool.mkdir()
+    (tool / "tool.py").write_text("print('hi')\n")
+    cmd = f"{PY} -m trap.shapes.command --repo {tool} --template '{PY} {{repo}}/tool.py' --deadline 30"
+    make_project(cmd=cmd, inputs={"c1": {"question.txt": "q"}})
+    assert runner.invoke(app, ["run", "--task", "t", "--no-environment"]).exit_code == 0
+
+    monkeypatch.setenv("TRAPSTREET_API_KEY", "k")
+    calls: list[None] = []
+    monkeypatch.setattr(
+        "trap.auth.client.ApiClient.capabilities", lambda self: calls.append(None) or {"features": {}}
+    )
+    monkeypatch.setattr("trap.auth.client.ApiClient.submit", lambda self, path: {"run": {"id": "r1"}})
+
+    result = runner.invoke(app, ["submit", "--task", "t", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert calls == []  # never asked -- there was nothing this gate could withhold
+    assert "does not store" not in result.output
+
+
+def test_the_confirmation_shows_the_command_template_verbatim(make_project, runner, tmp_path, monkeypatch):
+    """§5.3: an explicit `tp submit`'s confirmation shows verbatim what is about to
+    become public. A server that stores cards is used here so the repo-withheld
+    message doesn't also appear -- this test is only about the template line."""
+    _carded_run(make_project, runner, tmp_path)
+    _, output = _submit_with(monkeypatch, runner, {"features": {"solution_adapter": {"supported": True}}})
+    assert f"{PY} {{repo}}/tool.py" in output  # the exact cmd, not paraphrased or cut
+    assert "public" in output.lower()
+
+
+def test_the_confirmation_shows_nothing_new_without_a_card(make_project, runner, monkeypatch):
+    from trap.cli import app
+
+    make_project(cmd="sh -c 'echo hi'", inputs={"c1": {"question.txt": "q"}})
+    assert runner.invoke(app, ["run", "--task", "t", "--no-environment"]).exit_code == 0
+    _, output = _submit_with(monkeypatch, runner, {"features": {}})
+    assert "public" not in output.lower()
+    assert "does not store" not in output
+
+
+def test_confirm_card_shows_the_template_labelled_as_public(capsys):
+    import trap.cli as climod
+
+    card = SolutionCard(
+        shape="cmd", shape_version=1, cmd="python main.py {prompt}", setup="pip install -r r.txt"
+    )
+    climod._confirm_card(card, withhold_repo=False)
+    err = capsys.readouterr().err
+    assert "python main.py {prompt}" in err
+    assert "pip install -r r.txt" in err
+    assert "public" in err.lower()
+
+
+def test_confirm_card_survives_a_bracket_in_the_command_unescaped_on_the_way_out(capsys):
+    """rich markup uses `[...]`, so a literal `[` in the template must round-trip through
+    `rich.markup.escape` and back out unchanged -- a lossy escape would silently break
+    the one guarantee this whole confirmation exists for (verbatim, not paraphrased)."""
+    import trap.cli as climod
+
+    card = SolutionCard(shape="cmd", shape_version=1, cmd="sed 's/[a-z]//' {prompt}")
+    climod._confirm_card(card, withhold_repo=False)
+    err = capsys.readouterr().err
+    assert "sed 's/[a-z]//' {prompt}" in err
+
+
+def test_confirm_card_shows_the_setup_line_even_without_a_command(capsys):
+    import trap.cli as climod
+
+    card = SolutionCard(shape="cmd", shape_version=1, setup="pip install -r r.txt")
+    climod._confirm_card(card, withhold_repo=False)
+    err = capsys.readouterr().err
+    assert "pip install -r r.txt" in err
+    assert "cmd:" not in err
+
+
+def test_confirm_card_states_the_reason_even_when_the_card_has_no_command(capsys):
+    """An ACP or model-direct card carries no `cmd`/`setup` -- there's nothing to
+    preview, but the repo-withheld fact still belongs here."""
+    import trap.cli as climod
+
+    card = SolutionCard(shape="acp", shape_version=1, agent="a@1", model="m")
+    climod._confirm_card(card, withhold_repo=True)
+    err = capsys.readouterr().err
+    assert "not ranked" in err
+    assert "cmd:" not in err and "setup:" not in err
+
+
+def test_confirm_card_silent_without_a_card_or_a_reason(capsys):
+    import trap.cli as climod
+
+    climod._confirm_card(None, withhold_repo=False)
+    assert capsys.readouterr().err == ""
+
+
+def test_confirm_submit_prints_the_withheld_reason_even_when_yes_skips_the_prompt(capsys):
+    """--yes means the user pre-consented to skipping the *prompt* -- it must not also
+    swallow the *reason* a repo was withheld, since that's the only record a
+    non-interactive run leaves behind."""
+    import trap.cli as climod
+    from trap.models import Provenance, ReportData
+
+    report = ReportData(
+        provenance=Provenance(),
+        cases_results=(),
+        grader_metrics=None,
+        started_at_utc="2026-01-01T00:00:00",
+        finished_at_utc="2026-01-01T00:00:01",
+    )
+    climod._confirm_submit(report, "ts-1", "http://s", yes=True, allow_unanchored=False, withhold_repo=True)
+    assert "not ranked" in capsys.readouterr().err

@@ -59,6 +59,21 @@ class ApiClient:
         identifier = user.get("id")
         return identifier if isinstance(identifier, str) else None
 
+    def capabilities(self) -> dict[str, Any]:
+        """What this server supports (``GET /api/v2/capabilities``, unauthenticated). A
+        server that does not answer — offline, older, or a network hiccup — is read as
+        "supports nothing new": the caller then takes the conservative branch rather
+        than guessing. ``httpx.HTTPError`` covers both a failed request and a non-2xx
+        status (``raise_for_status``); ``ValueError`` covers a body that is not valid
+        JSON (``.json()`` raises ``json.JSONDecodeError``, a ``ValueError`` subclass)."""
+        try:
+            response = self._client.get("/api/v2/capabilities")
+            response.raise_for_status()
+            body = response.json()
+        except (httpx.HTTPError, ValueError):
+            return {}
+        return body if isinstance(body, dict) else {}
+
     def submit(self, report_path: Path) -> dict[str, Any]:
         # Content-addressed ingest: the task identity travels inside the report
         # (provenance.task.{repo,commit,subdirectory}), not the URL — so no task_id

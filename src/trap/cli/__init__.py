@@ -33,7 +33,7 @@ from trap.live.sync import sync_run
 from trap.live.tracker import LiveTracker, plain_score
 from trap.loader import ConfigError, TrapLoader, TraptaskLoader
 from trap.models import Diagnosis, Provenance, ReportData
-from trap.models.card import card_digest
+from trap.models.card import SolutionCard, card_digest
 from trap.runner import TaskRunner, refuse_answer_leaks
 from trap.workspace import SolutionIdentity, Workspace
 
@@ -214,8 +214,47 @@ def _confirm_unanchored(provenance: Provenance, *, allow: bool) -> None:
         raise typer.Exit(code=1)
 
 
+def _confirm_card(card: SolutionCard | None, *, withhold_repo: bool) -> None:
+    """Show, verbatim, what an explicit submit is about to make public.
+
+    §5.3: the command-template line becomes public only on an explicit `tp submit`, and
+    the confirmation shown before submitting must display verbatim what is about to
+    become public — no paraphrase, no truncation, no re-quoting, so a user can read the
+    exact string that will be published and stop. `soft_wrap=True` keeps rich from
+    inserting a line break partway through it. When the capability gate has already
+    decided the repository will be withheld, that fact is stated in the same place, so
+    both are seen before the same answer: the card is uploaded, the repository isn't,
+    and the run is kept but not ranked.
+
+    Not done here (deferred, see the plan): scanning `cmd`/`setup` for a suspected
+    secret value (known prefixes, high-entropy strings) — only a name-reference like
+    `$OPENAI_API_KEY` is expected, but nothing here checks that yet; the server is the
+    only backstop until that lands."""
+    if card is not None and (card.cmd or card.setup):
+        err_console.print(
+            "[yellow]Submitting will make the solution card's command line public on "
+            "the site — shown verbatim, exactly as it will appear there:[/yellow]"
+        )
+        if card.cmd:
+            err_console.print(f"     cmd:   {escape(card.cmd)}", soft_wrap=True)
+        if card.setup:
+            err_console.print(f"     setup: {escape(card.setup)}", soft_wrap=True)
+    if withhold_repo:
+        err_console.print(
+            "[yellow]This server hasn't confirmed it stores the solution card: the "
+            "card is uploaded, the repository is withheld, and the run is kept but "
+            "not ranked.[/yellow]"
+        )
+
+
 def _confirm_submit(
-    report_data: ReportData, run_id: str, server: str, *, yes: bool, allow_unanchored: bool
+    report_data: ReportData,
+    run_id: str,
+    server: str,
+    *,
+    yes: bool,
+    allow_unanchored: bool,
+    withhold_repo: bool = False,
 ) -> None:
     """Gate `submit` — the irreversible publish. Echo what is about to be uploaded
     (solution / run / result / anchor, all from the local report), then confirm once.
@@ -224,9 +263,12 @@ def _confirm_submit(
     payload. Any of --yes, --allow-unanchored, or TRAP_ALLOW_UNANCHORED skips the prompt
     (the last two are retained CI escapes that also acknowledge the unanchored caveat);
     with no TTY and no such flag it refuses. The unanchored warning is folded in here —
-    the old separate `_confirm_unanchored` prompt is not run for submit."""
+    the old separate `_confirm_unanchored` prompt is not run for submit. `_confirm_card`
+    is folded in too, and for the same reason: --yes says the user pre-consented, not
+    that they were never told what a carded submit publishes."""
     SubmitRenderer().intent(report_data, run_id, server)
     _warn_unanchored(report_data.provenance)
+    _confirm_card(report_data.provenance.solution.adapter, withhold_repo=withhold_repo)
     if yes or allow_unanchored or _env_truthy("TRAP_ALLOW_UNANCHORED"):
         return
     if not sys.stdin.isatty():
@@ -236,6 +278,29 @@ def _confirm_submit(
         )
     if not typer.confirm(f"Submit to {server}?", default=False):
         raise typer.Exit(code=1)
+
+
+UNSTORED_CARD = (
+    "the server does not store the solution card; submitted without a repo so two cards "
+    "cannot fold into one row"
+)
+
+
+def _unanchored_copy(ws: Workspace, run_id: str, data: ReportData) -> Path:
+    """The same report with the solution's repo withheld. Sending the repo to a server
+    that drops the card would file two different configurations as one solution and show
+    whichever model submitted first — a wrong row is worse than an unranked one. Written
+    as a sibling file, never over `report.json`: the local record stays true to the run
+    that actually happened."""
+    solution = data.provenance.solution.model_copy(
+        update={"repo": None, "commit": None, "subdirectory": None, "issue": UNSTORED_CARD}
+    )
+    stripped = data.model_copy(
+        update={"provenance": data.provenance.model_copy(update={"solution": solution})}
+    )
+    path = ws.run_dir(run_id) / "report-unanchored.json"
+    path.write_text(stripped.model_dump_json(indent=2))
+    return path
 
 
 def _mirrored(
@@ -707,10 +772,35 @@ def submit(
     # `tp run` saw, so the checkouts aren't re-probed here. `run` is resolved to a
     # concrete id ("latest" → the newest run) so the intent table names what ships.
     run_id = ws.resolved_run(run)
-    _confirm_submit(report_data, run_id, resolved.server, yes=yes, allow_unanchored=allow_unanchored)
-    report_path = ws.report_json_path(run)
-
     client = ApiClient(resolved.server, resolved.api_key)
+
+    # Until the server can store the card (`solution_adapter`), submitting the repo
+    # alongside it would fold every card of that repo into one leaderboard row — the
+    # same skill on sonnet and on haiku sharing a row and showing whichever submitted
+    # first. Asked before the confirmation below, not after, so the decision and its
+    # reason are both in front of the user before they answer, not discovered after.
+    # Nothing to withhold, and nothing to ask, when there's no card or no repo to begin
+    # with (an already-unanchored solution has no repo for this gate to touch).
+    adapter = report_data.provenance.solution.adapter
+    withhold_repo = False
+    if adapter is not None and report_data.provenance.solution.repo:
+        stores_cards = bool(
+            (client.capabilities().get("features") or {}).get("solution_adapter", {}).get("supported")
+        )
+        withhold_repo = not stores_cards
+
+    _confirm_submit(
+        report_data,
+        run_id,
+        resolved.server,
+        yes=yes,
+        allow_unanchored=allow_unanchored,
+        withhold_repo=withhold_repo,
+    )
+    report_path = ws.report_json_path(run)
+    if withhold_repo:
+        report_path = _unanchored_copy(ws, run_id, report_data)
+
     try:
         resp_data = client.submit(report_path)
     except ApiError as e:
