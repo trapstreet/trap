@@ -158,9 +158,14 @@ def test_live_sync_carries_the_cards_labels_but_never_its_command_or_setup(
 
     # Two describe() calls: the opening one (before the card is known) and the
     # closing one (after `card_from_run` read it back and folded it into
-    # provenance) -- the card can only ever reach the second.
+    # provenance) -- the card can only ever reach the second. Checked across all
+    # three places a card can show up, not just `identity.name`: a refactor that
+    # leaked it into the opening `model.config` or `skills.installed` instead
+    # would pass a narrower, single-key assertion.
     opening, final = tracker.described
     assert "name" not in opening["identity"]
+    assert "config" not in opening.get("model", {})
+    assert opening["skills"] == {"status": "unsupported", "reason": SKILLS_UNSUPPORTED}
 
     wire = json.dumps(final)
     for secret in ("leak-marker-cmd-9f3a", "leak-marker-setup-2b7c", "tool.py", "adapter"):

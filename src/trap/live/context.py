@@ -18,8 +18,12 @@ that is not a built-in shape. A solution card (§5.1), when there is one, can
 name the run itself (``identity.name``), the options that took effect
 (``model.config``), and whether an ACP run installed a skill (``skills``) --
 labels only, never the card's own command line (R12; see ``build_context``'s
-``card`` parameter). A group the user switched off is ``disabled`` with the
-flag that did it. The site shows all three as what they are.
+``card`` parameter). The label itself is never a filesystem path either: a
+skill that never resolved to a git remote is named by its own last path
+segment, not the directories that hold it (`card_label`, `trap.models.card`,
+carries this guarantee -- ``identity.name`` is a plain, unguarded call to it).
+A group the user switched off is ``disabled`` with the flag that did it. The
+site shows all three as what they are.
 """
 
 from __future__ import annotations
@@ -29,7 +33,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
-from trap.models.card import SolutionCard, card_label
+from trap.models.card import SolutionCard, _last_segment, _resolved_skill, card_label
 from trap.models.cost import ModelCost, combine_costs
 from trap.models.environment import Environment
 from trap.models.provenance import Provenance
@@ -153,12 +157,14 @@ def _identity(
     """tp launched the solver and tp ran it; the frameworks are what trap.yaml
     declared, and the agent is whatever launched tp, if it said.
 
-    A card names the run too, when there is one -- but never by its ``cmd`` /
-    ``setup``: those are stripped before ``card_label`` sees the card, so its own
-    fallback chain (agent, provider, cmd, shape) can never hand the command line
-    to the site. What is left to fall back to for a bare ``cmd``-shaped card with
-    no name is its shape -- ``"cmd"`` -- which is exactly why that fallback ends
-    in ``card.shape`` rather than raising: every shape has one.
+    A card names the run too, when there is one -- a plain call, with no
+    stripping or guarding at this layer. `card_label` (`trap.models.card`) is
+    safe to publish as it stands: never a command template, never a filesystem
+    path. (An earlier version of this function stripped ``cmd``/``setup`` from
+    the card here instead, before handing it to `card_label` -- a guard in the
+    wrong place, since it protected only this one caller and left `card_label`
+    itself unsafe for the next one. The guard now lives in `card_label`, the
+    only place that can make it hold for every caller.)
     """
     identity: dict[str, Any] = {"launcher": tp, "executor": tp}
     if profile.framework:
@@ -166,8 +172,7 @@ def _identity(
     if agent:
         identity["agent"] = dict(agent)
     if card is not None:
-        label = card_label(card.model_copy(update={"cmd": None, "setup": None}))
-        identity["name"] = label[:120]
+        identity["name"] = card_label(card)[:120]
     return identity
 
 
@@ -269,15 +274,15 @@ def _skills(card: SolutionCard | None) -> dict[str, Any]:
 def _skill_ref(skill: str) -> dict[str, str]:
     """``repo@sha`` names the skill by the last path segment of ``repo``, with
     the commit alongside it; any other string (a skill directory `card_from_run`
-    could not resolve to a repo) is named by its own last path segment instead."""
-    repo, sep, commit = skill.partition("@")
-    if sep and commit:
-        return {"name": _last_segment(repo), "repo": repo, "commit": commit}
-    return {"name": _last_segment(skill)}
-
-
-def _last_segment(path: str) -> str:
-    return path.rstrip("/").rsplit("/", 1)[-1]
+    could not resolve to a repo) is named by its own last path segment instead.
+    Shares its resolution test (`_resolved_skill`, `trap.models.card`) with
+    `card_label`, so the name shown here and the name shown in
+    ``identity.name`` for the same skill never disagree."""
+    resolved = _resolved_skill(skill)
+    if resolved is None:
+        return {"name": _last_segment(skill)}
+    repo, commit = resolved
+    return {"name": _last_segment(repo), "repo": repo, "commit": commit}
 
 
 def _disabled(flag: str) -> dict[str, str]:

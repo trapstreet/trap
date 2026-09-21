@@ -71,14 +71,53 @@ def test_the_label_is_just_the_name_when_one_is_set():
     assert card_label(card) == "acme-solver"
 
 
-def test_the_label_falls_back_to_cmd_alone_without_model_or_skill():
+def test_the_label_ignores_cmd_and_falls_back_to_the_bare_shape():
+    # `cmd` is not in the fallback chain at all (deliberate contract change, round 1
+    # of review): a bare `cmd`-shaped card with no name, agent or provider is named
+    # by its shape alone, never by its command line.
     card = SolutionCard(shape="cmd", shape_version=1, cmd="python main.py")
-    assert card_label(card) == "python main.py"
+    assert card_label(card) == "cmd"
 
 
-def test_the_label_shows_a_skill_with_no_pinned_commit():
+def test_the_label_shows_only_the_last_segment_when_the_skill_has_no_pinned_commit():
+    # No "@" at all means the skill did not resolve to `repo@sha` -- the same test
+    # `_resolved_skill` uses -- so only the last path segment is shown, never the
+    # repo path in full (deliberate contract change, round 1 of review).
     card = SolutionCard(shape="model", shape_version=1, model="sonnet", skill="https://github.com/a/b")
-    assert card_label(card) == "model · sonnet · a/b"
+    assert card_label(card) == "model · sonnet · b"
+
+
+def test_the_label_never_leaks_an_unresolved_skills_directory():
+    # The critical case: a local skill directory that never resolved to a git remote
+    # (the routine outcome for a skill that is not itself a git checkout -- see
+    # `card.skill`'s own docstring) must never put its parent directories -- routinely
+    # a real username -- into a label that gets published.
+    card = SolutionCard(
+        shape="acp",
+        shape_version=1,
+        agent="pkg@1",
+        model="sonnet",
+        skill="/Users/alice/checkout/skills/my-skill",
+    )
+    label = card_label(card)
+    assert label == "pkg@1 · sonnet · my-skill"
+    assert "alice" not in label and "/" not in label
+
+
+def test_the_label_never_leaks_the_command_or_a_token_reference():
+    # card_label has exactly one caller today (live/context.py's identity.name), but
+    # its own docstring claims to be safe to publish as-is -- so a future second
+    # caller (a `tp submit` preview, `tp inspect`, a console line) inherits that
+    # guarantee for free, rather than having to re-derive it.
+    card = SolutionCard(
+        shape="cmd",
+        shape_version=1,
+        cmd="python /Users/alice/project/main.py --key $OPENAI_API_KEY {prompt}",
+        setup="uv sync",
+    )
+    label = card_label(card)
+    assert label == "cmd"
+    assert "alice" not in label and "OPENAI_API_KEY" not in label and "main.py" not in label
 
 
 def test_the_label_falls_back_to_the_provider_when_there_is_no_agent():

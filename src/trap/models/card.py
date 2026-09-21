@@ -103,14 +103,69 @@ def card_digest(card: SolutionCard) -> str:
 
 
 def card_label(card: SolutionCard) -> str:
-    """The row name a site-graded run gets: what was driven, by what, with what."""
+    """The row name a site-graded run gets: what was driven, by what, with what.
+
+    Safe to publish as it stands -- never a command template, and never a
+    filesystem path:
+
+    - ``cmd``/``setup`` are not in the fallback chain at all, so a bare
+      ``cmd``-shaped card with no name, agent or provider is named by its shape
+      alone (``"cmd"``), never by its command line.
+    - a skill is named ``owner/repo@sha7`` only when it actually reads as
+      ``repo@sha`` (`_resolved_skill`); a skill that never resolved to a git
+      remote -- the routine outcome for a local directory that is not itself a
+      git checkout, per ``SolutionCard.skill``'s own docstring -- is named by
+      its own last path segment alone (`_last_segment`), never by the
+      directories that hold it (which routinely include a real username).
+
+    This is what lets a second caller (a ``tp submit`` preview, ``tp inspect``,
+    a console line) call this function and inherit both guarantees for free,
+    rather than re-deriving them. `live.context`'s ``skills.installed`` uses the
+    same two helpers, so the name shown there for a given skill and the name
+    shown here for the same skill never disagree.
+    """
     if card.name:
         return card.name
-    parts = [card.agent or card.provider or card.cmd or card.shape]
+    parts = [card.agent or card.provider or card.shape]
     if card.model:
         parts.append(card.model)
     if card.skill:
-        repo, _, commit = card.skill.partition("@")
-        short = repo.rsplit("/", 2)[-2:] if "/" in repo else [repo]
-        parts.append("/".join(short) + (f"@{commit[:7]}" if commit else ""))
+        resolved = _resolved_skill(card.skill)
+        if resolved is not None:
+            repo, commit = resolved
+            short = repo.rsplit("/", 2)[-2:] if "/" in repo else [repo]
+            parts.append("/".join(short) + f"@{commit[:7]}")
+        else:
+            parts.append(_last_segment(card.skill))
     return " · ".join(parts)
+
+
+def _resolved_skill(skill: str) -> tuple[str, str] | None:
+    """``(repo, commit)`` when ``skill`` reads as ``repo@sha``; ``None`` for
+    anything else -- most often a local directory that never resolved to a git
+    remote. The one test that decides whether a skill is named by its full
+    reference or only its last path segment, shared by `card_label` and
+    `live.context`'s ``skills.installed`` so the two can never disagree about
+    which skills are "resolved".
+
+    Two separate ``if`` statements, deliberately, rather than one compound
+    ``if sep and commit``: a skill with an "@" but nothing after it
+    (``"repo@"``) is its own input class, distinct from "no @ at all" -- and a
+    single compound condition can reach 100% branch coverage without a test
+    ever landing on that combination, since branch coverage tracks the whole
+    expression's outcome, not which half of it produced a False.
+    """
+    repo, sep, commit = skill.partition("@")
+    if not sep:
+        return None
+    if not commit:
+        return None
+    return repo, commit
+
+
+def _last_segment(path: str) -> str:
+    """The last "/"-delimited piece of a string, ignoring a trailing "/" --
+    shared between the label a card shows and the skill reference the run
+    context reports, so a skill that could not be resolved to a repo is named
+    identically on both surfaces."""
+    return path.rstrip("/").rsplit("/", 1)[-1]

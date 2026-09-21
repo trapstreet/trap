@@ -459,6 +459,50 @@ def test_a_skill_not_resolved_to_repo_at_sha_is_named_by_its_directory():
     assert patch["skills"] == {"installed": [{"name": "my-skill"}]}
 
 
+def test_a_skill_with_an_at_sign_but_no_commit_is_still_unresolved():
+    # A third input class distinct from "no @ at all" (above) and "repo@sha"
+    # (test_a_card_names_the_run_...): `_resolved_skill` treats an "@" with
+    # nothing after it as unresolved too. Written as its own test rather than
+    # folded into the two above, because a single compound `if sep and commit`
+    # can reach 100% branch coverage without this combination ever running --
+    # coverage.py's branch tracking sees the whole expression's outcome, not
+    # which half of it produced a False.
+    card = ACP_CARD.model_copy(update={"skill": "some/repo@"})
+    patch = _context(card=card)
+    assert patch["skills"] == {"installed": [{"name": "repo@"}]}
+
+
+def test_identity_name_never_leaks_an_unresolved_skills_directory():
+    # The critical case (round 1 of review): an ACP card's skill is a local
+    # directory that never resolved to a git remote -- a routine outcome, not an
+    # edge case -- so `identity.name` must show neither the parent directories
+    # (routinely a real username) nor any "/" from the path at all.
+    card = ACP_CARD.model_copy(update={"skill": "/Users/alice/checkout/skills/my-skill"})
+    patch = _context(card=card)
+    name = patch["identity"]["name"]
+    assert "alice" not in name
+    assert "/" not in name
+
+
+def test_skill_ref_and_card_label_agree_on_an_unresolved_skill():
+    # The two surfaces that both name a skill -- `skills.installed` (built from
+    # `_skill_ref`) and `identity.name` (built from `card_label`) -- must never
+    # disagree about what an unresolved skill is called. Calling both directly on
+    # the same string is what actually proves agreement, rather than each being
+    # separately correct by coincidence.
+    from trap.live.context import _skill_ref
+    from trap.models.card import card_label
+
+    skill = "/Users/alice/checkout/skills/my-skill"
+    card = SolutionCard(shape="acp", shape_version=1, skill=skill)
+    ref = _skill_ref(skill)
+    label = card_label(card)
+    assert ref == {"name": "my-skill"}
+    assert label == "acp · my-skill"
+    assert label.endswith(ref["name"])
+    assert "alice" not in label
+
+
 def test_a_card_without_options_adds_no_model_config():
     # The card that is not ACP (above) also carries no options -- covers the
     # branch where a card exists but `card.options` is empty, distinctly from
