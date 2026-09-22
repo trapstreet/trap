@@ -21,6 +21,7 @@ from trap.auth import (
     ResolvedAuth,
 )
 from trap.cli._auth import auth_app
+from trap.cli._card import card_from_run
 from trap.cli._console import _die, _env_truthy, console, err_console
 from trap.display import CaseProgress, OutputFormat, SubmitRenderer, renderer_factory
 from trap.environment import EnvironmentDetector
@@ -32,6 +33,7 @@ from trap.live.sync import sync_run
 from trap.live.tracker import LiveTracker, plain_score
 from trap.loader import ConfigError, TrapLoader, TraptaskLoader
 from trap.models import Diagnosis, Provenance, ReportData
+from trap.models.card import SolutionCard, card_digest
 from trap.runner import TaskRunner, refuse_answer_leaks
 from trap.workspace import SolutionIdentity, Workspace
 
@@ -212,8 +214,38 @@ def _confirm_unanchored(provenance: Provenance, *, allow: bool) -> None:
         raise typer.Exit(code=1)
 
 
+def _confirm_card(card: SolutionCard | None) -> None:
+    """Show, verbatim, what an explicit submit is about to make public.
+
+    §5.3: the command-template line becomes public only on an explicit `tp submit`, and
+    the confirmation shown before submitting must display verbatim what is about to
+    become public — no paraphrase, no truncation, no re-quoting, so a user can read the
+    exact string that will be published and stop. `soft_wrap=True` keeps rich from
+    inserting a line break partway through it.
+
+    Not done here (deferred, see the plan): scanning `cmd`/`setup` for a suspected
+    secret value (known prefixes, high-entropy strings) — only a name-reference like
+    `$OPENAI_API_KEY` is expected, but nothing here checks that yet; the server is the
+    only backstop until that lands."""
+    if card is None or not (card.cmd or card.setup):
+        return
+    err_console.print(
+        "[yellow]Submitting will make the solution card's command line public on "
+        "the site — shown verbatim, exactly as it will appear there:[/yellow]"
+    )
+    if card.cmd:
+        err_console.print(f"     cmd:   {escape(card.cmd)}", soft_wrap=True)
+    if card.setup:
+        err_console.print(f"     setup: {escape(card.setup)}", soft_wrap=True)
+
+
 def _confirm_submit(
-    report_data: ReportData, run_id: str, server: str, *, yes: bool, allow_unanchored: bool
+    report_data: ReportData,
+    run_id: str,
+    server: str,
+    *,
+    yes: bool,
+    allow_unanchored: bool,
 ) -> None:
     """Gate `submit` — the irreversible publish. Echo what is about to be uploaded
     (solution / run / result / anchor, all from the local report), then confirm once.
@@ -222,9 +254,12 @@ def _confirm_submit(
     payload. Any of --yes, --allow-unanchored, or TRAP_ALLOW_UNANCHORED skips the prompt
     (the last two are retained CI escapes that also acknowledge the unanchored caveat);
     with no TTY and no such flag it refuses. The unanchored warning is folded in here —
-    the old separate `_confirm_unanchored` prompt is not run for submit."""
+    the old separate `_confirm_unanchored` prompt is not run for submit. `_confirm_card`
+    is folded in too, and for the same reason: --yes says the user pre-consented, not
+    that they were never told what a carded submit publishes."""
     SubmitRenderer().intent(report_data, run_id, server)
     _warn_unanchored(report_data.provenance)
+    _confirm_card(report_data.provenance.solution.adapter)
     if yes or allow_unanchored or _env_truthy("TRAP_ALLOW_UNANCHORED"):
         return
     if not sys.stdin.isatty():
@@ -509,6 +544,18 @@ def run(
         raise
     finished_at_utc = datetime.now(UTC)
 
+    # What drove this run, as the shape itself stated it. A solution that is not a
+    # built-in shape prints no card, and the provenance stays exactly as it was.
+    card = card_from_run(ws.run_dir(ts), [case.case_id for case in case_results])
+    if card is not None:
+        provenance = provenance.model_copy(
+            update={
+                "solution": provenance.solution.model_copy(
+                    update={"adapter": card, "adapter_digest": card_digest(card)}
+                )
+            }
+        )
+
     report_data = ReportData.from_run(
         cases_results=case_results,
         trap_config=trap_yaml_loader.config,
@@ -539,7 +586,9 @@ def run(
     diagnosis = Diagnosis.from_report_data(report_data)
 
     # The closing description: the opening one again, plus how long the solver
-    # took and what the cost proxy saw. Aggregates only -- never a case.
+    # took and what the cost proxy saw. Aggregates only -- never a case. `card`
+    # is only known now (it was read back from the finished run above), so it
+    # rides this call and not the opening one.
     final = build_context(
         profile=trap_yaml_loader.config.profile,
         provenance=provenance,
@@ -551,6 +600,7 @@ def run(
         finished_at=finished_at_utc,
         cost_enabled=cost,
         environment_enabled=environment,
+        card=card,
     )
     # Mirror the outcome, then stop. Deliberately after the report is on disk
     # and after the diagnosis is computed, and deliberately unable to change
