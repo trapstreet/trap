@@ -25,6 +25,7 @@ from typing import Any
 import httpx
 
 from trap.cost.providers import provider_config
+from trap.models.card import SolutionCard
 from trap.shapes._case import (
     Deadline,
     ShapeError,
@@ -34,10 +35,14 @@ from trap.shapes._case import (
     fail,
     open_case,
     print_answer,
+    print_card,
 )
 
 ANTHROPIC_MAX_TOKENS = 16000
 ANTHROPIC_VERSION = "2023-06-01"
+#: Behaviour version of this shape: the request built and the answer rule. A change to
+#: either is a new card, not a quiet re-scoring of an old one.
+DIRECT_SHAPE_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -205,6 +210,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"[trap] {provider} {args.model}: max_tokens={body.get('max_tokens', 'api-default')}, "
             "thinking=api-default",
             file=sys.stderr,
+        )
+        print_card(
+            SolutionCard(
+                shape="model",
+                shape_version=DIRECT_SHAPE_VERSION,
+                provider=provider,
+                model=args.model,
+                timeout=round(args.deadline),
+            )
         )
         reply = _call(provider, url, headers, body, deadline)
     except ShapeError as e:

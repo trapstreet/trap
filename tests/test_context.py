@@ -24,6 +24,7 @@ from trap.live.context import (
     agent_from_env,
     build_context,
 )
+from trap.models.card import SolutionCard, card_digest
 from trap.models.cost import CaseCost, ModelCost
 from trap.models.environment import Cpu, Environment
 from trap.models.provenance import GitProvenance, Provenance
@@ -220,6 +221,32 @@ def test_an_empty_provenance_side_is_left_unsaid():
     assert patch["reproducibility"] == {"trap_version": "x"}
 
 
+def test_a_carded_solutions_command_and_setup_never_reach_reproducibility():
+    # The card rides on `GitProvenance.adapter`/`.adapter_digest` for the report, but
+    # live sync only ever gets labels and the digest -- never the command template
+    # itself, which routinely names paths and environment-variable names (R12).
+    card = SolutionCard(
+        shape="cmd",
+        shape_version=1,
+        cmd="python main.py --key $OPENAI_API_KEY {prompt}",
+        setup="uv sync",
+    )
+    provenance = Provenance(
+        solution=GitProvenance(
+            repo="https://github.com/o/sol",
+            commit="a" * 40,
+            adapter=card,
+            adapter_digest=card_digest(card),
+        ),
+        task=GitProvenance(issue="uncommitted changes"),
+    )
+    patch = build_context(profile=PROFILE, provenance=provenance, environment=None, trap_version="1.2.3")
+    wire = json.dumps(patch)
+    for secret in ("main.py", "OPENAI_API_KEY", "uv sync", "adapter"):
+        assert secret not in wire, secret
+    assert patch["reproducibility"]["solution"] == {"repo": "https://github.com/o/sol", "commit": "a" * 40}
+
+
 def test_the_environment_keeps_the_detectors_shape_and_adds_the_interpreter():
     assert _opening()["environment"] == {
         "os": "macOS 15.1",
@@ -365,3 +392,283 @@ def test_nothing_that_belongs_to_a_case_is_on_the_wire():
 def test_no_key_the_site_refuses_appears_at_any_depth():
     for patch in (_opening(agent={"name": "a", "version": "1"}), _final(), _final(cost_enabled=False)):
         assert not (_keys_at_any_depth(patch) & REJECTED_KEYS)
+
+
+# -- the solution card: labels only, never the command that drove the run -------
+
+SKILL = "https://github.com/a/b@0123456789abcdef0123456789abcdef01234567"
+ACP_CARD = SolutionCard(
+    shape="acp",
+    shape_version=1,
+    agent="claude-agent-acp@0.76.0",
+    model="sonnet",
+    options={"effort": "low"},
+    skill=SKILL,
+)
+
+
+def _context(**kwargs):
+    return build_context(
+        profile=PROFILE, provenance=PROVENANCE, environment=None, trap_version="1.2.3", **kwargs
+    )
+
+
+def test_a_card_names_the_run_and_states_its_options_and_skill():
+    patch = _context(card=ACP_CARD)
+    assert patch["identity"]["name"] == "claude-agent-acp@0.76.0 · sonnet · a/b@0123456"
+    assert patch["model"]["config"] == {"effort": "low"}
+    assert patch["skills"] == {
+        "installed": [
+            {
+                "name": "b",
+                "repo": "https://github.com/a/b",
+                "commit": "0123456789abcdef0123456789abcdef01234567",
+            }
+        ]
+    }
+
+
+def test_an_acp_run_without_a_skill_says_so_rather_than_unsupported():
+    patch = _context(card=ACP_CARD.model_copy(update={"skill": None}))
+    assert patch["skills"] == {"installed": []}
+
+
+def test_a_card_that_is_not_acp_leaves_skills_unsupported():
+    patch = _context(card=SolutionCard(shape="model", shape_version=1, provider="anthropic", model="m"))
+    assert patch["skills"] == {"status": "unsupported", "reason": SKILLS_UNSUPPORTED}
+
+
+def test_without_a_card_the_context_is_what_it_was():
+    patch = _context()
+    assert "name" not in patch["identity"]
+    assert patch["skills"] == {"status": "unsupported", "reason": SKILLS_UNSUPPORTED}
+    assert "config" not in patch["model"]
+
+
+def test_a_long_label_is_cut_to_what_the_site_stores():
+    patch = _context(card=ACP_CARD.model_copy(update={"name": "x" * 200}))
+    assert len(patch["identity"]["name"]) == 120
+
+
+def test_a_skill_not_resolved_to_repo_at_sha_is_named_by_its_directory():
+    # `card_from_run` leaves a non-git skill directory exactly as it found it --
+    # no "@", so there is no commit to report and the last path segment is all
+    # that is left to call it.
+    card = ACP_CARD.model_copy(update={"skill": "/Users/x/checkout/skills/my-skill"})
+    patch = _context(card=card)
+    assert patch["skills"] == {"installed": [{"name": "my-skill"}]}
+
+
+def test_a_skill_with_an_at_sign_but_no_commit_is_still_unresolved():
+    # A third input class distinct from "no @ at all" (above) and "repo@sha"
+    # (test_a_card_names_the_run_...): `_parse_skill` treats an "@" with
+    # nothing after it as unresolved too. Written as its own test rather than
+    # folded into the two above, because a single compound `if sep and commit`
+    # can reach 100% branch coverage without this combination ever running --
+    # coverage.py's branch tracking sees the whole expression's outcome, not
+    # which half of it produced a False.
+    card = ACP_CARD.model_copy(update={"skill": "some/repo@"})
+    patch = _context(card=card)
+    assert patch["skills"] == {"installed": [{"name": "repo@"}]}
+
+
+def test_identity_name_never_leaks_an_unresolved_skills_directory():
+    # The critical case (round 1 of review): an ACP card's skill is a local
+    # directory that never resolved to a git remote -- a routine outcome, not an
+    # edge case -- so `identity.name` must show neither the parent directories
+    # (routinely a real username) nor any "/" from the path at all.
+    card = ACP_CARD.model_copy(update={"skill": "/Users/alice/checkout/skills/my-skill"})
+    patch = _context(card=card)
+    name = patch["identity"]["name"]
+    assert "alice" not in name
+    assert "/" not in name
+
+
+def test_skill_ref_and_card_label_agree_on_an_unresolved_skill():
+    # The two surfaces that both name a skill -- `skills.installed` (built from
+    # `_skill_ref`) and `identity.name` (built from `card_label`) -- must never
+    # disagree about what an unresolved skill is called. Calling both directly on
+    # the same string is what actually proves agreement, rather than each being
+    # separately correct by coincidence.
+    from trap.live.context import _skill_ref
+    from trap.models.card import card_label
+
+    skill = "/Users/alice/checkout/skills/my-skill"
+    card = SolutionCard(shape="acp", shape_version=1, skill=skill)
+    ref = _skill_ref(skill)
+    label = card_label(card)
+    assert ref == {"name": "my-skill"}
+    assert label == "acp · my-skill"
+    assert label.endswith(ref["name"])
+    assert "alice" not in label
+
+
+def test_identity_and_skills_installed_never_leak_a_scoped_package_path():
+    # round 2: an npm-scoped skill directory's "@" has nothing on both sides of
+    # it that make it a commit -- `_parse_skill` must not be fooled by the
+    # separator's mere presence, on either surface that names the skill.
+    card = ACP_CARD.model_copy(update={"skill": "/Users/alice/.cache/node_modules/@my-org/my-skill"})
+    patch = _context(card=card)
+    name = patch["identity"]["name"]
+    installed_name = patch["skills"]["installed"][0]["name"]
+    assert "alice" not in name and "/" not in name
+    assert installed_name == "my-skill"
+    assert name.endswith(installed_name)
+
+
+def test_identity_and_skills_installed_never_leak_an_email_shaped_path():
+    # round 2: the other way an unrelated "@" gets into a path.
+    card = ACP_CARD.model_copy(update={"skill": "/Users/eve@work/my-skill"})
+    patch = _context(card=card)
+    name = patch["identity"]["name"]
+    installed_name = patch["skills"]["installed"][0]["name"]
+    assert "eve" not in name and "/" not in name
+    assert installed_name == "my-skill"
+    assert name.endswith(installed_name)
+
+
+def test_skills_installed_reconstructs_the_repo_url_with_no_embedded_credentials():
+    # round 3, the severe one: `_skill_ref` used to put the resolved `repo`
+    # string into `skills.installed[0]["repo"]` verbatim -- so a skill
+    # checkout whose git remote embeds HTTP Basic credentials shipped the
+    # token to the site. The `repo` field here must be reconstructed from
+    # parsed components (host/owner/repo), never the string tp received.
+    commit = "0" * 40
+    card = ACP_CARD.model_copy(
+        update={"skill": f"https://oauth2:ghp_SECRETTOKEN1234@github.com/owner/repo@{commit}"}
+    )
+    patch = _context(card=card)
+    assert patch["skills"] == {
+        "installed": [{"name": "repo", "repo": "https://github.com/owner/repo", "commit": commit}]
+    }
+    wire = json.dumps(patch)
+    assert "ghp_SECRETTOKEN1234" not in wire and "oauth2" not in wire
+
+
+def test_identity_and_skills_installed_never_leak_a_windows_drive_path():
+    # round 3: `repo.startswith("/")` (round 2's guard) is POSIX-only.
+    card = ACP_CARD.model_copy(update={"skill": "C:\\Users\\bob\\my-skill"})
+    patch = _context(card=card)
+    name = patch["identity"]["name"]
+    installed_name = patch["skills"]["installed"][0]["name"]
+    assert "bob" not in name and "\\" not in name and "/" not in name
+    assert installed_name == "my-skill"
+    assert name.endswith(installed_name)
+
+
+def test_identity_and_skills_installed_never_leak_a_unc_path():
+    card = ACP_CARD.model_copy(update={"skill": "\\\\fileserver\\share\\my-skill"})
+    patch = _context(card=card)
+    name = patch["identity"]["name"]
+    installed_name = patch["skills"]["installed"][0]["name"]
+    assert "fileserver" not in name and "share" not in name and "\\" not in name
+    assert installed_name == "my-skill"
+    assert name.endswith(installed_name)
+
+
+def test_skills_installed_keeps_a_non_default_port_while_dropping_the_credential():
+    # round 4, the severe one: the reviewer's exact repro. The credential is
+    # correctly gone; the published endpoint must be the real one, port
+    # included -- not the default port, which is where the input did NOT
+    # point.
+    commit = "a" * 40
+    card = ACP_CARD.model_copy(
+        update={"skill": f"https://user:pass@gitlab.internal.example.com:9999/owner/repo@{commit}"}
+    )
+    patch = _context(card=card)
+    assert patch["skills"] == {
+        "installed": [
+            {"name": "repo", "repo": "https://gitlab.internal.example.com:9999/owner/repo", "commit": commit}
+        ]
+    }
+    wire = json.dumps(patch)
+    assert "user" not in wire and "pass" not in wire
+
+
+def test_skills_installed_rebrackets_an_ipv6_host():
+    # round 4: `urlsplit(...).hostname` strips the brackets an IPv6 literal
+    # needs to remain a valid URL -- `https://[::1]:8443/a/b` must not become
+    # `https://::1:8443/a/b`, which is not a URL a browser or `new URL()`
+    # will parse the way the input intended.
+    commit = "a" * 40
+    card = ACP_CARD.model_copy(update={"skill": f"https://[::1]:8443/a/b@{commit}"})
+    patch = _context(card=card)
+    assert patch["skills"] == {
+        "installed": [{"name": "b", "repo": "https://[::1]:8443/a/b", "commit": commit}]
+    }
+    assert patch["identity"]["name"] == "claude-agent-acp@0.76.0 · sonnet · a/b@" + commit[:7]
+
+
+def test_skills_installed_keeps_an_http_scheme_rather_than_upgrading_it():
+    # round 5, closing the exception named in round 4's report: an
+    # http-only internal remote must publish an `http://` link, not one the
+    # server may not answer -- the reconstruction must never point somewhere
+    # the input did not, whether that is the wrong port (round 4) or the
+    # wrong scheme (round 5).
+    commit = "a" * 40
+    card = ACP_CARD.model_copy(update={"skill": f"http://gitlab.internal.example.com/owner/repo@{commit}"})
+    patch = _context(card=card)
+    assert patch["skills"] == {
+        "installed": [
+            {"name": "repo", "repo": "http://gitlab.internal.example.com/owner/repo", "commit": commit}
+        ]
+    }
+
+
+def test_a_malformed_bracketed_host_does_not_crash_build_context():
+    # round 6, finding B: `urlsplit` itself raises ValueError for an IPv4
+    # address in brackets (Python >= 3.13), not just for `.port`. This is
+    # the end-to-end check that `cli/__init__.py`'s unguarded
+    # `build_context(..., card=card)` call is safe: the parse must be total,
+    # not the call site defensive.
+    commit = "a" * 40
+    card = ACP_CARD.model_copy(update={"skill": f"https://[192.168.1.1]/a/b@{commit}"})
+    patch = _context(card=card)  # must not raise
+    assert patch["skills"] == {"installed": [{"name": "b"}]}
+
+
+def test_a_control_character_in_the_host_never_reaches_the_wire():
+    # round 6, finding A: `_authority` (round 4) publishes the host into
+    # `repo`, but only owner/repo were checked for control characters --
+    # this is the full-pipeline check that a NUL in the host is rejected
+    # (falling back to the clean leaf "b"), not published in a `repo` field.
+    # (json.dumps escapes a raw NUL byte to a six-character sequence rather
+    # than emitting the byte itself, so the exact-value check below -- no
+    # repo key, name is the unrelated leaf -- is what actually proves
+    # rejection, not a substring search over the serialised text.)
+    card = ACP_CARD.model_copy(update={"skill": "https://ho\x00st/a/b@" + "a" * 40})
+    patch = _context(card=card)
+    assert patch["skills"] == {"installed": [{"name": "b"}]}
+
+
+def test_a_card_without_options_adds_no_model_config():
+    # The card that is not ACP (above) also carries no options -- covers the
+    # branch where a card exists but `card.options` is empty, distinctly from
+    # "no card at all".
+    patch = _context(card=SolutionCard(shape="model", shape_version=1, provider="anthropic", model="m"))
+    assert "config" not in patch["model"]
+
+
+def test_a_carded_run_with_no_declared_model_still_gets_its_config():
+    # `patch.setdefault("model", {})` must create the group itself when
+    # `profile.model` is empty -- the ACP_CARD tests above only exercise the
+    # branch where `model` already exists from a `trap.yaml` declaration.
+    patch = build_context(
+        profile=Profile(), provenance=PROVENANCE, environment=None, trap_version="1.2.3", card=ACP_CARD
+    )
+    assert patch["model"] == {"config": {"effort": "low"}}
+
+
+def test_the_command_template_never_reaches_the_run_context():
+    # Unlike test_a_carded_solutions_command_and_setup_never_reach_reproducibility
+    # above (which only checks the `reproducibility` group), this walks the whole
+    # patch: a `cmd`-shaped card with no name has nothing safe to call itself but
+    # its shape, because `card_label`'s own fallback chain (agent, provider, cmd,
+    # shape) would otherwise hand the command line straight to `identity.name`.
+    card = SolutionCard(
+        shape="cmd", shape_version=1, cmd="python main.py --key $OPENAI_API_KEY {prompt}", setup="uv sync"
+    )
+    patch = _context(card=card)
+    wire = json.dumps(patch)
+    assert "OPENAI_API_KEY" not in wire and "main.py" not in wire and "uv sync" not in wire
+    assert patch["identity"]["name"] == "cmd"

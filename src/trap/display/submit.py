@@ -43,10 +43,17 @@ class SubmitRenderer:
         subdir = f"/{side.subdirectory}" if side.subdirectory else ""
         return f"[green]✓[/green] {side.repo}@{commit}{subdir}"
 
-    def intent(self, data: ReportData, run_id: str, server: str) -> None:
+    def intent(self, data: ReportData, run_id: str, server: str, *, withhold_repo: bool = False) -> None:
         """Echo what a `tp submit` is about to publish — solution / run / result /
         anchor, all read from the local report — so the user (or a CI log) sees the
-        payload before it leaves the machine."""
+        payload before it leaves the machine.
+
+        `withhold_repo` marks the solution anchor row when the card-storage gate is
+        about to strip that repo from the upload. The row still shows the local
+        report's true anchor (this table is never redacted — see `_anchor_cell`), but
+        at the moment of consent the confirmation prints a line right after this one
+        saying the repo won't be uploaded; without this annotation the two would read
+        as contradicting each other on the same screen."""
         grid = Table.grid(padding=(0, 2))
         grid.add_column(style="dim", justify="right")
         grid.add_column()
@@ -58,7 +65,10 @@ class SubmitRenderer:
         grid.add_row("solution", name)
         grid.add_row("run", f"[bold]{run_id}[/bold] → {server}")
         grid.add_row("result", self._case_tally(data))
-        grid.add_row("anchor", self._anchor_cell(data.provenance.solution) + "  [dim]solution[/dim]")
+        solution_anchor = self._anchor_cell(data.provenance.solution) + "  [dim]solution[/dim]"
+        if withhold_repo:
+            solution_anchor += "  [yellow](not uploaded — see below)[/yellow]"
+        grid.add_row("anchor", solution_anchor)
         grid.add_row("", self._anchor_cell(data.provenance.task) + "  [dim]task[/dim]")
 
         self.console.print("[bold]about to submit[/bold]")

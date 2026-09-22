@@ -104,6 +104,11 @@
           "slug": "reference/evaluation-api",
           "path": "docs/reference/evaluation-api.md",
           "title": "Evaluation API"
+        },
+        {
+          "slug": "reference/solution-card",
+          "path": "docs/reference/solution-card.md",
+          "title": "Solution card"
         }
       ]
     }
