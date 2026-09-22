@@ -88,17 +88,41 @@ tasks:
   | 21 | the output ceiling was hit (a partial answer, if any) |
   | 22 | the agent hit its turn limit |
   | 23 | agent error: crash, protocol error, failed login, or a reply that is not an answer — stdout stays empty |
-  | 24 | configuration: bad arguments, a model or option the agent does not offer, input the shape cannot pass on (a symlink it does not copy), a missing program |
+  | 24 | configuration: bad arguments, a model the agent does not offer, an option no model offers at all, input the shape cannot pass on (a symlink it does not copy), a missing program |
   | 124 | the deadline (a partial answer, if any) |
 
   Like any solution's exit code these are facts about the case; they never fail `tp run`.
   `tp shape cmd` itself only ever produces 24 — its own configuration errors: an unset or
   unreadable manifest, a question that isn't UTF-8, inputs that can't be copied or that
   contain a symlink it does not copy, an unparseable or empty template, `{repo}` with no
-  `--repo`, a command that can't be found or can't be started (no execute bit, say) — and
-  124, the deadline (plus 128 + the signal when it is interrupted). Any other code is the wrapped
+  `--repo`, a command that can't be found or can't be started (no execute bit, say),
+  `--setup` with no `--repo`, an unparseable or empty `--setup`, or a setup command that
+  can't be found, can't be started, or exits non-zero — and
+  124, the deadline: the case's own command *or* `--setup` running past it (plus 128 +
+  the signal when it is interrupted). Any other code is the wrapped
   program's: its own exit code, or 128 + N when signal N killed it (137 for `SIGKILL`),
   the way a shell reports it.
+
+## What the run records
+
+Every shape prints one line on stderr — `[trap] card {...}` — naming exactly what it
+ran: the shape, its behaviour version, the agent build or provider, the model that was
+asked for, the options that actually took effect, the skill (if any), the command
+template and setup line (`cmd` only), and the deadline. `tp run` reads that line back
+after the case and records it in `report.json` as `provenance.solution.adapter`,
+alongside the digest that names it, `provenance.solution.adapter_digest`. A solution that
+isn't a built-in shape prints no such line, and both fields are `null`.
+
+A skill installed with `--skill DIR` is carded as that directory; `tp run` then resolves
+it to `repo@sha` when the directory is a clean git checkout with an origin remote — the
+same handle the site uses everywhere else — and leaves it as the bare directory path
+otherwise, in which case it is shown, wherever the card is published, by that directory's
+own name rather than the path itself.
+
+A run graded on the site is named after its card instead of "model not recorded" — see
+[Solution card](../reference/solution-card.md) for the full field list, the
+canonicalisation rules and the digest, and [Privacy and grading](privacy-and-grading.md)
+for what of this leaves the machine, and when.
 
 ## `tp shape acp`
 
@@ -107,13 +131,18 @@ tasks:
 | `--agent-cmd` | how to start the agent, e.g. `npx -y @agentclientprotocol/codex-acp@1.11.0` |
 | `--agent-id` | its [ACP registry](https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json) id — `claude-acp`, `codex-acp`, … — which turns on what tp knows about that agent. Claude Code's settings isolation (below) needs `--agent-id claude-acp`: without it, the runner's own `CLAUDE.md`, hooks and plugins load |
 | `--model` | required (unless `--describe`); **a value the agent itself lists**, not an API model id |
-| `--option ID=VALUE` | set another of the agent's options, e.g. `effort=low` |
+| `--option ID=VALUE` | set another of the agent's options, e.g. `effort=low` — skipped with a `[trap]` note (not an error) if the *chosen* model no longer offers it once it's set; still exit 24 if no model offers it at all |
 | `--skill DIR` | install a skill for the case (Claude Code only) |
 | `--describe` | print the agent's options and their values, then exit — with a scrubbed environment, scrubbed the same way a case's is |
 
 `tp shape acp` needs an agent that offers a model option — a config option whose category
 is `model`, which `--describe` lists — and exits 24 for one that doesn't. Claude Code
 (`claude-acp`) and Codex (`codex-acp`) are verified; other agents are not verified yet.
+Setting the model can retire one of `--option`'s ids for it (Claude Code drops `effort`
+under `haiku`, for instance): that is a skip, noted on stderr, not a failure — the card's
+`options` never lists it as applied. An id no model offers at all — checked against
+every option this agent has shown, before and after the model is set — is still exit 24,
+naming the valid ids.
 
 Find the `--model` values with `--describe`:
 
@@ -232,6 +261,17 @@ those, wrap the command in `sh -c '…'` and use `{prompt_file}`. The program ru
 work directory, so a relative path in the template resolves there: refer to your code
 through `{repo}`. Whatever it prints on stdout is the answer (bytes that aren't valid
 text are replaced, not refused), and its exit code is the case's.
+
+`--setup CMD` runs once per case — this shape is a fresh process per case, so "once" means
+before that case's own command, not once for the whole run — in `--repo` (which `--setup`
+therefore requires), a one-off install step (`pip install -e .`, `npm install`) for a
+program that needs preparing first, on the same deadline and environment as the case
+itself. It never sees the question or the case's inputs; a setup that can't be found,
+can't be started, or exits non-zero is a configuration error (exit 24); one that runs
+past the deadline is exit 124, the same as the case's own command — and either way the
+case's own command never runs. This is separate from `trap.yaml`'s own `setup_cmd`
+([trap.yaml reference](../reference/trap-yaml.md)), which prepares the solution's
+checkout once for the whole run, before any case starts.
 
 ## Limits
 

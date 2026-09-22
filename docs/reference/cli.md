@@ -63,28 +63,51 @@ is how a later `tp submit` lands on the same run page instead of creating a seco
 Reports from runs without a session — and from older CLIs — simply have no such field and
 upload unchanged.
 
+**A card in the report.** When the solution is one of tp's built-in
+[shapes](../guides/built-in-shapes.md), `tp run` reads back the card it printed on stderr and
+records it in `report.json` as `provenance.solution.adapter`, with the digest that names it as
+`provenance.solution.adapter_digest` ([solution card](solution-card.md)). A solution that isn't
+a built-in shape carries `null` for both.
+
 **What tp reports about the run.** Beside the progress events, `tp run` *describes* the run
 to the site twice — once when it opens and once when it ends (`POST
 /api/v2/runs/{run}/context`; the graded run, when there is one, gets the opening
 description on its open and the closing one on its way out) — so the run page can say what
 the run was made of, apart from what it scored. The description has eight groups, and tp
 fills them as far as it can see: `identity` (tp as launcher and executor, the
-`profile.framework` list, and the agent that launched tp when it says so through
-`TRAP_AGENT` / `TRAP_AGENT_VERSION`); `model` (the `profile.model` list, recorded as
-*declared* from `trap.yaml` — tp does not watch the calls, so it never claims a model was
-*observed*); `environment` (the same OS / CPU / RAM / Python block as `report.json`);
-`reproducibility` (the solution's and task's `{repo, commit, subdirectory}`, or the reason a
-side is unanchored, and the tp build); and, at the end, `timing` (the sum of the cases'
-durations and the run's wall time) and `usage` (the cost proxy's token counts, calls and
-priced cost, folded per provider and model — never per case; a bucket with an unpriced call
-reports its tokens and no cost). `skills` and `tools` are reported as *unsupported* with the
-reason: tp runs a solver process and does not see inside it. `--no-environment` and
-`--no-cost` report their group as *disabled* rather than leaving it out, and a group tp did
-not report is shown by the site as **not reported — never as zero**. Nothing in the
-description names a case: no ids, no answers, no output, no paths. It is descriptive only
-— never part of a score — and it cannot change the run: a description the site does not
-take is dropped with one line (it keeps no outbox and is not retried; the closing one
-repeats everything the opening one said, and `report.json` holds the same facts).
+`profile.framework` list, the agent that launched tp when it says so through
+`TRAP_AGENT` / `TRAP_AGENT_VERSION`, and, for a run driven by a built-in shape, the name it
+takes from its [solution card](solution-card.md) — `identity.name`, e.g. `claude-agent-acp@0.76.0
+· sonnet`, or, for a bare command-template run with nothing else to call itself, just `cmd`.
+That name is always safe to publish as it stands, on the same rule that governs a skill's own
+name below: no value here is a string tp received, every value is reconstructed from parsed
+components ([solution card](solution-card.md) has the full rule — what counts as a
+publishable reference, why a credential is never read while a scheme/host/port are read and
+kept exactly as given, and what happens to anything that is not one, control characters
+included); `model` (the `profile.model` list, recorded as *declared* from `trap.yaml` — tp
+does not watch the calls, so it never claims a model was *observed* — plus, for a carded run,
+the options that actually took effect, as `model.config`); `environment` (the same OS / CPU /
+RAM / Python block as `report.json`); `reproducibility` (the solution's and task's `{repo,
+commit, subdirectory}`, or the reason a side is unanchored, and the tp build — deliberately
+never the card itself, which is a separate matter; see below); and, at the end, `timing` (the
+sum of the cases' durations and the run's wall time) and `usage` (the cost proxy's token
+counts, calls and priced cost, folded per provider and model — never per case; a bucket with
+an unpriced call reports its tokens and no cost). `tools` is reported as *unsupported*: tp
+runs a solver process and does not see inside it. `skills` says the same for any solution
+that is not an ACP run; an ACP run's card names the skill it installed under
+`skills.installed`, and one that installed none reports `installed: []` rather than
+*unsupported* — the shape can see whether it used a skill even when the answer is none.
+`--no-environment` and `--no-cost` report their group as *disabled* rather than leaving it
+out, and a group tp did not report is shown by the site as **not reported — never as zero**.
+Nothing in the description names a case: no ids, no answers, no output, no paths — and, for a
+carded run, none of the card itself either: its command template, its setup line and its
+digest stay on the machine that ran it, live sync carries only the labels above, and the
+command line becomes public only on an explicit `tp submit` ([solution card](solution-card.md)
+has the card's full field list). It is descriptive only — never part of a score — and it
+cannot change the run: a description the site does not take is dropped with one line (it
+keeps no outbox and is not retried; the closing one repeats everything the opening one said,
+plus the card's labels once the run has finished and they are known, and `report.json` holds
+the same facts).
 
 **Site grading.** When the CLI is paired and the task checkout resolves, on the server, to an
 *admitted evaluation revision* (`GET /api/v2/evaluations/resolve` by the task's `{repo,
@@ -219,7 +242,7 @@ Built-in solution programs, run as a `trap.yaml` `cmd:` rather than typed. Hidde
 ```
 tp shape acp --agent-cmd CMD [--model VALUE] [--agent-id ID] [--option ID=VALUE] [--skill DIR] [--describe]
 tp shape direct --model ID [--provider NAME] [--system-file PATH]
-tp shape cmd --template TEMPLATE [--repo PATH]
+tp shape cmd --template TEMPLATE [--repo PATH] [--setup CMD]
 ```
 
 `tp shape acp` requires `--model` unless it is given `--describe`. Every shape also takes
@@ -278,6 +301,17 @@ to <server>? [y/N]`. The intent table prints even when the prompt is skipped, so
 still records the payload. Any of `--yes`, `--allow-unanchored`, or
 `TRAP_ALLOW_UNANCHORED=1` skips the prompt; with no TTY and none of them, submit refuses.
 When a checkout is unanchored the leaderboard warning (see `tp run`) prints here too.
+
+**A carded submission shows its command line first.** When the saved report carries a
+[solution card](solution-card.md) (`provenance.solution.adapter`) whose command template
+or setup line is set, the pre-submit confirmation echoes it **verbatim** — never
+paraphrased, truncated, or re-quoted, so a reader can see exactly what an explicit submit
+is about to make public (the command line is otherwise never uploaded except by this
+explicit `tp submit`, see `tp run` above). It prints unconditionally, including under
+`--yes`: that flag means the user pre-consented to skipping the *prompt*, not that they
+were never told. Not done yet (see `solution-card.md`): scanning the template for a
+suspected secret value before upload — a known-prefix / high-entropy check is planned but
+not implemented; only a server-side check backstops that today.
 
 **Server/token resolution.** The target server is `TRAPSTREET_URL` env >
 `https://trapstreet.run`. The token is `TRAPSTREET_API_KEY` env > the stored credential *for
