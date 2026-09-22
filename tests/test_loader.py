@@ -107,3 +107,32 @@ def test_from_task_clone_to_on_local(tmp_path):
         TraptaskLoader.from_task_binding(
             TaskBinding(alias="t", source="../task", clone_to=Path("x")), tmp_path
         )
+
+
+def test_a_synthesised_loader_needs_no_trap_yaml_on_disk(tmp_path):
+    """The no-config path builds the solution's config from command-line flags. It has to
+    produce something indistinguishable from a loaded trap.yaml, because everything
+    downstream -- the runner, the report, the live context -- only knows that shape."""
+    from trap.models.trap_yaml import TrapConfig
+
+    config = TrapConfig(cmd="tp shape acp --model haiku", tasks={"t": {"source": "../task"}})
+    loader = TrapLoader.synthesised(config, trap_dir=tmp_path)
+
+    assert not (tmp_path / "trap.yaml").exists()
+    assert loader.trap_dir == tmp_path
+    assert loader.config.cmd == "tp shape acp --model haiku"
+    assert loader.resolve_task(None).alias == "t"  # alias filled in, as from_solution does
+
+
+def test_both_loader_constructors_set_the_same_fields(tmp_path):
+    """`synthesised` builds the object without running `__init__`, so a field added to the
+    file path later would be missing here and only show up as an AttributeError deep in a
+    run. This pins the two constructors together."""
+    from trap.models.trap_yaml import TrapConfig
+
+    _write(tmp_path / "trap.yaml", {"cmd": "x", "tasks": {"t": {"source": "../task"}}})
+    loaded = TrapLoader(tmp_path / "trap.yaml")
+    synthetic = TrapLoader.synthesised(
+        TrapConfig(cmd="x", tasks={"t": {"source": "../task"}}), trap_dir=tmp_path
+    )
+    assert vars(loaded).keys() == vars(synthetic).keys()

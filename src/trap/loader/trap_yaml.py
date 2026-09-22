@@ -37,6 +37,25 @@ class TrapLoader:
             alias: task.model_copy(update={"alias": alias}) for alias, task in self.config.tasks.items()
         }
 
+    @classmethod
+    def synthesised(cls, config: TrapConfig, *, trap_dir: Path) -> TrapLoader:
+        """A loader for a solution that has no trap.yaml -- `tp run --agent/--model/--cmd`
+        builds its config from the command line instead.
+
+        Nothing downstream is told the difference: the runner, the report and the live
+        context only ever see `config`, `trap_dir` and the task bindings, and those are
+        filled exactly as the file path fills them. `trap_dir` is where the solution is
+        considered to live -- the cwd -- so `cmd` resolves relative paths the same way a
+        real trap.yaml in that directory would.
+        """
+        loader = cls.__new__(cls)
+        loader.trap_dir = trap_dir.resolve()
+        loader.config = config
+        loader.tasks = {
+            alias: task.model_copy(update={"alias": alias}) for alias, task in config.tasks.items()
+        }
+        return loader
+
     def resolve_task(self, alias: str | None) -> TaskBinding:
         """Return the task for `alias` (the `tasks:` map key), or the first task if None."""
         if alias is None:

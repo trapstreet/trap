@@ -1634,3 +1634,26 @@ def test_an_interrupted_describe_kills_the_agent_group(fake, stray_signals):
         for pid in [e.get("pid") for e in _log(log)]:
             if pid:
                 reap(pid)
+
+
+# --- the agent table: a registry id is enough to start an agent -------------------
+
+
+def test_a_known_agent_id_resolves_to_a_version_pinned_command():
+    """`--agent claude-acp` must be enough on its own -- that is the whole point of the
+    no-config path. The command it resolves to pins an exact version, because which model
+    an alias like `sonnet` means is decided by the agent's build."""
+    from trap.shapes.acp.hints import agent_command
+
+    cmd = agent_command("claude-acp")
+    assert cmd.startswith("npx -y @agentclientprotocol/claude-agent-acp@")
+    assert cmd.rsplit("@", 1)[1][0].isdigit()  # an exact version, never a tag
+
+
+def test_an_unknown_agent_id_is_refused_by_name_with_the_ones_that_work():
+    from trap.shapes.acp.hints import UnknownAgent, agent_command
+
+    with pytest.raises(UnknownAgent) as excinfo:
+        agent_command("gemini-cli")
+    assert "gemini-cli" in str(excinfo.value)
+    assert "claude-acp" in str(excinfo.value)  # what the user could have said instead

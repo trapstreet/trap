@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 import sys
 from collections.abc import Callable
@@ -32,9 +33,11 @@ from trap.live.setup import start_tracking
 from trap.live.sync import sync_run
 from trap.live.tracker import LiveTracker, plain_score
 from trap.loader import ConfigError, TrapLoader, TraptaskLoader
-from trap.models import Diagnosis, Provenance, ReportData
+from trap.models import Diagnosis, Provenance, ReportData, TaskBinding
 from trap.models.card import SolutionCard, card_digest
+from trap.models.trap_yaml import TrapConfig
 from trap.runner import TaskRunner, refuse_answer_leaks
+from trap.shapes.acp.hints import UnknownAgent, agent_command
 from trap.workspace import SolutionIdentity, Workspace
 
 # A traceback's locals can hold request headers — an API key among them (tp shape direct
@@ -271,6 +274,65 @@ def _confirm_submit(
         raise typer.Exit(code=1)
 
 
+#: The task alias a flag-built run uses. It names the run directory and the trapstreet
+#: task id on submit, exactly as a `tasks:` key does -- there just isn't a file to read
+#: one from, and inventing something from the task's path would change with the checkout.
+FLAG_TASK_ALIAS = "task"
+
+#: The interpreter running this command, as the synthesised `cmd` names it. A bare
+#: `tp shape ...` would go through PATH, so a different trap build installed there would
+#: quietly become the measuring apparatus -- another shape version, other generation
+#: defaults, other scores, and nothing in the report to say so. A hand-written trap.yaml
+#: is the author's to get right; a line tp writes for itself is tp's.
+_SELF = shlex.quote(sys.executable)
+
+
+def _config_from_flags(
+    agent: str | None, model: str | None, cmd: str | None, *, task_source: str | None
+) -> TrapConfig | None:
+    """The solution config a `--agent` / `--model` / `--cmd` run stands in for, or None
+    when none of them was given and there is a trap.yaml to read instead.
+
+    Each flag combination names one built-in shape, and nothing else is inferred:
+    `--cmd` is the `cmd` shape, `--agent` with `--model` is `acp`, and `--model` alone is
+    `direct`. The command it builds is the same line a person would have written by hand,
+    so a run started this way and a run started from a trap.yaml holding that line are the
+    same run -- and carry the same card.
+
+    `--agent` resolves through tp's own table rather than taking a command, which is what
+    makes the no-config path worth having; the exact version it pins lands in the card.
+    """
+    if agent is None and model is None and cmd is None:
+        return None
+    if task_source is None:
+        raise _die(
+            "--agent / --model / --cmd run a task directly, so the task is required: "
+            "tp run <task path or git+ URL> --model <model>"
+        )
+    if cmd is not None:
+        if agent is not None or model is not None:
+            raise _die("--cmd runs a program of your own; it cannot be combined with --agent/--model")
+        shape = f"{_SELF} -m trap.shapes.command --template {shlex.quote(cmd)}"
+    elif agent is not None:
+        if model is None:
+            raise _die(
+                f"--agent {agent} needs --model; ask the agent which it offers with "
+                f"`tp shape acp --agent-id {agent} --describe --agent-cmd ...`"
+            )
+        try:
+            launch = agent_command(agent)
+        except UnknownAgent as e:
+            raise _die(escape(str(e))) from None
+        shape = (
+            f"{_SELF} -m trap.shapes.acp --agent-id {shlex.quote(agent)} "
+            f"--agent-cmd {shlex.quote(launch)} --model {shlex.quote(model)}"
+        )
+    else:
+        assert model is not None
+        shape = f"{_SELF} -m trap.shapes.direct --model {shlex.quote(model)}"
+    return TrapConfig(cmd=shape, tasks={FLAG_TASK_ALIAS: TaskBinding(source=task_source)})
+
+
 def _mirrored(
     primary: Callable[..., None] | None, mirror: Callable[..., None] | None
 ) -> Callable[..., None] | None:
@@ -326,6 +388,30 @@ def run(
     task: Annotated[
         str | None,
         typer.Option("--task", help="Task alias from trap.yaml (default: the first task)."),
+    ] = None,
+    agent: Annotated[
+        str | None,
+        typer.Option(
+            "--agent",
+            help="Run an agent by its ACP registry id (claude-acp, codex-acp) with no "
+            "trap.yaml. Needs --model; the positional argument is then the TASK.",
+        ),
+    ] = None,
+    model: Annotated[
+        str | None,
+        typer.Option(
+            "--model",
+            help="With --agent, the model to ask it for; alone, run that model directly. "
+            "No trap.yaml; the positional argument is then the TASK.",
+        ),
+    ] = None,
+    cmd: Annotated[
+        str | None,
+        typer.Option(
+            "--cmd",
+            help="Run any program through a one-line template ({prompt}, {prompt_file}) "
+            "with no trap.yaml; the positional argument is then the TASK.",
+        ),
     ] = None,
     workspace: Annotated[Path, typer.Option("--workspace", "-w")] = Path(Workspace.DEFAULT_DIRNAME),
     output: Annotated[OutputFormat, typer.Option("--output", "-o")] = OutputFormat.rich,
@@ -411,22 +497,31 @@ def run(
 
     SOLUTION is a local path, or a git+ URL to clone into ./<repo> (or
     --clone-to). Omit it to use the trap.yaml in the cwd.
+
+    With --agent, --model or --cmd there is no trap.yaml: the flags say what to
+    run, and the positional argument is the TASK (a path or a git+ URL) instead.
     """
     # Gate trap's auto-download-and-run of any remote source before it happens — once
     # for a remote SOLUTION, once for a remote task source (resolved from trap.yaml).
     trust = trust_remote or _env_truthy("TRAP_TRUST_REMOTE")
-    if solution is not None and ParsedGitUrl.looks_remote(solution):
+    configured = _config_from_flags(agent, model, cmd, task_source=solution)
+    if configured is None and solution is not None and ParsedGitUrl.looks_remote(solution):
         _confirm_remote(solution, trust=trust)
     try:
-        trap_yaml_loader = TrapLoader.from_solution(
-            solution,
-            clone_to,
-            allow_remote=True,
-            setup=setup_solution,
-            progress_func=(
-                (lambda m: console.print(f"[dim]{m}[/dim]")) if output == OutputFormat.rich else None
-            ),
-        )
+        if configured is not None:
+            # No trap.yaml: the solution "lives" in the cwd, so run artifacts land in
+            # ./.trap exactly as they would for a solution that had a config here.
+            trap_yaml_loader = TrapLoader.synthesised(configured, trap_dir=Path.cwd())
+        else:
+            trap_yaml_loader = TrapLoader.from_solution(
+                solution,
+                clone_to,
+                allow_remote=True,
+                setup=setup_solution,
+                progress_func=(
+                    (lambda m: console.print(f"[dim]{m}[/dim]")) if output == OutputFormat.rich else None
+                ),
+            )
         task_binding = trap_yaml_loader.resolve_task(task)
         if ParsedGitUrl.looks_remote(task_binding.source):
             _confirm_remote(task_binding.source, trust=trust)

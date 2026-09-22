@@ -12,8 +12,11 @@ tp run [SOLUTION] [OPTIONS]
 
 | Flag | Default | Description |
 |---|---|---|
-| `SOLUTION` (positional) | cwd | solution to run: a local path or a git+ URL (cloned) |
+| `SOLUTION` (positional) | cwd | solution to run: a local path or a git+ URL (cloned) — **the task** when `--agent` / `--model` / `--cmd` is given |
 | `--task` | first task | task alias (the `tasks:` key) to run |
+| `--agent` | (none) | ACP registry id (`claude-acp`, `codex-acp`); needs `--model`, no trap.yaml |
+| `--model` | (none) | with `--agent`, the model to ask it for; alone, run that model directly |
+| `--cmd` | (none) | one-line command template; no trap.yaml |
 | `--workspace / -w` | `.trap` | directory for run artifacts |
 | `--output / -o` | `rich` | renderer: `rich` or `json` |
 | `--clone-to` | `./<repo>` | where to clone a git+ URL `SOLUTION` |
@@ -27,6 +30,19 @@ tp run [SOLUTION] [OPTIONS]
 | `--live / --no-live` | on | mirror progress to the paired trapstreet account (see below) |
 | `--site-grading / --no-site-grading` | on | for an admitted evaluation, submit each answer for the site to judge (see below); also `TRAP_NO_SITE_GRADING=1` |
 | `--server` | the paired one | which trapstreet server to mirror progress to; also `TRAPSTREET_URL` |
+
+**Running without a trap.yaml.** `--agent`, `--model` and `--cmd` each name one built-in
+shape, and with any of them there is no config file to read: the positional argument is the
+**task** instead of the solution. `--cmd <template>` is the `cmd` shape, `--agent <id>`
+with `--model` is `acp`, and `--model` alone is `direct`; `--cmd` cannot be combined with
+either of the others, and `--agent` without `--model` is refused. The solution is taken to
+live in the cwd, so artifacts land in `./.trap` as usual, and the run records the same
+[solution card](solution-card.md) a `trap.yaml` holding the equivalent `cmd:` would. Two
+details are deliberate: `--agent` takes a registry id only — tp holds the launch command
+and pins an exact version, which lands in the card — and the command tp builds names the
+interpreter running it rather than `tp` on `PATH`, so another trap build installed there
+cannot quietly become the measuring apparatus. See
+[Built-in shapes](../guides/built-in-shapes.md#without-a-trapyaml).
 
 **Live progress sync.** With a stored token (`tp auth login`), `tp run` mirrors progress to
 that account while the run happens and prints the private page for it. It **publishes
