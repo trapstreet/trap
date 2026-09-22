@@ -107,3 +107,64 @@ def test_from_task_clone_to_on_local(tmp_path):
         TraptaskLoader.from_task_binding(
             TaskBinding(alias="t", source="../task", clone_to=Path("x")), tmp_path
         )
+
+
+def _git_init(path: Path) -> Path:
+    """A real git checkout at `path` -- the shape a cloned solution repo has."""
+    import subprocess
+
+    path.mkdir(parents=True, exist_ok=True)
+    for args in (["init", "-q"], ["config", "user.email", "t@t"], ["config", "user.name", "t"]):
+        subprocess.run(["git", *args], cwd=path, check=True, capture_output=True)
+    return path
+
+
+def test_a_relative_task_source_escaping_the_solution_repo_says_so(tmp_path):
+    """Someone else's solution repo, cloned on its own: `source: ../task` resolves to a
+    sibling of the clone that does not exist. The error must name *that* -- the solution
+    is not self-contained -- rather than pointing at a path the user never chose."""
+    sol = _git_init(tmp_path / "their-solution")
+    _write(sol / "trap.yaml", {"cmd": "x", "tasks": {"t": {"source": "../task"}}})
+
+    with pytest.raises(ConfigError) as excinfo:
+        TraptaskLoader.from_task_binding(TaskBinding(alias="t", source="../task"), sol)
+
+    message = str(excinfo.value)
+    assert "../task" in message  # the source as the author wrote it
+    assert "outside" in message  # why it cannot resolve here
+    assert "git+" in message  # what a shareable solution would have used instead
+
+
+def test_a_sibling_task_that_actually_exists_is_left_alone(tmp_path):
+    """The author's own layout: the solution is a repo, the task sits beside it, and it
+    is really there. Escaping the repo is normal here and must not be refused."""
+    sol = _git_init(tmp_path / "sol")
+    _write(sol / "trap.yaml", {"cmd": "x", "tasks": {"t": {"source": "../task"}}})
+    (tmp_path / "task").mkdir()
+    _write(tmp_path / "task" / "traptask.yaml", {"cases": [{"id": "a"}]})
+
+    loader = TraptaskLoader.from_task_binding(TaskBinding(alias="t", source="../task"), sol)
+    assert [c.id for c in loader.cases] == ["a"]
+
+
+def test_a_task_inside_the_solution_repo_reports_the_plain_missing_error(tmp_path):
+    """`source: ./task` never leaves the repo, so a missing one is an ordinary mistake --
+    the author's own, fixable in place. It must not be told the solution is unshareable."""
+    sol = _git_init(tmp_path / "sol")
+    _write(sol / "trap.yaml", {"cmd": "x", "tasks": {"t": {"source": "task"}}})
+
+    with pytest.raises(ConfigError) as excinfo:
+        TraptaskLoader.from_task_binding(TaskBinding(alias="t", source="task"), sol)
+    assert "git+" not in str(excinfo.value)
+
+
+def test_a_solution_that_is_not_a_git_checkout_reports_the_plain_missing_error(tmp_path):
+    """A loose directory has no repository boundary, so there is nothing to have escaped;
+    guessing one would turn an ordinary typo into a lecture."""
+    sol = tmp_path / "loose"
+    sol.mkdir()
+    _write(sol / "trap.yaml", {"cmd": "x", "tasks": {"t": {"source": "../task"}}})
+
+    with pytest.raises(ConfigError) as excinfo:
+        TraptaskLoader.from_task_binding(TaskBinding(alias="t", source="../task"), sol)
+    assert "git+" not in str(excinfo.value)

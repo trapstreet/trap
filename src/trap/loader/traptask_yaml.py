@@ -80,6 +80,7 @@ class TraptaskLoader:
                 raise GitOpsError("clone_to only applies to a remote (git URL) source")
             is_local_changed = False
             traptask_dir = (trap_dir / task_binding.source).resolve()
+            _refuse_source_outside_the_solution(task_binding.source, trap_dir, traptask_dir)
         loader = cls(traptask_dir / "traptask.yaml")
         if (is_local_changed or setup) and loader.traptask.setup_cmd:
             # raises subprocess.CalledProcessError on non-zero exit
@@ -96,3 +97,35 @@ class TraptaskLoader:
         if not (tag_set := set(tags or ())):
             return self.cases
         return tuple(c for c in self.cases if not tag_set.isdisjoint(c.tags))
+
+
+def _refuse_source_outside_the_solution(source: str, trap_dir: Path, traptask_dir: Path) -> None:
+    """Name the real cause when a relative `source` points out of the solution's repo.
+
+    A solution whose task lives at `../task` only works where its author kept it: beside
+    a sibling checkout. Clone that repo on its own -- which is what happens to every
+    solution someone finds and wants to run -- and the path resolves to a sibling of the
+    clone that was never there. The failure is real either way; without this the message
+    names a directory the user never chose and reads as "the task is missing" rather than
+    "this solution was not written to be run anywhere else".
+
+    Only raised when the target is absent, so a working layout is never touched, and only
+    when the solution *is* a git checkout -- a loose directory has no boundary to escape,
+    and guessing one would turn an ordinary typo into a lecture.
+    """
+    from trap.git_ops import LocalRepo
+
+    if (traptask_dir / "traptask.yaml").exists() or (traptask_dir / "inputs").is_dir():
+        return
+    repo = LocalRepo.open(trap_dir, search_parent=True)
+    root = repo.repo.working_tree_dir if repo is not None else None
+    if root is None or traptask_dir.is_relative_to(Path(root).resolve()):
+        return
+    raise ConfigError(
+        f"task source {source!r} resolves to {traptask_dir}, outside the solution's "
+        f"repository ({root}) -- and nothing is there.\n"
+        f"  This solution is not self-contained: it only runs beside a checkout of its "
+        f"task that its author kept next to it.\n"
+        f"  A solution meant to be run from a clone points at the task by URL instead, "
+        f"e.g. source: git+https://github.com/owner/task-repo"
+    )
