@@ -280,3 +280,37 @@ checkout once for the whole run, before any case starts.
   symlink, even a link to a file.
 - Coming next: `tp run --agent … / --model … / --cmd …` will build these for you, without a
   `trap.yaml`.
+
+
+## Without a trap.yaml
+
+`tp run` takes the same three shapes as flags. There is no config file, and the
+positional argument is the **task** (a path or a `git+` URL):
+
+```bash
+tp run ./task --cmd "python main.py {prompt}"          # cmd
+tp run ./task --model claude-sonnet-5                   # direct
+tp run ./task --agent claude-acp --model haiku          # acp
+tp run git+https://github.com/owner/task-repo --model claude-sonnet-5
+```
+
+Run artifacts land in `./.trap` exactly as they would for a solution whose `trap.yaml`
+sat in that directory, and the run's [solution card](../reference/solution-card.md) is
+recorded the same way — so a flag-built run and a `trap.yaml` holding the equivalent
+`cmd:` are the same run, with the same digest.
+
+`--agent` takes an **ACP registry id** and nothing else: tp holds the launch command and
+the exact version it pins, so there is no package name to know. `tp` prints nothing new
+about it, but the version lands in the card, which is what makes two runs comparable —
+and what makes a tp upgrade that moves a pin show up as a different card rather than a
+silent re-score. An ACP agent tp does not carry still runs the explicit way, through a
+`trap.yaml` with `tp shape acp --agent-cmd ...`.
+
+Two differences from a hand-written `trap.yaml` worth knowing:
+
+- **No `--scrub`.** The shape still refuses to pass `TRAP_MANIFEST` or any variable whose
+  value names the case's `inputs/`, but variables naming the *task root* are not dropped,
+  because the flags are read before the task is resolved. Write a `trap.yaml` if you want
+  that.
+- **The command names this interpreter**, not `tp` on `PATH` — a different trap build
+  installed there would otherwise become the measuring apparatus without saying so.

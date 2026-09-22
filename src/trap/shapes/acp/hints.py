@@ -16,6 +16,42 @@ from trap.shapes._case import ShapeError, ShapeExit, copy_tree_without_symlinks,
 CLAUDE = "claude-acp"
 CODEX = "codex-acp"
 
+#: How to start each agent tp can launch without being told -- what `tp run --agent <id>`
+#: resolves to. Every entry pins an exact version, never a tag: which model an alias like
+#: `sonnet` means is decided by the agent's build, so a moving version would silently
+#: re-score every run made with it. Upgrading tp may move a pin, and that is visible
+#: rather than silent -- the resolved `package@version` is what lands in the run's card,
+#: so two tp builds that disagree produce two different card digests, which is correct:
+#: they are two different solutions.
+AGENT_COMMANDS: Mapping[str, str] = {
+    CLAUDE: "npx -y @agentclientprotocol/claude-agent-acp@0.76.0",
+    CODEX: "npx -y @agentclientprotocol/codex-acp@1.11.0",
+}
+
+
+class UnknownAgent(ValueError):
+    """No launch command is known for this agent id. Raised on the `tp run` path, not
+    inside a case, so it carries no shape exit code -- the CLI turns it into a config
+    failure the way it does any other bad argument."""
+
+
+def agent_command(agent_id: str) -> str:
+    """The command that starts `agent_id`, or raise naming the ids that do work.
+
+    Only agents tp has actually verified are listed. An agent that speaks ACP but is not
+    here can still be run the explicit way -- `tp shape acp --agent-cmd ...` in a
+    trap.yaml -- which is also the only way to pin a version tp does not carry.
+    """
+    try:
+        return AGENT_COMMANDS[agent_id]
+    except KeyError:
+        known = ", ".join(sorted(AGENT_COMMANDS))
+        raise UnknownAgent(
+            f"no launch command known for agent {agent_id!r}; tp can start: {known}.\n"
+            f"  Any other ACP agent runs through a trap.yaml with "
+            f'`cmd: tp shape acp --agent-id {agent_id} --agent-cmd "<how to start it>" ...`'
+        ) from None
+
 
 def session_meta(agent_id: str | None) -> dict[str, Any] | None:
     """``_meta`` for ``session/new``. claude-agent-acp loads the runner's own CLAUDE.md,

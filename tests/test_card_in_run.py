@@ -434,3 +434,118 @@ def test_confirm_submit_shows_the_template_even_when_yes_skips_the_prompt(
     report.provenance.solution.adapter = SolutionCard(shape="cmd", shape_version=1, cmd="x {prompt}")
     climod._confirm_submit(report, "ts-1", "http://s", yes=True, allow_unanchored=False)
     assert "x {prompt}" in capsys.readouterr().err
+
+
+# --- tp run with no trap.yaml: the flags are the solution -------------------------
+
+
+def _task_only(tmp_path, monkeypatch, question="what is 2+2?"):
+    """A task on disk and nothing else -- the shape of a task someone just cloned."""
+    task = tmp_path / "task"
+    (task / "inputs" / "c1").mkdir(parents=True)
+    (task / "inputs" / "c1" / "question.txt").write_text(question)
+    (task / "traptask.yaml").write_text(json.dumps({"cases": [{"id": "c1"}]}))
+    here = tmp_path / "elsewhere"
+    here.mkdir()
+    monkeypatch.chdir(here)
+    monkeypatch.setenv("TRAP_ALLOW_UNANCHORED", "1")
+    return task, here
+
+
+def test_a_cmd_template_runs_a_task_with_no_trap_yaml_anywhere(tmp_path, monkeypatch, runner):
+    """The whole point: a task, a one-line command, no config file to write."""
+    from trap.cli import app
+
+    task, here = _task_only(tmp_path, monkeypatch)
+
+    result = runner.invoke(
+        app, ["run", str(task), "--cmd", f"{PY} -c 'print(4)'", "--no-live", "--no-environment"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert not (here / "trap.yaml").exists()
+    report = json.loads(next((here / ".trap").rglob("report.json")).read_text())
+    assert [c["case_id"] for c in report["cases_results"]] == ["c1"]
+
+
+def test_the_flags_run_this_tp_not_whichever_one_is_on_path():
+    """A synthesised `tp shape ...` would be resolved through PATH, so a different trap
+    build installed there would quietly become the measuring apparatus -- a different
+    shape version, different generation defaults, different scores, and no sign of it in
+    the report. The interpreter that is running now is named instead."""
+    import sys
+
+    from trap.cli import _config_from_flags
+
+    for kwargs in (
+        {"cmd": "echo hi", "agent": None, "model": None},
+        {"cmd": None, "agent": None, "model": "claude-sonnet-5"},
+        {"cmd": None, "agent": "claude-acp", "model": "haiku"},
+    ):
+        config = _config_from_flags(task_source="../task", **kwargs)
+        assert config is not None
+        argv = shlex.split(config.cmd)
+        assert argv[0] == sys.executable, config.cmd
+        assert argv[1] == "-m" and argv[2].startswith("trap.shapes."), config.cmd
+
+
+def test_an_agent_alone_says_which_model_and_how_to_find_one(tmp_path, monkeypatch, runner):
+    from trap.cli import app
+
+    task, _ = _task_only(tmp_path, monkeypatch)
+    result = runner.invoke(app, ["run", str(task), "--agent", "claude-acp"])
+    assert result.exit_code == 2
+    assert "--model" in result.output and "--describe" in result.output
+
+
+def test_an_unknown_agent_names_the_ones_tp_can_start(tmp_path, monkeypatch, runner):
+    from trap.cli import app
+
+    task, _ = _task_only(tmp_path, monkeypatch)
+    result = runner.invoke(app, ["run", str(task), "--agent", "gemini-cli", "--model", "m"])
+    assert result.exit_code == 2
+    assert "gemini-cli" in result.output and "claude-acp" in result.output
+
+
+def test_a_template_cannot_also_be_an_agent(tmp_path, monkeypatch, runner):
+    from trap.cli import app
+
+    task, _ = _task_only(tmp_path, monkeypatch)
+    result = runner.invoke(app, ["run", str(task), "--cmd", "echo hi", "--model", "m"])
+    assert result.exit_code == 2
+    assert "cannot be combined" in result.output
+
+
+def test_the_flags_without_a_task_say_the_task_is_the_argument(tmp_path, monkeypatch, runner):
+    from trap.cli import app
+
+    _task_only(tmp_path, monkeypatch)
+    result = runner.invoke(app, ["run", "--model", "claude-sonnet-5"])
+    assert result.exit_code == 2
+    assert "the task is required" in result.output
+
+
+def test_an_agent_and_model_build_the_acp_shape_with_the_pinned_agent_command():
+    from trap.cli import _config_from_flags
+    from trap.shapes.acp.hints import agent_command
+
+    config = _config_from_flags("claude-acp", "haiku", None, task_source="../task")
+    assert config is not None
+    argv = shlex.split(config.cmd)
+    assert argv[2] == "trap.shapes.acp"
+    assert argv[argv.index("--agent-cmd") + 1] == agent_command("claude-acp")
+    assert argv[argv.index("--model") + 1] == "haiku"
+
+
+def test_a_model_on_its_own_builds_the_direct_shape():
+    from trap.cli import _config_from_flags
+
+    config = _config_from_flags(None, "claude-sonnet-5", None, task_source="../task")
+    assert config is not None
+    assert shlex.split(config.cmd)[2] == "trap.shapes.direct"
+
+
+def test_no_flags_reads_trap_yaml_as_before():
+    from trap.cli import _config_from_flags
+
+    assert _config_from_flags(None, None, None, task_source=None) is None
