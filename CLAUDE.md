@@ -32,6 +32,32 @@ for `asyncio.gather` or a thread-pool map without restructuring `run()`.
 Likely first Rust targets: `runner`, `reporter`, the CLI entry point. `judge/custom` stays
 Python (it executes user-written Python).
 
+### What sits beside the pipeline
+
+The pipeline above is the measuring apparatus, and it is **not** most of the code. Two
+subsystems are larger than all four pipeline stages together, and a port estimate that
+counts only the pipeline is wrong by a factor of three:
+
+| Package | LOC | What it is | In the pipeline? |
+|---|---|---|---|
+| `live/` | ~3.2k | progress mirroring, site grading, the two durable queues and `tp sync` | no — it observes a run, and must never change one |
+| `shapes/` | ~1.8k | the built-in solution programs (`acp`, `direct`, `cmd`) | no — a shape *is* a solution, run as a black box like any other |
+| `cli/` | ~1.0k | argument surface, confirmations, wiring | entry point |
+| `runner` + `loader` + `models` + `display` | ~1.7k | the pipeline itself | yes |
+
+Both obey the constraints above, and one more that only applies to them:
+
+6. **`live/` cannot change a run.** No network result, credential, queue or bug in sync may
+   alter the solution, judge, grader, `report.json` or the exit code. A `--no-live` run and
+   a synced run are byte-identical locally. This is what lets sync fail loudly and the run
+   still be trustworthy.
+
+`shapes/` is on the far side of the IO contract from the rest: tp starts a shape as a
+subprocess and reads its stdout, exactly as it would a solution someone else wrote. Nothing
+in the pipeline imports it, and it must stay that way — a shape that could reach into the
+runner would stop being a black box, and its scores would stop being comparable with a
+hand-written solution's.
+
 ## Ownership model
 
 Solution and task are owned by different people, live in different repos, and meet only at the
@@ -62,5 +88,8 @@ cross-solution comparability. The two setups are independent; `--setup-solution`
 | `.trap/` workspace layout | `docs/reference/workspace.md` |
 | CLI commands & flags | `docs/reference/cli.md` |
 | Cost tracking (proxy, providers, pricing, internals) | `docs/guides/cost-tracking.md` |
+| Built-in shapes (`acp` / `direct` / `cmd`) — what each guarantees | `docs/guides/built-in-shapes.md` |
+| Live sync & site grading, the wire protocol `live/` speaks | `docs/reference/evaluation-api.md` |
+| What leaves the machine, and on which command | `docs/guides/privacy-and-grading.md` |
 | Package graph & core data models | `CODE_MAP.md` |
 | Writing a solution / a task | `docs/guides/writing-solution.md` · `docs/guides/writing-task.md` |
