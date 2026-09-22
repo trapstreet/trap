@@ -2370,6 +2370,34 @@ def test_a_site_that_confirms_nothing_stalls_the_answers(tmp_path: Path, monkeyp
     assert "confirmed none of this run's 2 queued answer(s)" in outcome.answers.message
 
 
+def test_a_run_the_site_has_already_settled_refuses_rather_than_reading_as_delivered(
+    tmp_path: Path, monkeypatch
+):
+    """A settled run rejects the whole request, so the queue empties and
+    ``remaining`` is 0 -- which the delivered branch would have reported as
+    "submitted 0 queued answer(s)", a success line for answers that will never
+    be graded. Refused instead: there is nothing to come back for."""
+    _graded(tmp_path)
+    receipt = {
+        "results": [
+            {"case_id": "c1", "status": "rejected", "reason": "RUN_SETTLED"},
+            {"case_id": "c2", "status": "rejected", "reason": "RUN_SETTLED"},
+        ]
+    }
+    outcome = _run_sync(tmp_path, monkeypatch, _SyncClient(answers=[receipt]))
+    assert outcome.answers is not None
+    assert (outcome.answers.status, outcome.answers.delivered, outcome.answers.remaining) == (
+        "refused",
+        0,
+        0,
+    )
+    assert outcome.answers.message == (
+        "https://srv/runs/rs_9 will take no more answers for this run; 2 too late — the site had "
+        "already settled this run; a corrected attempt is a new run."
+    )
+    assert outcome.refused is True  # non-zero: not a queue to retry, a dead one
+
+
 def test_what_the_site_would_not_take_is_named_in_the_sync_line(tmp_path: Path, monkeypatch):
     _graded(tmp_path)
     receipt = {
@@ -2435,6 +2463,23 @@ def test_tp_sync_prints_both_halves_and_exits_two_when_the_answers_refuse(make_p
     result = runner.invoke(app, ["sync"])
     assert result.exit_code == 2
     assert "rejected the CLI token" in result.output
+
+    # A run the site has already settled is the other way to exit 2, and the
+    # one that is not about the credential: permanent, so there is no later
+    # sync worth advising.
+    _graded(run_dir, queued=("c4",))
+    receipt = {
+        "results": [
+            {"case_id": "c3", "status": "rejected", "reason": "RUN_SETTLED"},
+            {"case_id": "c4", "status": "rejected", "reason": "RUN_SETTLED"},
+        ]
+    }
+    monkeypatch.setattr("trap.live.sync.LiveClient", lambda *_a, **_k: _SyncClient(answers=[receipt]))
+    result = runner.invoke(app, ["sync"])
+    assert result.exit_code == 2
+    assert "will take no more answers for this run" in result.output
+    assert "2 too late" in result.output  # counted, not listed case by case
+    assert "a corrected attempt is a new run" in result.output
 
 
 # -- verifying an identity, for either sidecar --------------------------------

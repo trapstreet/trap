@@ -17,6 +17,7 @@ import pytest
 from trap.live.answers import (
     ANSWER_CHANGED,
     KNOWN_REASONS,
+    RUN_SETTLED,
     UNREADABLE_ANSWER,
     AnswerOutbox,
     AnswerOutboxError,
@@ -452,6 +453,49 @@ def test_resend_collects_what_the_site_would_not_take(tmp_path: Path):
         ("c2", "ARTIFACT_TOO_LARGE")
     ]
     assert (outcome.delivered, outcome.remaining) == (0, 0)
+
+
+def test_a_settled_run_stops_the_pass_instead_of_bouncing_every_batch(tmp_path: Path):
+    """RUN_SETTLED is one fact about the run, so the second batch cannot fare
+    better than the first: the pass stops and says so, and what it never sent
+    stays queued rather than being settled on the site's behalf."""
+    outbox = _outbox(tmp_path)
+    for ordinal, case_id in enumerate(("c1", "c2"), start=1):
+        _queued(tmp_path, outbox, case_id, "a", ordinal=ordinal)
+    body = {"results": [{"case_id": "c1", "status": "rejected", "reason": RUN_SETTLED}]}
+    outcome = resend(_Site(body), GRADED, outbox, tmp_path, batch=1)  # type: ignore[arg-type]
+    assert outcome.run_settled is True
+    assert outcome.rejected == [("c1", RUN_SETTLED)]
+    assert (outcome.delivered, outcome.remaining) == (0, 1)
+    latest = outbox.latest()
+    assert latest["c1"].state == "rejected" and latest["c1"].reason == RUN_SETTLED
+    assert latest["c2"].state == "queued"  # never sent, so never settled on the site's behalf
+
+
+def test_an_ordinary_rejection_is_not_a_settled_run(tmp_path: Path):
+    """The stop is specific to RUN_SETTLED: one case the site would not take is
+    no reason to abandon the ones behind it."""
+    outbox = _outbox(tmp_path)
+    for ordinal, case_id in enumerate(("c1", "c2"), start=1):
+        _queued(tmp_path, outbox, case_id, "a", ordinal=ordinal)
+    body = {"results": [{"case_id": "c1", "status": "rejected", "reason": "ARTIFACT_TOO_LARGE"}]}
+    site = _Site(body)
+    outcome = resend(site, GRADED, outbox, tmp_path, batch=1)  # type: ignore[arg-type]
+    assert outcome.run_settled is False
+    assert len(site.batches) == 2 and outcome.delivered == 1
+
+
+def test_the_shortfall_counts_a_settled_run_once_and_ends_on_something_true():
+    """Naming each case would repeat one whole-run fact N times, and the usual
+    tail would claim the run is unfinished when it is closed."""
+    line = shortfall([("c1", RUN_SETTLED), ("c2", RUN_SETTLED)], [], [])
+    assert line == ("; 2 too late — the site had already settled this run; a corrected attempt is a new run")
+    assert "c1" not in line
+    mixed = shortfall([("c1", RUN_SETTLED), ("c3", "NO_SUCH_CASE")], [("c2", "NO_ANSWER")], [])
+    assert mixed == (
+        "; 1 skipped by the site (c2: NO_ANSWER); 1 rejected (c3: NO_SUCH_CASE); 1 too late "
+        "— the site had already settled this run; a corrected attempt is a new run"
+    )
 
 
 def test_the_shortfall_names_the_cases_the_site_will_never_grade():

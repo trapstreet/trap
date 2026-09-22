@@ -573,6 +573,35 @@ def test_a_receipt_names_each_case(monkeypatch, tmp_path):
     )
 
 
+def test_a_settled_run_stops_grading_for_good(monkeypatch, tmp_path):
+    """The site closed the run while this one was still producing answers. Every
+    later batch would bounce the same way, and so would tp sync, so the sender
+    stops instead of backing off -- and the summary does not send the user after
+    a queue the site will never take."""
+    body = {
+        "accepted": 0,
+        "duplicates": 0,
+        "skipped": [],
+        "rejected": [{"case": "c1", "reason": "RUN_SETTLED"}],
+        "results": [{"case_id": "c1", "status": "rejected", "reason": "RUN_SETTLED"}],
+    }
+    grader, site = _start(monkeypatch, tmp_path, _Site(submits=[body]))
+    assert grader is not None
+    grader.on_case_done(_result("c1"))
+    _drain(grader)
+    assert grader.notice == (
+        "site grading: https://srv/runs/rs_9 is already settled — no more answers are sent for this run"
+    )
+    grader.on_case_done(_result("c2"))  # off: not even queued
+    _drain(grader)
+    assert len(site.submissions) == 1 and _states(tmp_path) == {"c1": "rejected"}
+    grader.close()
+    assert grader.summary_line == (
+        "site grading: 0 of 1 answer(s) submitted; 1 too late — the site had already settled "
+        "this run; a corrected attempt is a new run"
+    )
+
+
 def test_a_rejected_token_stops_submitting_and_keeps_the_queue(monkeypatch, tmp_path):
     grader, site = _start(monkeypatch, tmp_path, _Site(submits=[LiveApiError("http 401", status=401)]))
     assert grader is not None

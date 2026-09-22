@@ -186,10 +186,18 @@ was `accepted`, what was a `duplicate` retry, what was `skipped` and what was
 
 `status` is one of `accepted`, `duplicate`, `rejected` or `skipped`; `reason`
 names why (`NO_SUCH_CASE`, `ALREADY_ANSWERED`, `AUTHORITATIVE_FIELD`,
-`ARTIFACT_TOO_LARGE`, `STALE_LEASE`, `SOLVER_ERRORED`, `NO_ANSWER`); `digest`
-is what the site stored. A client that keeps a queue settles each case by its
-receipt — a skipped or rejected case stays unanswered on the site and the run
-does not finalise, so it is worth saying by name rather than resending.
+`ARTIFACT_TOO_LARGE`, `STALE_LEASE`, `SOLVER_ERRORED`, `NO_ANSWER`,
+`RUN_SETTLED`); `digest` is what the site stored. A client that keeps a queue
+settles each case by its receipt — a skipped or rejected case stays unanswered
+on the site and the run does not finalise, so it is worth saying by name rather
+than resending.
+
+`RUN_SETTLED` is the one reason that is not about the case. The site tests it
+once, before it reads the answers, and rejects **every** item of the request
+with it: the run has reached an end state — finalised by the worker, or closed
+after hours of silence — and will never take another answer. One case carrying
+it says the same thing as all of them, so a client should stop the pass there
+rather than send what is left. A corrected attempt is a new run.
 
 ## Describing the run
 
