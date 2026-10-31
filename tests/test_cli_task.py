@@ -38,6 +38,7 @@ def test_sends_the_ref_id_title_tags_and_defaults(runner, register):
             "traptask_ref": REF,
             "tags": ["database", "sql"],
             "ranking_metric": "score",
+            "ranking_direction": "desc",
             "visibility": "public",
         }
     ]
@@ -89,3 +90,57 @@ def test_help_renders(runner):
     res = runner.invoke(app, ["task", "register", "--help"])
     assert res.exit_code == 0, res.output
     assert "owner/repo" in res.output
+
+
+@pytest.mark.parametrize(
+    ("metric", "direction"),
+    [("score", "desc"), ("pass_rate", "desc"), ("cost", "asc"), ("latency", "asc")],
+)
+def test_direction_follows_the_metric(runner, register, metric, direction):
+    # The site defaults to desc and a direction can't be edited after registering:
+    # without this, a cost board would rank the most expensive run first for good.
+    res = runner.invoke(app, [*ARGS, "--metric", metric])
+    assert res.exit_code == 0, res.output
+    assert register[0]["ranking_direction"] == direction
+
+
+def test_a_taken_id_shows_the_sites_reason(runner, monkeypatch, register):
+    def taken(self, body):
+        raise ApiError("http 409: task bird-small already exists", status=409)
+
+    monkeypatch.setattr("trap.auth.ApiClient.register_task", taken)
+    res = runner.invoke(app, ARGS)
+    assert res.exit_code == 2
+    assert "already exists" in res.output
+
+
+def test_a_reason_with_brackets_is_printed_not_parsed(runner, monkeypatch, register):
+    def refuse(self, body):
+        raise ApiError("http 400: bad ref owner/repo[/path]", status=400)
+
+    monkeypatch.setattr("trap.auth.ApiClient.register_task", refuse)
+    res = runner.invoke(app, ARGS)
+    assert res.exit_code == 2
+    assert "owner/repo[/path]" in res.output
+
+
+def test_server_flag_never_borrows_another_servers_stored_token(runner, monkeypatch, register, tmp_path):
+    monkeypatch.delenv("TRAPSTREET_API_KEY", raising=False)
+    monkeypatch.delenv("TRAPSTREET_URL", raising=False)
+    monkeypatch.setattr("trap.auth.store.CredentialStore.PATH", tmp_path / "auth.json")
+    login = runner.invoke(
+        app, ["auth", "login", "--server", "https://a.example", "--with-token"], input="a-key\n"
+    )
+    assert login.exit_code == 0, login.output
+    res = runner.invoke(app, [*ARGS, "--server", "https://b.example"])
+    assert res.exit_code == 2
+    assert "not logged in" in res.output
+    assert register == []
+
+
+def test_a_success_without_a_task_body_still_reports_the_requested_id(runner, monkeypatch, register):
+    # The task exists by now: a traceback here would send an agent into a retry and a 409.
+    monkeypatch.setattr("trap.auth.ApiClient.register_task", lambda self, body: {})
+    res = runner.invoke(app, ARGS)
+    assert res.exit_code == 0, res.output
+    assert "https://uat.example/tasks/bird-small" in res.output

@@ -83,6 +83,9 @@ class ApiClient:
             raise ApiError(f"http {status}: {_error_detail(e.response)}", status=status) from None
         except httpx.RequestError as e:
             raise ApiError(f"connection error: {e}") from None
+        except ValueError:
+            # A success the client can't read: the task may well exist by now.
+            raise ApiError("the site's reply was not JSON; check the site before retrying") from None
 
 
 def _error_detail(resp: httpx.Response) -> str:

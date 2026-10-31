@@ -434,3 +434,9 @@ def test_register_task_unreachable():
 
     with pytest.raises(ApiError, match="connection error"):
         _client(boom).register_task({"id": "t"})
+
+
+def test_register_task_success_that_is_not_json_is_an_api_error():
+    html = lambda r: httpx.Response(201, text="<html>ok</html>")  # noqa: E731
+    with pytest.raises(ApiError, match="check the site before retrying"):
+        _client(html).register_task({"id": "t"})

@@ -304,9 +304,9 @@ tp task register owner/repo[/path] --id <id> --title "<title>" --tag <tag> [--ta
 | `--title` | required | human-readable title |
 | `--tag` | required | a tag; repeat for more |
 | `--summary` | none | one line for the task list |
-| `--metric` | `score` | `score`, `cost`, `latency`, `pass_rate` or `none` |
+| `--metric` | `score` | `score`, `cost`, `latency`, `pass_rate` or `none`. `cost` and `latency` rank lowest first; the direction can't be changed after registering |
 | `--private` | off | register it private |
-| `--server` | stored | also `TRAPSTREET_URL` |
+| `--server` | `TRAPSTREET_URL`, else `https://trapstreet.run` | the site to register on. The stored token for that server is used, never another server's; `TRAPSTREET_API_KEY` overrides it and goes to whichever server is selected |
 
 It prints the task's URL and the commit it pinned. Registering shares the site's limit of 5
 tasks an hour per account. A task whose judge is private cannot be graded until a person

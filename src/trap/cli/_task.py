@@ -4,6 +4,7 @@ from enum import StrEnum
 from typing import Annotated
 
 import typer
+from rich.markup import escape
 
 from trap.auth import (
     DEFAULT_SERVER,
@@ -67,17 +68,21 @@ def task_register(
         "traptask_ref": ref,
         "tags": tags,
         "ranking_metric": metric.value,
+        # Sent, not left to the site: it defaults to desc, the website's form picks asc
+        # for these two, and a direction can't be edited once the task exists.
+        "ranking_direction": "asc" if metric in (RankingMetric.cost, RankingMetric.latency) else "desc",
         "visibility": "private" if private else "public",
     }
     if summary is not None:
         body["summary"] = summary
 
     try:
-        task = ApiClient(resolved.server, resolved.api_key).register_task(body)["task"]
+        task = ApiClient(resolved.server, resolved.api_key).register_task(body).get("task") or {}
     except ApiError as e:
-        raise _die(e) from None
+        # The site's words, which may hold brackets: printed, not parsed as markup.
+        raise _die(escape(str(e))) from None
 
-    url = f"{resolved.server.rstrip('/')}/tasks/{task['id']}"
+    url = f"{resolved.server.rstrip('/')}/tasks/{task.get('id', task_id)}"
     console.print(f"registered {url}", soft_wrap=True, markup=False, highlight=False)
     commit = (task.get("latest") or {}).get("commit_sha")
     if commit:
