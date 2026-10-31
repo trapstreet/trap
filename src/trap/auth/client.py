@@ -72,6 +72,18 @@ class ApiClient:
         except httpx.RequestError as e:
             raise ApiError(f"connection error: {e}") from None
 
+    def register_task(self, body: dict[str, Any]) -> dict[str, Any]:
+        # The site allows this for maintainers' tokens only; its refusal says so.
+        try:
+            resp = self._client.post("/api/tasks", json=body)
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code
+            raise ApiError(f"http {status}: {_error_detail(e.response)}", status=status) from None
+        except httpx.RequestError as e:
+            raise ApiError(f"connection error: {e}") from None
+
 
 def _error_detail(resp: httpx.Response) -> str:
     """The server's JSON {error} message when present, else the raw body text."""

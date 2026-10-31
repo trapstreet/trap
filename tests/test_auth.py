@@ -401,3 +401,36 @@ def test_the_api_client_builds_a_real_http_client(monkeypatch):
     assert str(client._client.base_url).rstrip("/") == "https://srv"
     assert client._client.headers["authorization"] == "Bearer key"
     client._client.close()
+
+
+# -- register_task ------------------------------------------------------------
+
+
+def test_register_task_posts_the_body_and_returns_the_response():
+    seen = {}
+
+    def handler(request):
+        seen["path"] = request.url.path
+        seen["auth"] = request.headers["authorization"]
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(201, json={"task": {"id": "t"}})
+
+    out = _client(handler).register_task({"id": "t"})
+    assert out["task"]["id"] == "t"
+    assert seen == {"path": "/api/tasks", "auth": "Bearer key", "body": {"id": "t"}}
+
+
+def test_register_task_refusal_carries_the_sites_reason_and_status():
+    # A maintainer-only route: the person has to see why, not a bare status.
+    refuse = lambda r: httpx.Response(403, json={"error": "limited to maintainers", "code": "FORBIDDEN"})  # noqa: E731
+    with pytest.raises(ApiError, match="http 403: limited to maintainers") as e:
+        _client(refuse).register_task({"id": "t"})
+    assert e.value.status == 403
+
+
+def test_register_task_unreachable():
+    def boom(r):
+        raise httpx.ConnectError("down")
+
+    with pytest.raises(ApiError, match="connection error"):
+        _client(boom).register_task({"id": "t"})

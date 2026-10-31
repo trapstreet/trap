@@ -22,6 +22,7 @@ from trap.auth import (
 )
 from trap.cli._auth import auth_app
 from trap.cli._console import _die, _env_truthy, console, err_console
+from trap.cli._task import task_app
 from trap.display import CaseProgress, OutputFormat, SubmitRenderer, renderer_factory
 from trap.environment import EnvironmentDetector
 from trap.git_ops import GitOpsError, LocalRepo, ParsedGitUrl
@@ -41,6 +42,7 @@ app = typer.Typer(
     help="AI prompt / agent / workflow / testing framework.", pretty_exceptions_show_locals=False
 )
 app.add_typer(auth_app, name="auth")
+app.add_typer(task_app, name="task")
 
 # Built-in solution programs (trap.shapes), run as a trap.yaml `cmd:`. Hidden: they are
 # solutions, not something a person types; docs/guides/built-in-shapes.md documents them.

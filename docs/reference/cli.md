@@ -286,6 +286,32 @@ borrowed across servers, so pointing `TRAPSTREET_URL` at a server you haven't pa
 `tp submit` report logged-out rather than send another server's credential. `tp auth status`
 reports the same resolved pair.
 
+## tp task
+
+### tp task register
+
+Register a task on trapstreet with your CLI token. **Maintainers only**: anyone else gets a
+403 and registers on the website, which is open to every signed-in user.
+
+```bash
+tp task register owner/repo[/path] --id <id> --title "<title>" --tag <tag> [--tag <tag> ...]
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `REF` | required | `owner/repo[/path]`: the task's public repository. Its default branch's HEAD is pinned as version 1 |
+| `--id` | required | the slug in `/tasks/<id>` |
+| `--title` | required | human-readable title |
+| `--tag` | required | a tag; repeat for more |
+| `--summary` | none | one line for the task list |
+| `--metric` | `score` | `score`, `cost`, `latency`, `pass_rate` or `none` |
+| `--private` | off | register it private |
+| `--server` | stored | also `TRAPSTREET_URL` |
+
+It prints the task's URL and the commit it pinned. Registering shares the site's limit of 5
+tasks an hour per account. A task whose judge is private cannot be graded until a person
+binds its grading pack at `/tasks/<id>/grading`; a token can't do that.
+
 ## tp auth
 
 ```
