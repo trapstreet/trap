@@ -144,3 +144,13 @@ def test_a_success_without_a_task_body_still_reports_the_requested_id(runner, mo
     res = runner.invoke(app, ARGS)
     assert res.exit_code == 0, res.output
     assert "https://uat.example/tasks/bird-small" in res.output
+
+
+def test_an_unreadable_credential_store_is_reported_not_raised(runner, monkeypatch, tmp_path):
+    monkeypatch.delenv("TRAPSTREET_API_KEY", raising=False)
+    store = tmp_path / "auth.json"
+    store.write_text("not json")
+    monkeypatch.setattr("trap.auth.store.CredentialStore.PATH", store)
+    res = runner.invoke(app, ARGS)
+    assert res.exit_code == 2
+    assert "error" in res.output
