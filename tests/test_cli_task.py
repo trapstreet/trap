@@ -154,3 +154,24 @@ def test_an_unreadable_credential_store_is_reported_not_raised(runner, monkeypat
     res = runner.invoke(app, ARGS)
     assert res.exit_code == 2
     assert "error" in res.output
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        [],
+        "ok",
+        None,
+        7,
+        {"task": "bird-small"},
+        {"task": []},
+        {"task": {"latest": "v1"}},
+        {"task": {"latest": {"commit_sha": 7}}},
+    ],
+)
+def test_a_success_of_any_json_shape_still_reports_the_requested_id(runner, monkeypatch, register, reply):
+    # The task exists by now: a traceback here would send an agent into a retry and a 409.
+    monkeypatch.setattr("trap.auth.ApiClient.register_task", lambda self, body: reply)
+    res = runner.invoke(app, ARGS)
+    assert res.exit_code == 0, res.output
+    assert "https://uat.example/tasks/bird-small" in res.output

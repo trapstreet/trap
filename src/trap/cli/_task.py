@@ -27,6 +27,11 @@ class RankingMetric(StrEnum):
     none = "none"
 
 
+def _field(value: object, key: str) -> object:
+    """``value[key]`` when ``value`` is an object, else None: a reply's shape is not a promise."""
+    return value.get(key) if isinstance(value, dict) else None
+
+
 @task_app.command("register")
 def task_register(
     ref: Annotated[
@@ -77,15 +82,19 @@ def task_register(
         body["summary"] = summary
 
     try:
-        task = ApiClient(resolved.server, resolved.api_key).register_task(body).get("task") or {}
+        reply = ApiClient(resolved.server, resolved.api_key).register_task(body)
     except ApiError as e:
         # The site's words, which may hold brackets: printed, not parsed as markup.
         raise _die(escape(str(e))) from None
 
-    url = f"{resolved.server.rstrip('/')}/tasks/{task.get('id', task_id)}"
+    # The task exists from here on: whatever the reply looks like, report it rather than
+    # crash, or an agent reads a traceback as failure, retries, and meets a 409.
+    task = _field(reply, "task")
+    registered = _field(task, "id")
+    url = f"{resolved.server.rstrip('/')}/tasks/{registered if isinstance(registered, str) else task_id}"
     console.print(f"registered {url}", soft_wrap=True, markup=False, highlight=False)
-    commit = (task.get("latest") or {}).get("commit_sha")
-    if commit:
+    commit = _field(_field(task, "latest"), "commit_sha")
+    if isinstance(commit, str):
         console.print(f"pinned at {commit[:12]}", markup=False, highlight=False)
     console.print(
         f"Needs a private judge? Bind its grading pack at {url}/grading",
