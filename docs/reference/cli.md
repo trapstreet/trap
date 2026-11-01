@@ -290,7 +290,7 @@ reports the same resolved pair.
 
 ### tp task register
 
-Register a task on trapstreet with your CLI token. **Maintainers only**: anyone else gets a
+Register a task on trapstreet with your CLI token. **Authorized accounts only**: anyone else gets a
 403 and registers on the website, which is open to every signed-in user.
 
 ```bash

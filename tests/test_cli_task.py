@@ -1,4 +1,4 @@
-"""`tp task register`: what a maintainer's agent sends, and what it is told back."""
+"""`tp task register`: what an authorized account's agent sends, and what it is told back."""
 
 from __future__ import annotations
 
@@ -77,12 +77,12 @@ def test_success_names_the_task_its_commit_and_the_grading_page(runner, register
 
 def test_a_refusal_shows_the_sites_reason(runner, monkeypatch, register):
     def refuse(self, body):
-        raise ApiError("http 403: limited to maintainers", status=403)
+        raise ApiError("http 403: not open to this account", status=403)
 
     monkeypatch.setattr("trap.auth.ApiClient.register_task", refuse)
     res = runner.invoke(app, ARGS)
     assert res.exit_code == 2
-    assert "limited to maintainers" in res.output
+    assert "not open to this account" in res.output
 
 
 def test_help_renders(runner):

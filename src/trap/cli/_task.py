@@ -55,7 +55,7 @@ def task_register(
         typer.Option("--server", envvar="TRAPSTREET_URL", help="Trapstreet server URL."),
     ] = None,
 ) -> None:
-    """Register a task on trapstreet with your CLI token. Maintainers only; everyone else uses the website."""
+    """Register a task on trapstreet with your CLI token. Authorized accounts only; others use the website."""
     try:
         resolved = ResolvedAuth.resolve(CredentialStore(), server)
     except CredentialStoreError as e:

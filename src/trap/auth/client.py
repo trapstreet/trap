@@ -73,7 +73,7 @@ class ApiClient:
             raise ApiError(f"connection error: {e}") from None
 
     def register_task(self, body: dict[str, Any]) -> dict[str, Any]:
-        # The site allows this for maintainers' tokens only; its refusal says so.
+        # The site allows this for authorized accounts only; its refusal says so.
         try:
             resp = self._client.post("/api/tasks", json=body)
             resp.raise_for_status()
