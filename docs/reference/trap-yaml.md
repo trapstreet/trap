@@ -43,3 +43,20 @@ automatically. Each binding:
 
 - **`source`** (required) — where the task lives, relative to `trap.yaml`: a local path **or** a git+ URL (cloned).
 - **`clone_to`** — clone target for a git+ `source` (default: hidden cache `.trap/repos/<repo>-<hash>`, keyed on repo URL + rev). Only valid for a URL.
+
+**Whether your solution runs anywhere but here.** A relative `source` is resolved against
+the `trap.yaml` directory, so `../task` means "a sibling of my checkout". That is fine on
+your machine and breaks for everyone else: clone your solution repo on its own — which is
+what anyone who finds it will do — and the path resolves to a sibling of *their* clone,
+which was never there. trap says so by name rather than reporting a missing directory, but
+it cannot fix it. If you want the repo to be runnable from a clone, point at the task by
+URL:
+
+```yaml
+tasks:
+  t:
+    source: git+https://github.com/owner/task-repo   # travels with the solution
+```
+
+A relative source stays right for a task you keep beside the solution and never expect
+anyone else to run — a monorepo with both sides in it, or a task that isn't published.
