@@ -19,7 +19,17 @@ so the tests can check none of them escapes the shape as a traceback.
 
 ``surrogate`` answers with a message that carries a lone UTF-16 surrogate (what
 ``json.loads`` turns a JSON escape like ``"\\ud800"`` into) — the same character a real
-agent's JSON-RPC reply can carry, and stdout cannot print outright."""
+agent's JSON-RPC reply can carry, and stdout cannot print outright.
+
+Every mode's ``initialize`` reply carries ``agentInfo`` (name@version), and
+``config_options`` drops the ``effort`` option once the model is ``haiku`` — both to
+match the real claude-agent-acp, so the solution card's ``agent``/``options`` fields and
+the "skip, don't fail" behaviour in trap.shapes.acp.session have something real to
+test against. ``haiku_default`` starts the agent already on ``haiku`` (so ``effort`` is
+already missing from ``session/new``'s own ``configOptions``, before trap ever asks for
+a model) — for the one case that check must not get backwards: an option a *later*,
+different ``--model`` does offer, checked against the option list as it stood before
+that model was set."""
 
 from __future__ import annotations
 
@@ -33,7 +43,10 @@ from pathlib import Path
 
 MODE = os.environ.get("FAKE_ACP_MODE", "ok")
 LOG = os.environ.get("FAKE_ACP_LOG")
-STATE = {"model": "default", "effort": "default"}
+# "haiku_default": the agent's *own* starting model already lacks "effort" (the way a
+# real agent defaulting to haiku would) -- for the one case that matters for the
+# pre-model-change option list: a later --model that *does* offer the option.
+STATE = {"model": "haiku" if MODE == "haiku_default" else "default", "effort": "default"}
 USAGE = {"inputTokens": 10, "outputTokens": 3, "totalTokens": 13}
 PENDING: dict[str, object] = {}
 
@@ -109,10 +122,13 @@ def config_options() -> list[dict]:
             "options": [{"value": v, "name": v} for v in values],
         }
 
-    return [
-        select("model", "model", ["default", "sonnet", "haiku"]),
-        select("effort", "thought_level", ["default", "low", "high"]),
-    ]
+    options = [select("model", "model", ["default", "sonnet", "haiku"])]
+    if STATE["model"] != "haiku":
+        # The real claude-acp drops "effort" once the model is haiku -- a model switch
+        # can retire an option, which is what trap.shapes.acp.session.apply_config's
+        # "skip, don't fail" behaviour is for. sonnet (and the unset default) keep it.
+        options.append(select("effort", "thought_level", ["default", "low", "high"]))
+    return options
 
 
 def permission_prompt(rid: object, sid: str, options: list[dict]) -> None:
@@ -124,7 +140,7 @@ def permission_prompt(rid: object, sid: str, options: list[dict]) -> None:
 
 
 def prompt(rid: object, sid: str) -> None:
-    if MODE in ("ok", "garbage", "stray", "junk_config"):
+    if MODE in ("ok", "garbage", "stray", "junk_config", "haiku_default"):
         say(sid, "Let me read the file first.", "m1")
         tool(sid, "Read question.txt")
         say(sid, "4", "m2")
@@ -239,7 +255,15 @@ def main() -> None:
             send({"jsonrpc": "2.0", "id": "no-such-id", "result": {}})  # nobody is waiting on this id
             send({"jsonrpc": "2.0", "method": "session/other", "params": {}})  # a notification we ignore
         if method == "initialize":
-            result(rid, {"protocolVersion": 1, "agentCapabilities": {}, "authMethods": []})
+            result(
+                rid,
+                {
+                    "protocolVersion": 1,
+                    "agentCapabilities": {},
+                    "authMethods": [],
+                    "agentInfo": {"name": "fake-acp", "version": "1.0.0"},
+                },
+            )
         elif method == "session/new":
             if MODE == "hang_handshake":
                 pass  # never respond; the caller must hit its own deadline

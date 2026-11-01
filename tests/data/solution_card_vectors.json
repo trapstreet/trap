@@ -1,0 +1,57 @@
+{
+  "note": "Shared with trapstreet-web (W2). Both sides must reproduce canonical_json and digest exactly. See docs/reference/solution-card.md.",
+  "vectors": [
+    {
+      "id": "acp-minimal",
+      "card": {
+        "shape": "acp",
+        "shape_version": 1,
+        "agent": "@agentclientprotocol/claude-agent-acp@0.76.0",
+        "model": "sonnet"
+      },
+      "canonical_json": "{\"agent\":\"@agentclientprotocol/claude-agent-acp@0.76.0\",\"model\":\"sonnet\",\"shape\":\"acp\",\"shape_version\":1}",
+      "digest": "f7d3d713161b9956437730bcb3dab2b9972d57d5269d4d5c8d90e5764b44e0cc"
+    },
+    {
+      "id": "acp-with-options-and-skill",
+      "card": {
+        "shape": "acp",
+        "shape_version": 1,
+        "agent": "@agentclientprotocol/claude-agent-acp@0.76.0",
+        "model": "haiku",
+        "options": {
+          "mode": "acceptEdits"
+        },
+        "skill": "https://github.com/a/b@0123456789abcdef0123456789abcdef01234567",
+        "timeout": 570.0,
+        "name": "b on haiku"
+      },
+      "canonical_json": "{\"agent\":\"@agentclientprotocol/claude-agent-acp@0.76.0\",\"model\":\"haiku\",\"options\":{\"mode\":\"acceptEdits\"},\"shape\":\"acp\",\"shape_version\":1,\"skill\":\"https://github.com/a/b@0123456789abcdef0123456789abcdef01234567\",\"timeout\":570}",
+      "digest": "7ec2535fd6a15d211f1b6820a7edad64658311da2552bc12febf1a444c0e433a"
+    },
+    {
+      "id": "model-direct",
+      "card": {
+        "shape": "model",
+        "shape_version": 1,
+        "provider": "anthropic",
+        "model": "claude-sonnet-5",
+        "timeout": 570.0
+      },
+      "canonical_json": "{\"model\":\"claude-sonnet-5\",\"provider\":\"anthropic\",\"shape\":\"model\",\"shape_version\":1,\"timeout\":570}",
+      "digest": "46c1bb1251e63906313c1dfaad1fcbdd99dcbb994a5a77cfbeb08ee4ed7056d0"
+    },
+    {
+      "id": "cmd-with-setup-and-unicode",
+      "card": {
+        "shape": "cmd",
+        "shape_version": 1,
+        "cmd": "python {repo}/main.py --question {prompt}",
+        "setup": "uv sync",
+        "timeout": 570.0
+      },
+      "canonical_json": "{\"cmd\":\"python {repo}/main.py --question {prompt}\",\"setup\":\"uv sync\",\"shape\":\"cmd\",\"shape_version\":1,\"timeout\":570}",
+      "digest": "25bcc8aae5aa98e5ce85827db0fde32bc36cb426e62026eb56f19ebe00ccec3b"
+    }
+  ]
+}
