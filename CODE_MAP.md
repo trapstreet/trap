@@ -40,6 +40,7 @@ graph TD
     cli --> models
     cli --> shapes
     shapes --> cost
+    shapes --> models
     live --> auth
     live --> models
     loader --> errors
@@ -65,7 +66,7 @@ graph TD
 | Package | Owns | Key types |
 |---|---|---|
 | `cli` | Typer entry point + commands; orchestrates a run | `run` / `report` / `submit` |
-| `models` | All pydantic data (config + wire format); the shared layer | `TrapConfig`, `TaskBinding`, `TraptaskConfig`, `ReportData`, `Profile`, `Provenance`, `Environment`, `CaseResult`, `CaseCost` |
+| `models` | All pydantic data (config + wire format); the shared layer | `TrapConfig`, `TaskBinding`, `TraptaskConfig`, `ReportData`, `Profile`, `Provenance`, `Environment`, `CaseResult`, `CaseCost`, `SolutionCard` |
 | `errors` | Exception types more than one package raises; a leaf module that imports nothing internal | `ConfigError` |
 | `loader` | Parse trap.yaml / traptask.yaml; clone + setup; discover cases | `TrapLoader`, `TraptaskLoader` |
 | `runner` | Execute the solution subprocess per case; run judge/grader; refuse (in `leaks`) a task that could hand a solution the answers | `TaskRunner`, `refuse_answer_leaks` |

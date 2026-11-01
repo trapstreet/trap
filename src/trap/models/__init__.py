@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .card import SolutionCard
 from .cost import CaseCost, ModelCost
 from .diagnosis import Diagnosis
 from .environment import Cpu, Environment
@@ -30,6 +31,7 @@ __all__ = [
     "Profile",
     "Provenance",
     "ReportData",
+    "SolutionCard",
     "SubprocessConfig",
     "TaskBinding",
     "TrapConfig",

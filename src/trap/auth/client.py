@@ -59,6 +59,40 @@ class ApiClient:
         identifier = user.get("id")
         return identifier if isinstance(identifier, str) else None
 
+    def capabilities(self) -> dict[str, Any]:
+        """What this server supports (``GET /api/v2/capabilities``), sent with **no**
+        credentials — this probe can run before the user has agreed to submit anything
+        (to inform the confirmation itself), so it must not identify them to the server
+        first. Built explicitly via ``build_request``/``send`` rather than the shorter
+        ``self._client.get(...)``, so a future refactor back onto that shortcut fails a
+        test (below) instead of silently re-attaching ``self._client``'s default
+        ``authorization`` header. ``Headers.pop(..., None)`` rather than ``del``: ``del``
+        raises ``KeyError`` when the header isn't there (checked directly against this
+        codebase's httpx) — defensive here even though every request built from
+        ``self._client`` carries that default header today.
+
+        A server that does not answer — offline, older, or a network hiccup — is read
+        as "supports nothing new": the caller then takes the conservative branch rather
+        than guessing. ``httpx.HTTPError`` covers both a failed request and a non-2xx
+        status (``raise_for_status``); ``ValueError`` covers a body that is not valid
+        JSON (``.json()`` raises ``json.JSONDecodeError``, a ``ValueError`` subclass).
+
+        A short 5s timeout, not this client's 30s default (as ``get_me`` also overrides
+        to 10s): this probe now runs *before* the pre-submit confirmation prints, so an
+        unresponsive or blackholing server must not leave the user waiting half a minute
+        before they can even decline. A timeout is caught by ``httpx.HTTPError`` like
+        any other failed request, landing on the same "supports nothing new" branch —
+        already the safe answer, so cutting the wait short costs nothing."""
+        try:
+            request = self._client.build_request("GET", "/api/v2/capabilities", timeout=5)
+            request.headers.pop("authorization", None)
+            response = self._client.send(request)
+            response.raise_for_status()
+            body = response.json()
+        except (httpx.HTTPError, ValueError):
+            return {}
+        return body if isinstance(body, dict) else {}
+
     def submit(self, report_path: Path) -> dict[str, Any]:
         # Content-addressed ingest: the task identity travels inside the report
         # (provenance.task.{repo,commit,subdirectory}), not the URL — so no task_id

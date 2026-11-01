@@ -307,7 +307,9 @@ def test_main_reports_a_program_it_cannot_execute_as_a_config_error(tmp_path, mo
     code = main(["--template", f"{program} {{prompt}}", "--deadline", "30"])
     assert code == ShapeExit.CONFIG_ERROR
     err = capsys.readouterr().err
-    assert err.startswith("[trap] cannot start") and "not-executable" in err
+    # the card is printed once the template is expanded, before the command actually
+    # starts, so the "cannot start" line follows it rather than opening the output.
+    assert "[trap] cannot start" in err and "not-executable" in err
 
 
 def test_a_program_killed_by_a_signal_exits_128_plus_the_signal(tmp_path, monkeypatch, capsys):
@@ -402,3 +404,206 @@ def test_main_reports_a_bad_template_as_a_config_error_in_process(tmp_path, monk
     code = main(["--template", "", "--deadline", "30"])
     assert code == ShapeExit.CONFIG_ERROR
     assert "the command template is empty" in capsys.readouterr().err
+
+
+# --- --setup: a one-off install command, run once in --repo before the case's own -------
+
+
+def test_main_runs_setup_once_in_repo_before_the_command(tmp_path, monkeypatch, capsys):
+    case = _case_dir(tmp_path, {"question.txt": "hi"})
+    _set_manifest(monkeypatch, case)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "tool.py").write_text(TOOL)
+    code = main(
+        [
+            "--template",
+            f"{PY} {{repo}}/tool.py file {{repo}}/installed.txt",
+            "--repo",
+            str(repo),
+            "--setup",
+            "sh -c 'echo yes > installed.txt'",
+            "--deadline",
+            "30",
+        ]
+    )
+    assert code == 0
+    assert capsys.readouterr().out.strip() == "FILE:yes"
+
+
+def test_the_card_includes_the_setup_command(tmp_path, monkeypatch, capsys):
+    from tests.test_card_in_run import card_from_stderr
+
+    case = _case_dir(tmp_path, {"question.txt": "hi"})
+    _set_manifest(monkeypatch, case)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    code = main(
+        [
+            "--template",
+            "echo {prompt}",
+            "--repo",
+            str(repo),
+            "--setup",
+            "sh -c 'true'",
+            "--deadline",
+            "30",
+        ]
+    )
+    assert code == 0
+    card = card_from_stderr(capsys.readouterr().err)
+    assert card.setup == "sh -c 'true'"
+
+
+def test_setup_requires_repo(tmp_path, monkeypatch, capsys):
+    case = _case_dir(tmp_path, {"question.txt": "hi"})
+    _set_manifest(monkeypatch, case)
+    code = main(["--template", "echo {prompt}", "--setup", "echo hi", "--deadline", "30"])
+    assert code == ShapeExit.CONFIG_ERROR
+    assert "--setup requires --repo" in capsys.readouterr().err
+
+
+def test_an_unparseable_setup_is_a_config_error(tmp_path, monkeypatch, capsys):
+    case = _case_dir(tmp_path, {"question.txt": "hi"})
+    _set_manifest(monkeypatch, case)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    code = main(
+        ["--template", "echo {prompt}", "--repo", str(repo), "--setup", "tool 'unclosed", "--deadline", "30"]
+    )
+    assert code == ShapeExit.CONFIG_ERROR
+    assert "cannot parse --setup" in capsys.readouterr().err
+
+
+def test_a_whitespace_only_setup_is_a_config_error(tmp_path, monkeypatch, capsys):
+    case = _case_dir(tmp_path, {"question.txt": "hi"})
+    _set_manifest(monkeypatch, case)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    code = main(["--template", "echo {prompt}", "--repo", str(repo), "--setup", "   ", "--deadline", "30"])
+    assert code == ShapeExit.CONFIG_ERROR
+    assert "--setup is empty" in capsys.readouterr().err
+
+
+def test_a_missing_setup_program_is_a_config_error(tmp_path, monkeypatch, capsys):
+    case = _case_dir(tmp_path, {"question.txt": "hi"})
+    _set_manifest(monkeypatch, case)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    code = main(
+        [
+            "--template",
+            "echo {prompt}",
+            "--repo",
+            str(repo),
+            "--setup",
+            "no-such-setup-program-xyz",
+            "--deadline",
+            "30",
+        ]
+    )
+    assert code == ShapeExit.CONFIG_ERROR
+    assert "--setup command not found: no-such-setup-program-xyz" in capsys.readouterr().err
+
+
+def test_a_non_executable_setup_program_is_a_config_error(tmp_path, monkeypatch, capsys):
+    case = _case_dir(tmp_path, {"question.txt": "hi"})
+    _set_manifest(monkeypatch, case)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    program = repo / "not-executable"
+    program.write_text("#!/bin/sh\necho hi\n")
+    program.chmod(0o644)
+    code = main(
+        ["--template", "echo {prompt}", "--repo", str(repo), "--setup", str(program), "--deadline", "30"]
+    )
+    assert code == ShapeExit.CONFIG_ERROR
+    err = capsys.readouterr().err
+    assert "cannot start --setup" in err and "not-executable" in err
+
+
+def test_a_setup_that_exits_non_zero_is_a_config_error_and_the_command_never_runs(
+    tmp_path, monkeypatch, capsys
+):
+    case = _case_dir(tmp_path, {"question.txt": "hi"})
+    _set_manifest(monkeypatch, case)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    code = main(
+        [
+            "--template",
+            "echo ran",
+            "--repo",
+            str(repo),
+            "--setup",
+            "sh -c 'echo setup-failed; exit 7'",
+            "--deadline",
+            "30",
+        ]
+    )
+    assert code == ShapeExit.CONFIG_ERROR
+    captured = capsys.readouterr()
+    assert "--setup exited 7" in captured.err and "setup-failed" in captured.err
+    assert "ran" not in captured.out
+
+
+def test_a_setup_that_hits_the_deadline_exits_124_not_24(tmp_path, monkeypatch, capsys):
+    # run_group does not raise on a timeout -- it kills the group and returns
+    # ShapeExit.TIMEOUT (124) as the code, same as the case's own command hitting the
+    # deadline. That must reach main() as 124, not fall into the generic non-zero-exit
+    # branch and come out as a config error (24).
+    case = _case_dir(tmp_path, {"question.txt": "hi"})
+    _set_manifest(monkeypatch, case)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    code = main(
+        [
+            "--template",
+            "echo ran",
+            "--repo",
+            str(repo),
+            "--setup",
+            "sleep 5",
+            "--deadline",
+            "0.3",
+        ]
+    )
+    assert code == ShapeExit.TIMEOUT
+    captured = capsys.readouterr()
+    assert "reached the deadline" in captured.err
+    assert "ran" not in captured.out
+
+
+# --- a lone surrogate in an argv-sourced card field must not cost the case its answer --
+
+
+def test_a_lone_surrogate_in_the_template_does_not_crash_the_card_or_lose_the_answer(
+    tmp_path, monkeypatch, capsys
+):
+    from tests.test_card_in_run import card_from_stderr
+
+    # An extra argument no shell script written as "echo ok" ever reads: this reaches
+    # `args.template`, and hence the card's `cmd` field, without changing what actually
+    # runs or prints. The character itself is exactly what sys.argv's own
+    # surrogateescape decoding would hand back for a non-UTF-8 byte in a real --template.
+    case = _case_dir(tmp_path, {"question.txt": "hi"})
+    _set_manifest(monkeypatch, case)
+    code = main(["--template", "sh -c 'echo ok' extra\udcff", "--deadline", "20"])
+    assert code == 0
+    captured = capsys.readouterr()
+    assert captured.out == "ok\n"
+    card = card_from_stderr(captured.err)
+    assert card.cmd == "sh -c 'echo ok' extra?"  # encode(..., "replace") uses "?", not U+FFFD
+
+
+def test_the_cards_timeout_is_an_integer_rounded_from_a_fractional_deadline(tmp_path, monkeypatch, capsys):
+    from tests.test_card_in_run import card_from_stderr
+
+    case = _case_dir(tmp_path, {"question.txt": "hi"})
+    _set_manifest(monkeypatch, case)
+    code = main(["--template", "echo {prompt}", "--deadline", "30.6"])
+    assert code == 0
+    card = card_from_stderr(capsys.readouterr().err)
+    assert type(card.timeout) is int  # not merely == 31 -- a float there breaks the
+    # cross-language digest (see docs/reference/solution-card.md)
+    assert card.timeout == 31

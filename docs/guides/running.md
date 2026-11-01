@@ -43,9 +43,13 @@ not enter a leaderboard, and does not make the run visible to anyone else. Publi
 still `tp submit`, and still only when you ask for it.
 
 What crosses the wire is a fixed list of progress facts — case *ordinals* (`3 of 12`), a
-pass / fail / error verdict, scores, durations, cost, and the run's exit code. Case names,
-inputs, expected answers, your solution's output, stdout, file paths, environment variables
-and command lines never do.
+pass / fail / error verdict, scores, durations, cost, and the run's exit code — plus, once
+the run has finished, the *labels* of its solution card when the solution is one of tp's
+built-in shapes: the run's name, the options that took effect, and, for an ACP run, the
+skill it installed. Case names, inputs, expected answers, your solution's output, stdout,
+file paths, the value behind an environment variable, and the card's own command template
+never cross this way; see [Privacy and grading](privacy-and-grading.md#the-solution-card)
+for exactly what does and when.
 
 Sync is off when there is no stored token — an unpaired CLI runs exactly as before and says
 nothing about it. Turn it off explicitly with `--no-live`, or for every run in a shell with
@@ -79,11 +83,15 @@ heartbeat so a long case reads as "still running" on the site rather than as los
 when it opens and once when it ends, so the run page can say what it was made of: tp as the
 launcher (and the agent that launched tp, if it names itself with `TRAP_AGENT`), the model
 and framework `trap.yaml` declares, the machine (the same OS / CPU / RAM / Python block as
-`report.json`), the solution's and task's commits, and at the end how long the solver took
-and what the cost proxy counted per model. Skills and tools are reported as *unsupported* —
-tp does not see inside the solver — and `--no-environment` / `--no-cost` report their part
-as *disabled*. A part tp did not report is shown as **not reported, never as zero**. None of
-it names a case, and none of it is part of a score. See [the reference](../reference/cli.md#tp-run).
+`report.json`), the solution's and task's commits, and at the end how long the solver took,
+what the cost proxy counted per model, and — for a solution driven by a built-in
+[shape](built-in-shapes.md) — the name and applied options its [solution
+card](../reference/solution-card.md) states. Tools are always reported as *unsupported* —
+tp does not see inside the solver — and skills are too, unless a card says otherwise: an
+ACP run's card names the skill it installed, or that it installed none.
+`--no-environment` / `--no-cost` report their part as *disabled*. A part tp did not report
+is shown as **not reported, never as zero**. None of it names a case, and none of it is
+part of a score. See [the reference](../reference/cli.md#tp-run).
 
 **Whose run it is.** `tp auth login` verifies the token with the server and stores the
 account it belongs to; every run freezes that account into its sidecar before the first
